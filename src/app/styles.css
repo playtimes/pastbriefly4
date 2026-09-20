@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/* PastBriefly product theme: dark historical ground, warm cream type, one
+   restrained accent. The same DNA as the films. */
+@theme {
+  /* Warm near-black ground, cream editorial type, one PB2 red accent. */
+  --color-bg: #0e0a09;
+  --color-sidebar: #0b0807;
+  --color-panel: #14100e;
+  --color-field: #17110f;
+  --color-ink: #f4ecdf;
+  --color-muted: #a89e92;
+  --color-faint: #968b7e;
+  --color-dim: #7c7266;
+  --color-line: rgba(245, 235, 222, 0.09);
+  /* PB2 red — used sparingly for active nav, primary buttons, focus and small
+     highlights. The warm near-black ground and cream type carry the rest. */
+  --color-accent: #e50914;
+  --color-accent-hover: #f5121d;
+  --color-on-accent: #ffffff;
+  --font-serif: "Instrument Serif", Georgia, "Times New Roman", serif;
+  --font-sans: "Hanken Grotesk", "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background-color: var(--color-bg);
+    color: #f3ebde;
+    font-family: var(--font-sans);
+    font-weight: 300;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-serif);
+    /* Instrument Serif ships a single (400) weight; bold would be synthesized. */
+    font-weight: 400;
+  }
+  ::selection {
+    background: rgba(229, 9, 20, 0.3);
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(169, 162, 153, 0.25);
+    border-radius: 999px;
+  }
+}
+
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    border-radius: 0.6rem;
+    padding: 0.7rem 1.2rem;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    border: 1px solid transparent;
+  }
+  .btn-primary {
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-ghost {
+    color: var(--color-ink);
+    border-color: var(--color-line);
+    background: rgba(242, 239, 233, 0.03);
+  }
+  .btn-ghost:hover {
+    border-color: rgba(242, 239, 233, 0.28);
+    background: rgba(242, 239, 233, 0.07);
+  }
+  .surface {
+    background: var(--color-panel);
+    border: 1px solid var(--color-line);
+    border-radius: 0.9rem;
+  }
+  .kicker {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    /* Quiet, editorial label — red is reserved for genuine highlights, so the
+       many category kickers stay muted rather than turning the UI red. */
+    color: var(--color-muted);
+  }
+}

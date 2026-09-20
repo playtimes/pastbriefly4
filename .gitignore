@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+media/stories/
+design-handoff/
+*.log
+.env
+.DS_Store
