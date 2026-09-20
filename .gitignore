@@ -2,7 +2,7 @@ node_modules/
 dist/
 data/
 media/stories/
-design-handoff/
+design_handoff/
 *.log
 .env
 .DS_Store
