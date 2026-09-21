@@ -13,7 +13,7 @@
   --color-faint: #968b7e;
   --color-dim: #7c7266;
   --color-line: rgba(245, 235, 222, 0.09);
-  /* PB2 red — used sparingly for active nav, primary buttons, focus and small
+  /* PB2 red - used sparingly for active nav, primary buttons, focus and small
      highlights. The warm near-black ground and cream type carry the rest. */
   --color-accent: #e50914;
   --color-accent-hover: #f5121d;
@@ -99,7 +99,7 @@
     font-weight: 700;
     letter-spacing: 0.18em;
     text-transform: uppercase;
-    /* Quiet, editorial label — red is reserved for genuine highlights, so the
+    /* Quiet, editorial label - red is reserved for genuine highlights, so the
        many category kickers stay muted rather than turning the UI red. */
     color: var(--color-muted);
   }

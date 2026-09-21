@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { assertPublicUrl } from "../server/security.ts";
 
-// A small Wikimedia Commons archive helper — the one automatic archive source
+// A small Wikimedia Commons archive helper - the one automatic archive source
 // for v1. Only licences that are explicitly usable for commercial production
 // are accepted; unclear rights are never used automatically.
 

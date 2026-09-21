@@ -13,20 +13,20 @@ export const paulBunyanStory: Omit<Story, "createdAt"> = {
   year: "1976",
   place: "Korean DMZ",
   summary:
-    "In August 1976, a poplar tree in the Korean Demilitarized Zone blocked a United Nations Command sight line. A routine work detail to prune it ended in the axe killings of two American officers. Three days later the United States answered — not with a strike, but with the most heavily armed gardening operation in history.",
+    "In August 1976, a poplar tree in the Korean Demilitarized Zone blocked a United Nations Command sight line. A routine work detail to prune it ended in the axe killings of two American officers. Three days later the United States answered - not with a strike, but with the most heavily armed gardening operation in history.",
   heroImage: "stories/paul-bunyan/images/hero.png",
   moments: [
     { title: "A tree in the way", detail: "A tall poplar in the Joint Security Area blocked the line of sight between a UN checkpoint and an observation post." },
     { title: "The work detail", detail: "On 18 August 1976, US and South Korean soldiers went to trim the tree. North Korean guards ordered them to stop." },
     { title: "The axe attack", detail: "The North Korean soldiers seized the work party's axes and killed Captain Arthur Bonifas and Lieutenant Mark Barrett." },
-    { title: "Overwhelming answer", detail: "Rather than retaliate, the US planned to simply cut the tree down — behind a wall of overwhelming force." },
+    { title: "Overwhelming answer", detail: "Rather than retaliate, the US planned to simply cut the tree down - behind a wall of overwhelming force." },
     { title: "Forty-two minutes", detail: "On 21 August, engineers felled the tree in about 42 minutes while bombers, fighters and a carrier stood by. No shot was fired." },
     { title: "The stump", detail: "North Korea backed down and expressed regret. The stump was left standing, and the camp was renamed for Captain Bonifas." },
   ],
   sources: [
-    { title: "Korean axe murder incident — Wikipedia", url: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident", note: "Overview of the 18 August 1976 killings and Operation Paul Bunyan." },
-    { title: "Joint Security Area — Wikipedia", url: "https://en.wikipedia.org/wiki/Joint_Security_Area", note: "Geography of Panmunjom and the JSA where the incident took place." },
-    { title: "Camp Bonifas — Wikipedia", url: "https://en.wikipedia.org/wiki/Camp_Bonifas", note: "The base renamed after Captain Arthur Bonifas." },
+    { title: "Korean axe murder incident - Wikipedia", url: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident", note: "Overview of the 18 August 1976 killings and Operation Paul Bunyan." },
+    { title: "Joint Security Area - Wikipedia", url: "https://en.wikipedia.org/wiki/Joint_Security_Area", note: "Geography of Panmunjom and the JSA where the incident took place." },
+    { title: "Camp Bonifas - Wikipedia", url: "https://en.wikipedia.org/wiki/Camp_Bonifas", note: "The base renamed after Captain Arthur Bonifas." },
   ],
   productionNote:
     "Reconstructions should feel like sober military history, not spectacle. Authentic archive of Panmunjom and the JSA is preferred where licensing allows; a live run should add institutional sources (US Army, DoD) beyond these overviews.",
@@ -78,7 +78,7 @@ Operation Paul Bunyan is remembered because it is almost absurd. A nuclear-capab
 
 // Short narration (~55 seconds).
 const short = `
-In 1976, the most dangerous object in the Korean Demilitarized Zone was a tree. A single poplar had grown across the line of sight between two United Nations Command posts, so soldiers were sent to trim it. North Korean guards ordered them to stop. When they didn't, the guards seized the work party's own axes and killed two American officers. Now the United States had a choice. Retaliate, and risk a second Korean War. Or back down. Instead they picked a third option. Three days later, they came back to cut the tree down — escorted by attack helicopters, B-52 bombers from Guam, fighter jets, and an aircraft carrier off the coast. Twenty men with chainsaws felled the tree in forty-two minutes. North Korea didn't fire a shot. It was the most heavily armed gardening operation in history, and it worked.
+In 1976, the most dangerous object in the Korean Demilitarized Zone was a tree. A single poplar had grown across the line of sight between two United Nations Command posts, so soldiers were sent to trim it. North Korean guards ordered them to stop. When they didn't, the guards seized the work party's own axes and killed two American officers. Now the United States had a choice. Retaliate, and risk a second Korean War. Or back down. Instead they picked a third option. Three days later, they came back to cut the tree down - escorted by attack helicopters, B-52 bombers from Guam, fighter jets, and an aircraft carrier off the coast. Twenty men with chainsaws felled the tree in forty-two minutes. North Korea didn't fire a shot. It was the most heavily armed gardening operation in history, and it worked.
 `.trim();
 
 export const paulBunyanResearch: ResearchPackage = {

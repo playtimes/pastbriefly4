@@ -1,6 +1,6 @@
 # PastBriefly visual references (internal)
 
-INTERNAL style references for image generation — the PastBriefly world a new
+INTERNAL style references for image generation - the PastBriefly world a new
 story's reconstruction should feel related to. They are never shown to the viewer.
 
 ## Source
@@ -13,16 +13,16 @@ actual `src/styles/*` and `src/components/card/*`, not just re-derived from a sp
 
 ## Selected frames (chosen to be distinct, not near-duplicates)
 
-- **vasa-listing.png** — the warship heeling as it floods. Water, sky and a single
+- **vasa-listing.png** - the warship heeling as it floods. Water, sky and a single
   large subject: PB1's restrained palette and strong subject separation at their
   clearest. A "ship / open air" reference.
-- **molasses-wave.png** — the Boston flood surge. A disaster in motion with heavy,
+- **molasses-wave.png** - the Boston flood surge. A disaster in motion with heavy,
   physical material (not glossy) and warm brown-on-grime tones. A "catastrophe /
   material weight" reference.
-- **tambora-summer-snow.png** — the year without a summer. Cold, muted, atmospheric
-  light and a quiet landscape — the opposite mood to the flood, so the set spans
+- **tambora-summer-snow.png** - the year without a summer. Cold, muted, atmospheric
+  light and a quiet landscape - the opposite mood to the flood, so the set spans
   PB1's range. An "atmosphere / muted daylight" reference.
-- **mincemeat-identity.png** — the espionage deception close-up. Documents and a
+- **mincemeat-identity.png** - the espionage deception close-up. Documents and a
   contained, low-key interior: PB1's evidence/reconstruction look. An "interior /
   close subject / paperwork" reference.
 

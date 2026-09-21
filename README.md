@@ -21,10 +21,10 @@ For a real run, copy `.env.example` to `.env`, add provider keys, and set
 
 ## The four screens
 
-1. **Stories** — browse featured stories, categories, search, Find stories, Surprise me.
-2. **Story** — hero, hook, summary, moments, sources, then **Generate Short + Long** (or **Watch**).
-3. **Creating** — human-facing progress, plus one **Visual direction** review before spending on motion.
-4. **Videos** — watch the Long and Short, download, sources, previous version.
+1. **Stories** - browse featured stories, categories, search, Find stories, Surprise me.
+2. **Story** - hero, hook, summary, moments, sources, then **Generate Short + Long** (or **Watch**).
+3. **Creating** - human-facing progress, plus one **Visual direction** review before spending on motion.
+4. **Videos** - watch the Long and Short, download, sources, previous version.
 
 ## Commands
 

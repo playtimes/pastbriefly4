@@ -41,7 +41,7 @@ function loadMode(): ProviderMode | undefined {
       if (m === "mock" || m === "live") return m;
     }
   } catch {
-    /* malformed mode file — fall back to env */
+    /* malformed mode file - fall back to env */
   }
   return undefined;
 }
@@ -61,7 +61,7 @@ function loadSaved(): SavedSettings {
   try {
     if (existsSync(SETTINGS_PATH)) return JSON.parse(readFileSync(SETTINGS_PATH, "utf8")) as SavedSettings;
   } catch {
-    /* malformed settings file — fall back to env */
+    /* malformed settings file - fall back to env */
   }
   return {};
 }
@@ -129,7 +129,7 @@ export function setMode(mode: ProviderMode): void {
     mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(MODE_PATH, JSON.stringify({ mode }, null, 2), "utf8");
   } catch {
-    /* couldn't persist — the runtime change still applies for this session */
+    /* couldn't persist - the runtime change still applies for this session */
   }
 }
 
@@ -190,7 +190,7 @@ export function saveSettings(input: SettingsInput): void {
     mkdirSync(DATA_DIR, { recursive: true });
     writeFileSync(SETTINGS_PATH, JSON.stringify(next, null, 2), "utf8");
   } catch {
-    /* couldn't persist — the runtime change still applies for this session */
+    /* couldn't persist - the runtime change still applies for this session */
   }
 
   if (next.openaiApiKey) config.openai.apiKey = next.openaiApiKey;

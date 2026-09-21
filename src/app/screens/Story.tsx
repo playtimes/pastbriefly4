@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, type StoryDetail } from "../api.ts";
 import { navigate } from "../App.tsx";
+import { FailedJobDetails } from "../failedJob.tsx";
 
 export function Story({ slug }: { slug: string }): React.ReactElement {
   const [detail, setDetail] = useState<StoryDetail | null>(null);
@@ -8,16 +9,68 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
   const [showCost, setShowCost] = useState(false);
   const [mode, setMode] = useState("mock");
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const [recheckMsg, setRecheckMsg] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [savingBusy, setSavingBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
-    api.story(slug).then(setDetail).catch((e) => setError(e.message));
+    api.story(slug).then((d) => {
+      setDetail(d);
+      setSaved(!!d.story.saved);
+    }).catch((e) => setError(e.message));
     api.config().then((c) => setMode(c.mode));
   }, [slug]);
+
+  async function toggleSaved(storyId: string): Promise<void> {
+    const next = !saved;
+    setSavingBusy(true);
+    setSaved(next); // optimistic
+    try {
+      await api.setSaved(storyId, next);
+    } catch {
+      setSaved(!next); // revert on failure
+    } finally {
+      setSavingBusy(false);
+    }
+  }
+
+  async function recheck(storyId: string): Promise<void> {
+    setRechecking(true);
+    setRecheckMsg("");
+    try {
+      const r = await api.recheck(storyId);
+      if (r.verdict === "rewrite") {
+        setDetail(await api.story(slug));
+        setRecheckMsg("Corrected with more defensible facts.");
+      } else if (r.verdict === "supported") {
+        setRecheckMsg("Checked - the story holds up.");
+      } else {
+        setRecheckMsg(r.reason || "This story could not be verified.");
+      }
+    } catch (e: any) {
+      setRecheckMsg(e.message || "Recheck failed.");
+    } finally {
+      setRechecking(false);
+    }
+  }
+
+  async function retry(jobId: string): Promise<void> {
+    setRetrying(true);
+    try {
+      await api.retry(jobId);
+      navigate(`/story/${slug}/creating`);
+    } catch (e: any) {
+      setError(e.message);
+      setRetrying(false);
+    }
+  }
 
   if (error) return <Back message={error} />;
   if (!detail) return <p className="text-muted">Loading…</p>;
 
-  const { story, videos, activeJob } = detail;
+  const { story, videos, activeJob, failedJob } = detail;
   const busy = activeJob && activeJob.state !== "done" && activeJob.state !== "failed";
   const hasFilms = videos.length >= 2;
   const paragraphs = story.summary.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
@@ -94,6 +147,18 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
               >
                 Generation in progress →
               </button>
+            ) : failedJob ? (
+              <div className="mt-4 flex flex-col gap-4">
+                <p className="text-[14px] font-semibold text-red-400">Last generation failed</p>
+                <FailedJobDetails job={failedJob} />
+                <button
+                  onClick={() => retry(failedJob.id)}
+                  disabled={retrying}
+                  className="h-[54px] w-full rounded-full bg-accent text-[15px] font-semibold text-white shadow-[0_8px_24px_rgba(229,9,20,0.3)] transition hover:bg-accent-hover hover:shadow-[0_10px_30px_rgba(229,9,20,0.42)] disabled:opacity-60"
+                >
+                  {retrying ? "Retrying…" : "Retry"}
+                </button>
+              </div>
             ) : hasFilms ? (
               <>
                 <button
@@ -129,6 +194,35 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
               <p className="mt-3 text-[14px] leading-[1.6] text-muted [text-wrap:pretty]">{story.productionNote}</p>
             </div>
           )}
+
+          {/* Save the story to the Stories page so it survives a refresh. */}
+          <div className="border-t border-line pt-5">
+            <button
+              onClick={() => toggleSaved(story.id)}
+              disabled={savingBusy}
+              className="inline-flex items-center gap-2 text-[13px] text-dim transition hover:text-accent disabled:opacity-50"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill={saved ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M6 4h12v16l-6-4-6 4z" />
+              </svg>
+              {saved ? "Saved" : "Save story"}
+            </button>
+          </div>
+
+          {/* Quietly re-verify the saved facts before committing to a film. */}
+          <div className="border-t border-line pt-5">
+            <button
+              onClick={() => recheck(story.id)}
+              disabled={rechecking}
+              className="inline-flex items-center gap-2 text-[13px] text-dim transition hover:text-accent disabled:opacity-50"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 4v5h-5" />
+              </svg>
+              {rechecking ? "Rechecking…" : "Recheck story"}
+            </button>
+            {recheckMsg && <p className="mt-[10px] text-[12.5px] leading-[1.5] text-muted [text-wrap:pretty]">{recheckMsg}</p>}
+          </div>
         </aside>
       </div>
 

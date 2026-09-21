@@ -129,7 +129,7 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
         return;
       }
     }
-    shot.truth = "reconstruction"; // no usable archive — do not fake it
+    shot.truth = "reconstruction"; // no usable archive - do not fake it
   }
 
   if (existsSync(abs)) {
@@ -170,7 +170,7 @@ export async function ensureMaster(story: Story, world: StoryWorld): Promise<str
 // Live only: turn a still into motion (after the visual preview is approved).
 export async function acquireMotion(story: Story, kind: "long" | "short", shot: PlannedShot): Promise<void> {
   if (config.mode !== "live" || !shot.path) return; // mock keeps the transform motion
-  if (!config.higgsfield.publicAssetBase) throw new Error("HIGGSFIELD_PUBLIC_ASSET_BASE not set — cannot give Higgsfield a reachable still URL.");
+  if (!config.higgsfield.publicAssetBase) throw new Error("HIGGSFIELD_PUBLIC_ASSET_BASE not set - cannot give Higgsfield a reachable still URL.");
   const rel = `motion/${kind}-${String(shot.index).padStart(2, "0")}.mp4`;
   const imageUrl = `${config.higgsfield.publicAssetBase.replace(/\/$/, "")}/${mediaRel(story.slug, shot.path)}`;
   await generateMotion({ prompt: shot.prompt, imageUrl, outPath: inStory(story.slug, rel) });

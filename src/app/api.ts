@@ -5,6 +5,7 @@ export interface StoryDetail {
   videos: Video[];
   estimate: CostEstimate;
   activeJob: Job | null;
+  failedJob: Job | null;
 }
 
 // Config view: current mode and, per provider, whether its key(s) are configured
@@ -31,6 +32,7 @@ export interface SettingsInput {
 export interface DiscoverInput {
   prompt?: string;
   category?: string;
+  niche?: boolean; // a niche-card click discovers new stories for that niche only
 }
 
 async function get<T>(url: string): Promise<T> {
@@ -53,11 +55,14 @@ export const api = {
   stories: () => get<{ stories: Story[] }>("/api/stories"),
   story: (slug: string) => get<StoryDetail>(`/api/stories/${slug}`),
   research: (query: string) => post<{ added: string[]; note: string }>("/api/research", { query }),
+  recheck: (id: string) => post<{ verdict: "supported" | "rewrite" | "reject"; reason: string; story: Story }>(`/api/stories/${id}/recheck`),
   discover: (input: DiscoverInput) => post<{ stories: Story[]; note: string }>("/api/discover", input),
   setPublished: (id: string, published: boolean) => post<{ story: Story }>(`/api/stories/${id}/publish`, { published }),
+  setSaved: (id: string, saved: boolean) => post<{ story: Story }>(`/api/stories/${id}/saved`, { saved }),
   niches: () => get<NichesResponse>("/api/niches"),
   generate: (id: string, approvedMax: number) => post<{ job: Job; duplicate: boolean }>(`/api/stories/${id}/generate`, { approvedMax }),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
+  retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),
 };
 

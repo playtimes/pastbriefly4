@@ -1,7 +1,7 @@
 import type { WordTiming } from "../providers/elevenlabs.ts";
 import type { SubtitleCue } from "../render/types.ts";
 
-// Turn aligned words into short, readable phrases — broken on punctuation,
+// Turn aligned words into short, readable phrases - broken on punctuation,
 // natural pauses and length. Never word-by-word.
 export function buildCues(words: WordTiming[], fps: number, kind: "long" | "short", maxFrame: number): SubtitleCue[] {
   const maxWords = kind === "short" ? 5 : 7;

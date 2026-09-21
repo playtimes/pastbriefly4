@@ -1,7 +1,13 @@
 import { db, now } from "./db.ts";
-import type { Story, Job, JobState, JobStep, Video, VisualPreview, NicheItem } from "../types.ts";
+import type { Story, StoryMoment, Source, Job, JobState, JobStep, Video, VisualPreview, NicheItem } from "../types.ts";
 
 const J = JSON.stringify;
+
+// The product uses plain hyphens everywhere. Model-written story text sometimes
+// slips in a long dash (— – ―); normalize it as stories leave the store so none
+// ever reaches the UI or the narration.
+const LONG_DASH = /[‒–—―]/g;
+const deDash = (s: string): string => s.replace(LONG_DASH, "-");
 function P<T>(s: string | null | undefined, dflt: T): T {
   if (!s) return dflt;
   try {
@@ -46,18 +52,19 @@ function rowToStory(r: any): Story {
   return {
     id: r.id,
     slug: r.slug,
-    title: r.title,
-    hook: r.hook,
+    title: deDash(r.title),
+    hook: deDash(r.hook),
     category: r.category,
-    year: r.year,
-    place: r.place,
-    summary: r.summary,
+    year: deDash(r.year),
+    place: deDash(r.place),
+    summary: deDash(r.summary),
     heroImage: r.hero_image ?? null,
-    moments: P(r.moments, []),
-    sources: P(r.sources, []),
-    productionNote: r.production_note,
+    moments: P<StoryMoment[]>(r.moments, []).map((m) => ({ title: deDash(m.title), detail: deDash(m.detail) })),
+    sources: P<Source[]>(r.sources, []).map((s) => ({ ...s, title: deDash(s.title), note: deDash(s.note) })),
+    productionNote: deDash(r.production_note),
     createdAt: r.created_at,
     published: !!r.published,
+    saved: !!r.saved,
     hasVideos: videosForStory(r.id).length > 0,
     activeJobId: activeJobForStory(r.id)?.id ?? null,
   };
@@ -84,6 +91,10 @@ export function storyExistsByTitle(title: string): boolean {
 
 export function setStoryPublished(storyId: string, published: boolean): void {
   db.prepare(`UPDATE stories SET published=? WHERE id=?`).run(published ? 1 : 0, storyId);
+}
+
+export function setStorySaved(storyId: string, saved: boolean): void {
+  db.prepare(`UPDATE stories SET saved=? WHERE id=?`).run(saved ? 1 : 0, storyId);
 }
 
 export function setScripts(storyId: string, scripts: Scripts): void {
@@ -146,6 +157,13 @@ export function activeJobForStory(storyId: string): JobRecord | null {
   const r = db
     .prepare(`SELECT * FROM jobs WHERE story_id=? AND state IN ('queued','running','awaiting_preview') ORDER BY created_at DESC LIMIT 1`)
     .get(storyId);
+  return r ? rowToJob(r) : null;
+}
+
+// The most recent job for a story, regardless of state. Used to surface a
+// failed generation on the Story page (activeJobForStory excludes failed).
+export function latestJobForStory(storyId: string): JobRecord | null {
+  const r = db.prepare(`SELECT * FROM jobs WHERE story_id=? ORDER BY created_at DESC LIMIT 1`).get(storyId);
   return r ? rowToJob(r) : null;
 }
 

@@ -24,6 +24,7 @@ db.exec(`
     production_note TEXT NOT NULL DEFAULT '',
     scripts TEXT,                 -- json { long, short } once written
     published INTEGER NOT NULL DEFAULT 0,
+    saved INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   );
 
@@ -71,6 +72,9 @@ db.exec(`
 const storyCols = db.prepare(`PRAGMA table_info(stories)`).all() as { name: string }[];
 if (!storyCols.some((c) => c.name === "published")) {
   db.exec(`ALTER TABLE stories ADD COLUMN published INTEGER NOT NULL DEFAULT 0`);
+}
+if (!storyCols.some((c) => c.name === "saved")) {
+  db.exec(`ALTER TABLE stories ADD COLUMN saved INTEGER NOT NULL DEFAULT 0`);
 }
 
 export function now(): string {

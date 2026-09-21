@@ -9,7 +9,7 @@ import type { NicheGroup, NicheItem, NichesResponse } from "../types.ts";
 //   2. OpenAI clusters those real titles into human-readable niche names.
 //   3. "Recommended" is an editorial pick over the trending/popular niches.
 // Results are cached in SQLite and refreshed lazily when stale. When the real
-// sources are not configured we return unavailable groups — never invented data.
+// sources are not configured we return unavailable groups - never invented data.
 
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
@@ -52,8 +52,8 @@ export async function getNiches(deps: NicheDeps = {}): Promise<NichesResponse> {
 
   // A niche should normally appear in only one section. De-duplicate across the
   // three groups at read time (the cached real data is left intact): Trending is
-  // most current so it wins over Popular, and Recommended — already a distinct
-  // editorial pick — is filtered against both as a safety net.
+  // most current so it wins over Popular, and Recommended - already a distinct
+  // editorial pick - is filtered against both as a safety net.
   const taken = new Set<string>();
   return {
     trending: { ...trending, niches: dedupeAcross(trending.niches, taken) },
@@ -97,7 +97,7 @@ async function ensureRecommended(trending: NicheGroup, popular: NicheGroup, now:
 // The niche name/description shown on the Create dashboard must read like short
 // editorial copy, not a research report. We defensively strip emojis, markdown
 // and stray whitespace, and cap the description length, regardless of what the
-// model returned — before caching or displaying. The raw `evidence` (real source
+// model returned - before caching or displaying. The raw `evidence` (real source
 // video titles) is left untouched for grounding/debugging and is never rendered.
 
 const EMOJI = /[\p{Extended_Pictographic}\u{FE0F}\u{20E3}\u{200B}-\u{200D}\u{1F1E6}-\u{1F1FF}]/gu;
@@ -188,7 +188,7 @@ async function clusterSignals(kind: "trending" | "popular", signals: YtSignal[])
   const out = await respondJson<{ niches: NicheItem[] }>({
     instructions: `You cluster REAL YouTube history/documentary videos into 4-6 subject niches reflecting what is drawing interest over ${window}. Group by subject, not by channel. For each niche return:
 - name: a concise, human-readable niche title, 2-5 words. No emojis, no markdown.
-- why: ONE short editorial sentence, at most 120 characters, describing the niche's appeal like a magazine blurb — not a research report. No emojis, no markdown, and never quote, list, or paste the source video titles.
+- why: ONE short editorial sentence, at most 120 characters, describing the niche's appeal like a magazine blurb - not a research report. No emojis, no markdown, and never quote, list, or paste the source video titles.
 - evidence: 2-3 of the ACTUAL video titles provided, verbatim, for internal grounding only (this is never shown to users).
 Do not invent titles or niches that the data does not support.`,
     input: `Real YouTube results (title, view count):\n${JSON.stringify(rows)}`,
@@ -203,7 +203,7 @@ async function recommendNiches(trending: NicheItem[], popular: NicheItem[]): Pro
   if (!trending.length && !popular.length) return [];
   const out = await respondJson<{ niches: NicheItem[] }>({
     instructions:
-      'You are an editorial curator for PastBriefly, whose promise is "True historical stories that sound made up." Using the REAL trending and popular niches and their evidence as your source material, define 3-5 niches that most sharply embody that promise: stranger-than-fiction true events — improbable near-misses, audacious swindles, unlikely escapes, bizarre coincidences. Do NOT simply repeat or lightly rename the trending/popular niches; sharpen or recombine them into distinct angles with the highest surprising-story density, and give each a title that differs from the input niche names. Stay grounded in the provided evidence — do not invent subjects the data does not support. Return for each: name — a concise 2-5 word title, no emojis, no markdown; why — ONE short editorial sentence, at most 120 characters, on why it sounds made up but is real, no emojis, no markdown, and never quoting or listing source video titles; evidence — the source niches/signals you drew on, for internal grounding only (never shown to users).',
+      'You are an editorial curator for PastBriefly, whose promise is "True historical stories that sound made up." Using the REAL trending and popular niches and their evidence as your source material, define 3-5 niches that most sharply embody that promise: stranger-than-fiction true events - improbable near-misses, audacious swindles, unlikely escapes, bizarre coincidences. Do NOT simply repeat or lightly rename the trending/popular niches; sharpen or recombine them into distinct angles with the highest surprising-story density, and give each a title that differs from the input niche names. Stay grounded in the provided evidence - do not invent subjects the data does not support. Return for each: name - a concise 2-5 word title, no emojis, no markdown; why - ONE short editorial sentence, at most 120 characters, on why it sounds made up but is real, no emojis, no markdown, and never quoting or listing source video titles; evidence - the source niches/signals you drew on, for internal grounding only (never shown to users).',
     input: `Trending niches:\n${JSON.stringify(trending)}\n\nPopular niches:\n${JSON.stringify(popular)}`,
     schemaName: "niches",
     schema: NICHE_SCHEMA,

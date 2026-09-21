@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api, type SettingsStatus, type SettingsInput } from "../api.ts";
 
 // The Config dashboard page: the mock/live toggle plus editable provider
-// credentials. Secrets are write-only — the server reports whether each one is
+// credentials. Secrets are write-only - the server reports whether each one is
 // configured but never returns its value, and a blank field leaves it unchanged.
 export function Settings(): React.ReactElement {
   const [status, setStatus] = useState<SettingsStatus | null>(null);
@@ -69,7 +69,7 @@ export function Settings(): React.ReactElement {
 
 // The editable credentials form. Secrets use masked inputs; a blank field means
 // "leave the current value unchanged". Only whether a value is configured is ever
-// shown — never the value itself.
+// shown - never the value itself.
 function Credentials({ status, onSaved }: { status: SettingsStatus; onSaved: (s: SettingsStatus) => void }): React.ReactElement {
   const [form, setForm] = useState<SettingsInput>({});
   const [voiceId, setVoiceId] = useState(status.elevenlabs.voiceId);

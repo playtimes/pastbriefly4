@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Create } from "./screens/Create.tsx";
+import { Stories } from "./screens/Stories.tsx";
 import { Story } from "./screens/Story.tsx";
 import { Creating } from "./screens/Creating.tsx";
 import { Videos } from "./screens/Videos.tsx";
@@ -23,6 +24,7 @@ function useRoute(): string {
 
 const NAV: { key: Nav; label: string; path: string }[] = [
   { key: "create", label: "Create", path: "/" },
+  { key: "stories", label: "Stories", path: "/stories" },
   { key: "videos", label: "Videos", path: "/videos" },
   { key: "config", label: "Config", path: "/settings" },
 ];
@@ -36,6 +38,9 @@ export function App(): React.ReactElement {
   switch (screen.name) {
     case "settings":
       view = <Settings />;
+      break;
+    case "stories":
+      view = <Stories />;
       break;
     case "videos":
       view = <VideosLibrary />;
@@ -118,6 +123,13 @@ function NavIcon({ nav }: { nav: Nav }): React.ReactElement {
         <line x1="4" y1="15.5" x2="20" y2="15.5" />
         <circle cx="10" cy="8.5" r="2.6" />
         <circle cx="15" cy="15.5" r="2.6" />
+      </svg>
+    );
+  }
+  if (nav === "stories") {
+    return (
+      <svg {...p} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M6 4h12v16l-6-4-6 4z" />
       </svg>
     );
   }

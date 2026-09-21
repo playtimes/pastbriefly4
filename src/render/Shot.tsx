@@ -4,8 +4,8 @@ import type { Shot as ShotType, Caption } from "./types.ts";
 import { theme, ART_FILTER } from "./theme.ts";
 
 // One shot: a still (with simple motion) or a clip, plus its editorial copy in
-// the PB1 language — accent kicker block, heavy outlined headline with an inline
-// emphasis highlight, a SOURCE line — and a brief cream cut-flash on entry.
+// the PB1 language - accent kicker block, heavy outlined headline with an inline
+// emphasis highlight, a SOURCE line - and a brief cream cut-flash on entry.
 export const Shot: React.FC<{ shot: ShotType; durationInFrames: number; format: "long" | "short"; accent: string }> = ({
   shot,
   durationInFrames,
@@ -42,7 +42,7 @@ const Media: React.FC<{ shot: ShotType; frame: number; duration: number; format:
   }
 
   // Long stills (the real PB1 frames are portrait) must not be hard-cropped into
-  // 16:9 — that destroys the composition. Seat the full still, contained, over a
+  // 16:9 - that destroys the composition. Seat the full still, contained, over a
   // blurred/graded fill of itself: a premium PastBriefly way to hold a portrait
   // image in a wide frame. Motion is a gentle breath so the composition is kept.
   if (format === "long") {
@@ -151,7 +151,7 @@ function highlightCaption(text: string, emphasis: string | undefined): React.Rea
 }
 
 // Two deliberate registers of the PB1 headline styling. The opener is the strong
-// PB1 title lockup — heavy outlined headline over an accent kicker block, used at
+// PB1 title lockup - heavy outlined headline over an accent kicker block, used at
 // the start of the film. Later story-moments use the calmer "moment" register:
 // the same type language, smaller and with a soft shadow rather than the poster
 // outline, so the film settles into documentary presentation after the opening.

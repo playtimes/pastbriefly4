@@ -7,15 +7,18 @@ import {
   getStory,
   getStoryBySlug,
   setStoryPublished,
+  setStorySaved,
   activeJobForStory,
+  latestJobForStory,
   videosForStory,
   createJob,
   getJob,
   approvePreview,
+  updateJob,
   type JobRecord,
 } from "./store.ts";
 import { estimateJob } from "../production/estimate.ts";
-import { findStories } from "../production/research.ts";
+import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
@@ -46,7 +49,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/config", async () => ({ mode: config.mode, maxSpendUsd: config.maxSpendUsd, categories: CATEGORIES }));
 
-  // Config page: key status (configured or not — never the values), the mock/live
+  // Config page: key status (configured or not - never the values), the mock/live
   // toggle, and saving provider credentials.
   app.get("/api/settings", async () => settingsStatus());
 
@@ -83,11 +86,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const story = getStoryBySlug(slug);
     if (!story) return reply.code(404).send({ error: "Story not found" });
     const active = activeJobForStory(story.id);
+    // Surface a failed generation only when nothing is active (active takes priority).
+    const latest = active ? null : latestJobForStory(story.id);
+    const failed = latest?.state === "failed" ? latest : null;
     return {
       story,
       videos: videosForStory(story.id),
       estimate: estimateJob(story),
       activeJob: active ? toPublic(active) : null,
+      failedJob: failed ? toPublic(failed) : null,
     };
   });
 
@@ -103,6 +110,30 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { story: getStory(id) };
   });
 
+  // Toggle whether a story appears on the Stories page.
+  const savedBody = z.object({ saved: z.boolean() });
+  app.post("/api/stories/:id/saved", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const story = getStory(id);
+    if (!story) return reply.code(404).send({ error: "Story not found" });
+    const parsed = savedBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "saved (boolean) is required." });
+    setStorySaved(id, parsed.data.saved);
+    return { story: getStory(id) };
+  });
+
+  // Re-run a saved story through the candidate verifier. A "rewrite" is saved.
+  app.post("/api/stories/:id/recheck", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const story = getStory(id);
+    if (!story) return reply.code(404).send({ error: "Story not found" });
+    try {
+      return await recheckStory(story);
+    } catch (e: any) {
+      return reply.code(500).send({ error: e?.message || "Recheck failed." });
+    }
+  });
+
   const research = z.object({ query: z.string().min(2).max(200) });
   app.post("/api/research", async (req, reply) => {
     const parsed = research.safeParse(req.body);
@@ -115,7 +146,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // Create dashboard: prompt and/or category discovery. At least one is required.
-  const discoverBody = z.object({ prompt: z.string().max(200).optional(), category: z.string().max(60).optional() }).strict();
+  const discoverBody = z.object({ prompt: z.string().max(200).optional(), category: z.string().max(60).optional(), niche: z.boolean().optional() }).strict();
   app.post("/api/discover", async (req, reply) => {
     const parsed = discoverBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid discovery payload." });
@@ -123,7 +154,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const category = (CATEGORIES as readonly string[]).includes(parsed.data.category?.trim() ?? "") ? parsed.data.category!.trim() : undefined;
     if (!prompt && !category) return reply.code(400).send({ error: "Enter a prompt or choose a category." });
     try {
-      return await discover({ prompt, category });
+      return await discover({ prompt, category, niche: parsed.data.niche });
     } catch (e: any) {
       return reply.code(500).send({ error: e?.message || "Discovery failed." });
     }
@@ -166,6 +197,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!job) return reply.code(404).send({ error: "Job not found" });
     if (job.state !== "awaiting_preview") return { job: toPublic(job) };
     approvePreview(id);
+    enqueueJob(id);
+    return { job: toPublic(getJob(id)!) };
+  });
+
+  // Retry a failed job in place: reuse the same job id so completed (and paid)
+  // work in scratch is preserved and runJob resumes from the first unfinished step.
+  app.post("/api/jobs/:id/retry", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    if (job.state !== "failed") return { job: toPublic(job) };
+    updateJob(id, { state: "queued", error: null, message: "Queued" });
     enqueueJob(id);
     return { job: toPublic(getJob(id)!) };
   });

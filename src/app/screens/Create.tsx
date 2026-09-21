@@ -36,7 +36,7 @@ export function Create(): React.ReactElement {
     setMode(resultsMode);
     setLabel(resultsLabel);
     try {
-      const r = await api.discover({ prompt: input.prompt?.trim() || undefined, category: input.category || undefined });
+      const r = await api.discover({ prompt: input.prompt?.trim() || undefined, category: input.category || undefined, niche: resultsMode === "niche" });
       setResults(r.stories.filter((s) => !s.hasVideos));
       setNote(r.note);
     } catch (e: any) {
@@ -67,8 +67,8 @@ export function Create(): React.ReactElement {
       <header className="max-w-[720px]">
         <h1 className="text-[40px] md:text-[52px] leading-none tracking-[-0.5px] text-ink">Create</h1>
         <p className="mt-[18px] text-[17.5px] leading-[1.5] text-muted [text-wrap:pretty]">
-          Hunt down the true stories from history that sound completely made up — the near-misses, the swindles and the
-          escapes — and shape them into your next video.
+          Hunt down the true stories from history that sound completely made up - the near-misses, the swindles and the
+          escapes - and shape them into your next video.
         </p>
       </header>
 
@@ -134,23 +134,28 @@ export function Create(): React.ReactElement {
         </button>
       </section>
 
-      {/* Shared results area — appears after a manual search or a niche click. */}
+      {/* Shared results area - appears after a manual search or a niche click. */}
       {mode !== null && (
         <section ref={resultsRef} className="mt-[52px] scroll-mt-8">
-          <div className="flex items-baseline gap-[14px] flex-wrap pb-5 border-b border-line">
-            <span className="text-[11px] tracking-[0.26em] uppercase font-semibold text-accent">{eyebrow}</span>
-            <h2 className="text-[33px] leading-none text-ink">{heading}</h2>
+          <div className="flex items-start justify-between gap-5 flex-wrap pb-[18px] border-b border-line">
+            <div>
+              <span className="text-[11px] tracking-[0.26em] uppercase font-semibold text-accent">{eyebrow}</span>
+              <h2 className="mt-2 text-[33px] leading-[1.05] text-ink">{heading}</h2>
+              {note && <p className="mt-[9px] text-[13.5px] text-faint">{note}</p>}
+            </div>
             {!searching && (
               <button
                 onClick={() => { setResults(null); setNote(""); setMode(null); }}
-                className="ml-auto text-muted text-sm hover:text-ink"
+                className="flex-none inline-flex items-center gap-[7px] text-[13.5px] text-dim hover:text-accent"
               >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
                 Clear
               </button>
             )}
           </div>
-          {note && <p className="mt-4 text-faint text-sm">{note}</p>}
-          <div className="mt-[26px]">
+          <div className="mt-[22px]">
             {searching ? (
               <p className="text-faint text-sm">Finding stories…</p>
             ) : results && results.length ? (
@@ -172,14 +177,14 @@ export function Create(): React.ReactElement {
 
 function StoryGrid({ stories }: { stories: Story[] }): React.ReactElement {
   return (
-    <div className="grid gap-[22px] [grid-template-columns:repeat(auto-fill,minmax(290px,1fr))]">
+    <div className="grid gap-[14px] [grid-template-columns:repeat(auto-fill,minmax(430px,1fr))]">
       {stories.map((s) => (
         <button
           key={s.id}
           onClick={() => navigate(`/story/${s.slug}`)}
-          className="text-left rounded-2xl overflow-hidden bg-panel border border-line cursor-pointer transition duration-[250ms] hover:-translate-y-1 hover:border-[rgba(245,235,222,0.2)]"
+          className="flex gap-[18px] text-left p-3 rounded-[14px] border border-transparent cursor-pointer transition duration-200 hover:bg-panel hover:border-line"
         >
-          <div className="relative aspect-video bg-panel overflow-hidden">
+          <div className="relative flex-none w-[190px] aspect-[3/2] rounded-[11px] overflow-hidden bg-panel">
             {s.heroImage ? (
               <img
                 src={mediaUrl(s.heroImage)}
@@ -187,11 +192,14 @@ function StoryGrid({ stories }: { stories: Story[] }): React.ReactElement {
                 className={`absolute inset-0 w-full h-full object-cover ${GRADE}`}
               />
             ) : null}
-            <div className="absolute inset-0 shadow-[inset_0_-60px_60px_-30px_rgba(0,0,0,0.5)]" />
+            <div className="absolute inset-0 bg-[linear-gradient(105deg,rgba(8,5,4,0.55),rgba(8,5,4,0.08)_70%)]" />
           </div>
-          <div className="pt-[17px] px-[19px] pb-5">
-            <h3 className="text-[21px] leading-[1.15] text-ink line-clamp-2">{s.title}</h3>
-            <p className="mt-[9px] text-[13.5px] leading-[1.45] text-faint line-clamp-2">{s.hook}</p>
+          <div className="flex-1 min-w-0 flex flex-col justify-center pr-1.5">
+            <div className="text-[10.5px] tracking-[0.19em] uppercase font-semibold text-dim">
+              {s.category} · {s.year}
+            </div>
+            <h3 className="mt-[9px] font-serif text-[23px] leading-[1.14] text-ink line-clamp-3">{s.title}</h3>
+            <p className="mt-2 text-[13.5px] leading-[1.45] text-faint line-clamp-2">{s.hook}</p>
           </div>
         </button>
       ))}

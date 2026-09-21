@@ -37,6 +37,7 @@ export interface Story {
   createdAt: string;
   // Derived for the client:
   published?: boolean; // whether its finished films are marked published
+  saved?: boolean; // whether the user explicitly saved it to the Stories page
   hasVideos?: boolean;
   activeJobId?: string | null;
 }

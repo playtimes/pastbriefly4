@@ -56,6 +56,16 @@ export async function respondJson<T>(opts: {
   }
 }
 
+// Map a reference image's extension to a MIME type the OpenAI edits endpoint
+// accepts. Blobs without a type are sent as application/octet-stream and rejected.
+export function imageMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".webp") return "image/webp";
+  throw new Error(`Unsupported reference image type '${ext || filePath}'. Use .png, .jpg, .jpeg, or .webp.`);
+}
+
 // Generate one still. With reference images, use edits for visual continuity.
 export async function generateImageFile(opts: {
   prompt: string;
@@ -71,7 +81,7 @@ export async function generateImageFile(opts: {
     form.set("size", opts.size);
     for (const p of opts.referencePaths) {
       const buf = await readFile(p);
-      form.append("image[]", new Blob([buf]), path.basename(p));
+      form.append("image[]", new Blob([buf], { type: imageMimeType(p) }), path.basename(p));
     }
     const res = await fetch(`${API}/images/edits`, { method: "POST", headers: authHeaders(), body: form });
     if (!res.ok) throw new Error(`OpenAI image edit ${res.status}: ${(await res.text()).slice(0, 300)}`);

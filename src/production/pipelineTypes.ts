@@ -1,7 +1,7 @@
 import type { StoryMoment, Source } from "../types.ts";
 
 // Shared visual context that keeps generated stills feeling like one place and
-// production. Not a framework — just planning context.
+// production. Not a framework - just planning context.
 export interface StoryWorld {
   period: string;
   place: string;
