@@ -35,15 +35,30 @@ export interface DiscoverInput {
   niche?: boolean; // a niche-card click discovers new stories for that niche only
 }
 
+// Prefer Fastify's useful `message` (e.g. "body must be object") over the terse
+// `error` label ("Bad Request") when both are present.
+async function requestError(res: Response): Promise<Error> {
+  const b = await res.json().catch(() => ({} as any));
+  return new Error(b.message || b.error || `Request failed (${res.status})`);
+}
+
 async function get<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
+  if (!res.ok) throw await requestError(res);
   return res.json();
 }
 
+// Only send a JSON body (and its Content-Type) when there is one. An empty POST
+// with a JSON Content-Type header is rejected by Fastify as a bad request, which
+// is what broke the no-body calls (retry, continue).
 async function post<T>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status})`);
+  const init: RequestInit = { method: "POST" };
+  if (body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, init);
+  if (!res.ok) throw await requestError(res);
   return res.json();
 }
 
@@ -61,8 +76,11 @@ export const api = {
   setSaved: (id: string, saved: boolean) => post<{ story: Story }>(`/api/stories/${id}/saved`, { saved }),
   niches: () => get<NichesResponse>("/api/niches"),
   generate: (id: string, approvedMax: number) => post<{ job: Job; duplicate: boolean }>(`/api/stories/${id}/generate`, { approvedMax }),
+  approveText: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-text`),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
+  rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),
   retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
+  approveSpend: (jobId: string, approvedMax: number) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-spend`, { approvedMax }),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),
 };
 

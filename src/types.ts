@@ -21,6 +21,15 @@ export interface StoryMoment {
   detail: string;
 }
 
+// One concrete, production-relevant fact - the factual spine of the film. Any
+// date, actor, location, sequence or attribution the scripts rely on lives here,
+// each tied to a real supporting source in the final ResearchPackage.
+export interface Fact {
+  fact: string;
+  sourceTitle: string;
+  sourceUrl: string;
+}
+
 export interface Story {
   id: string;
   slug: string;
@@ -40,9 +49,10 @@ export interface Story {
   saved?: boolean; // whether the user explicitly saved it to the Stories page
   hasVideos?: boolean;
   activeJobId?: string | null;
+  activeJobStep?: JobStep | null;
 }
 
-export type JobState = "queued" | "running" | "awaiting_preview" | "done" | "failed";
+export type JobState = "queued" | "running" | "awaiting_text" | "awaiting_preview" | "done" | "failed";
 
 export type JobStep =
   | "queued"
@@ -83,6 +93,10 @@ export interface Job {
   approvedMax: number;
   spent: number;
   preview: VisualPreview | null; // present once the visual direction is ready
+  review?: StoryReview | null; // present only while awaiting the text review gate
+  // Real per-unit progress for the current step, when it has a meaningful count
+  // (scripts/narration/archive/stills/build). Absent for research/finishing.
+  progress?: { current: number; total: number };
   createdAt: string;
   updatedAt: string;
 }
@@ -98,11 +112,25 @@ export interface CostEstimate {
   lines: CostLine[];
 }
 
+// The editorial review shown after the audited scripts exist and before any
+// media spend. Read straight from the job's scratch - never a new DB table. The
+// user judges clarity and interest only; PB4 owns the facts.
+export interface StoryReview {
+  title: string;
+  hook: string;
+  facts: Fact[];
+  moments: StoryMoment[];
+  sources: Source[];
+  longScript: string;
+  shortScript: string;
+}
+
 // The taste gate shown before spending on motion.
 export interface VisualPreview {
   moments: number;
   archive: number;
   reconstruction: number;
+  graphic: number;
   motionSelected: number;
   remainingMotionCost: number;
   frames: PreviewFrame[];

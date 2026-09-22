@@ -40,10 +40,40 @@ function findOutputUrl(obj: any): string | null {
 }
 
 interface Journal {
-  state: "pending" | "accepted" | "done";
+  state: "pending" | "accepted" | "done" | "failed";
   requestId?: string;
   statusUrl?: string;
   providerUrl?: string;
+  message?: string; // provider failure detail, when state is "failed"
+}
+
+// A confirmed terminal failure reported by the provider (failed/canceled/nsfw/...).
+// Distinct from uncertain outcomes (network/timeout) so only this marks the journal failed.
+class HiggsfieldTerminalFailure extends Error {
+  constructor(public requestId: string, public status: string, public detail: string) {
+    super(`Higgsfield job ${requestId} ${status}${detail ? `: ${detail}` : ""}`);
+    this.name = "HiggsfieldTerminalFailure";
+  }
+}
+
+// Pull the most useful human-readable reason out of a terminal status payload.
+// The payload is the provider's response body, so it carries no credentials.
+function failureDetail(st: any): string {
+  const candidates = [
+    typeof st?.error === "string" ? st.error : st?.error?.message,
+    st?.message,
+    st?.reason,
+    st?.detail,
+    st?.status_message,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim().slice(0, 300);
+  }
+  try {
+    return JSON.stringify(st).slice(0, 300);
+  } catch {
+    return "";
+  }
 }
 
 const journalPath = (out: string) => `${out}.req.json`;
@@ -59,7 +89,7 @@ const writeJournal = (out: string, j: Journal) => writeFile(journalPath(out), JS
 const fileReady = (p: string) => existsSync(p) && statSync(p).size > 0;
 
 async function poll(statusUrl: string, requestId: string, outPath: string): Promise<string> {
-  const deadline = Date.now() + 5 * 60 * 1000;
+  const deadline = Date.now() + 15 * 60 * 1000;
   let providerUrl: string | null = null;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 4000));
@@ -67,13 +97,17 @@ async function poll(statusUrl: string, requestId: string, outPath: string): Prom
     if (!res.ok) throw new Error(`Higgsfield status ${res.status}`);
     const st = await res.json();
     const status = String(st.status || "").toLowerCase();
-    if (FAIL.has(status)) throw new Error(`Higgsfield job ${requestId} ${status}`);
+    if (FAIL.has(status)) {
+      const detail = failureDetail(st);
+      console.warn(`[higgsfield] terminal ${status} for ${requestId}: ${JSON.stringify(st).slice(0, 500)}`);
+      throw new HiggsfieldTerminalFailure(requestId, status, detail);
+    }
     if (OK.has(status) || st.status === undefined) {
       providerUrl = findOutputUrl(st);
       if (providerUrl) break;
     }
   }
-  if (!providerUrl) throw new Error(`Higgsfield job ${requestId} produced no output in time.`);
+  if (!providerUrl) throw new Error(`Higgsfield job ${requestId} is still pending after 15 minutes.`);
   assertPublicUrl(providerUrl);
   const media = await fetch(providerUrl);
   if (!media.ok) throw new Error(`Higgsfield download ${media.status}`);
@@ -84,14 +118,22 @@ async function poll(statusUrl: string, requestId: string, outPath: string): Prom
 // Submit (or recover) one motion clip. Returns the provider request id.
 export async function generateMotion(opts: { prompt: string; imageUrl: string; outPath: string }): Promise<{ requestId: string }> {
   const prior = await readJournal(opts.outPath);
-  if (prior) {
+  // A confirmed terminal "failed" journal is safe to replace with a fresh submission
+  // below; only non-failed priors gate recovery or block resubmission.
+  if (prior && prior.state !== "failed") {
     if (prior.state === "done" && fileReady(opts.outPath)) return { requestId: prior.requestId || "higgsfield" };
     if (prior.state === "pending")
       throw new Error(`Higgsfield: a prior submission for ${path.basename(opts.outPath)} has an uncertain outcome. Check the console and delete ${journalPath(opts.outPath)} before retrying.`);
     if (prior.requestId && prior.statusUrl) {
-      const providerUrl = await poll(prior.statusUrl, prior.requestId, opts.outPath);
-      await writeJournal(opts.outPath, { ...prior, state: "done", providerUrl });
-      return { requestId: prior.requestId };
+      try {
+        const providerUrl = await poll(prior.statusUrl, prior.requestId, opts.outPath);
+        await writeJournal(opts.outPath, { ...prior, state: "done", providerUrl });
+        return { requestId: prior.requestId };
+      } catch (e) {
+        if (e instanceof HiggsfieldTerminalFailure)
+          await writeJournal(opts.outPath, { ...prior, state: "failed", message: e.detail });
+        throw e;
+      }
     }
   }
 
@@ -115,7 +157,13 @@ export async function generateMotion(opts: { prompt: string; imageUrl: string; o
   const requestId: string = submit.request_id || submit.id || "higgsfield";
   const statusUrl = abs(submit.status_url || `/requests/${requestId}/status`);
   await writeJournal(opts.outPath, { state: "accepted", requestId, statusUrl });
-  const providerUrl = await poll(statusUrl, requestId, opts.outPath);
-  await writeJournal(opts.outPath, { state: "done", requestId, statusUrl, providerUrl });
-  return { requestId };
+  try {
+    const providerUrl = await poll(statusUrl, requestId, opts.outPath);
+    await writeJournal(opts.outPath, { state: "done", requestId, statusUrl, providerUrl });
+    return { requestId };
+  } catch (e) {
+    if (e instanceof HiggsfieldTerminalFailure)
+      await writeJournal(opts.outPath, { state: "failed", requestId, statusUrl, message: e.detail });
+    throw e;
+  }
 }

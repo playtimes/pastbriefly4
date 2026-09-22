@@ -3,7 +3,7 @@
 
 export const PRICING = {
   openai: {
-    research: 0.06, // one web-search research pass
+    research: 0.18, // the research stage: draft + audit + final verification (3 web-search passes)
     script: 0.03, // one script completion
     image: 0.08, // one gpt-image-1 still
   },

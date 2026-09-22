@@ -1,4 +1,4 @@
-import type { StoryMoment, Source } from "../types.ts";
+import type { StoryMoment, Source, Fact } from "../types.ts";
 
 // Shared visual context that keeps generated stills feeling like one place and
 // production. Not a framework - just planning context.
@@ -16,6 +16,9 @@ export interface ResearchPackage {
   summary: string;
   moments: StoryMoment[];
   sources: Source[];
+  // The factual spine handed to the scripts: concrete, sourced facts (dates,
+  // actors, locations, sequence, attribution). Owned by the final verification.
+  facts: Fact[];
   productionNote: string;
   world: StoryWorld;
 }

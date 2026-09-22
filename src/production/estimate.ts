@@ -32,9 +32,10 @@ export function planCounts(story: Story): PlanCounts {
 export function estimateJob(story: Story): CostEstimate {
   const c = planCounts(story);
   const lines = [
-    { label: "Research (OpenAI web search)", usd: PRICING.openai.research, detail: "1 pass" },
-    { label: "Long + Short scripts (OpenAI)", usd: round(2 * PRICING.openai.script), detail: "2 writes" },
+    { label: "Research (OpenAI web search)", usd: PRICING.openai.research, detail: "draft + audit + verification" },
+    { label: "Long + Short scripts (OpenAI)", usd: round(3 * PRICING.openai.script), detail: "long + short + fidelity audit" },
     { label: "Narration (ElevenLabs)", usd: round(ttsUsd(c.longChars) + ttsUsd(c.shortChars)), detail: `~${c.longChars + c.shortChars} chars` },
+    { label: "Reference image (OpenAI images)", usd: PRICING.openai.image, detail: "1 master still" },
     { label: "Cinematic stills (OpenAI images)", usd: round(c.images * PRICING.openai.image), detail: `${c.images} images` },
     { label: "Selective motion (Higgsfield, 5s)", usd: round(c.motion * PRICING.higgsfield.video), detail: `${c.motion} clips` },
   ];

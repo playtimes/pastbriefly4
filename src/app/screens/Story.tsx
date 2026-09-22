@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { api, type StoryDetail } from "../api.ts";
 import { navigate } from "../App.tsx";
-import { FailedJobDetails } from "../failedJob.tsx";
+import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
 
 export function Story({ slug }: { slug: string }): React.ReactElement {
   const [detail, setDetail] = useState<StoryDetail | null>(null);
   const [error, setError] = useState("");
   const [showCost, setShowCost] = useState(false);
   const [mode, setMode] = useState("mock");
+  const [maxSpend, setMaxSpend] = useState(0);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const [recheckMsg, setRecheckMsg] = useState("");
@@ -20,7 +21,10 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
       setDetail(d);
       setSaved(!!d.story.saved);
     }).catch((e) => setError(e.message));
-    api.config().then((c) => setMode(c.mode));
+    api.config().then((c) => {
+      setMode(c.mode);
+      setMaxSpend(c.maxSpendUsd);
+    });
   }, [slug]);
 
   async function toggleSaved(storyId: string): Promise<void> {
@@ -65,6 +69,11 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
       setError(e.message);
       setRetrying(false);
     }
+  }
+
+  async function approveMore(jobId: string, newApprovedMax: number): Promise<void> {
+    await api.approveSpend(jobId, newApprovedMax);
+    navigate(`/story/${slug}/creating`);
   }
 
   if (error) return <Back message={error} />;
@@ -151,6 +160,9 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
               <div className="mt-4 flex flex-col gap-4">
                 <p className="text-[14px] font-semibold text-red-400">Last generation failed</p>
                 <FailedJobDetails job={failedJob} />
+                {maxSpend > 0 && isBudgetFailure(failedJob) && (
+                  <ApproveMoreResume job={failedJob} maxSpendUsd={maxSpend} onApprove={(m) => approveMore(failedJob.id, m)} />
+                )}
                 <button
                   onClick={() => retry(failedJob.id)}
                   disabled={retrying}

@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { config, settingsStatus, setMode, saveSettings } from "./config.ts";
-import { CATEGORIES, type Job } from "../types.ts";
+import { CATEGORIES, type Job, type StoryReview } from "../types.ts";
+import type { ResearchPackage } from "../production/pipelineTypes.ts";
+import type { Scripts } from "./store.ts";
 import {
   listStories,
   getStory,
@@ -22,11 +24,33 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, jobProgress } from "../production/generate.ts";
+
+// The editorial review data for the text gate, read straight from the job's
+// private scratch. Only the useful fields are exposed - never the whole scratch.
+function reviewFromJob(j: JobRecord): StoryReview | null {
+  const scratch = j.scratch as { research?: ResearchPackage; scripts?: Scripts };
+  const research = scratch.research;
+  const scripts = scratch.scripts;
+  if (!research || !scripts) return null;
+  const story = getStory(j.storyId);
+  return {
+    title: story?.title ?? "",
+    hook: story?.hook ?? "",
+    facts: research.facts ?? [],
+    moments: research.moments,
+    sources: research.sources,
+    longScript: scripts.long,
+    shortScript: scripts.short,
+  };
+}
 
 function toPublic(j: JobRecord): Job {
   const { previewApproved, scratch, ...pub } = j;
-  return pub;
+  const progress = jobProgress(j);
+  const withProgress = progress ? { ...pub, progress } : pub;
+  // Attach the review only at the text gate, so no other response leaks scratch.
+  return j.state === "awaiting_text" ? { ...withProgress, review: reviewFromJob(j) } : withProgress;
 }
 
 // State-changing requests must come from our own localhost origin.
@@ -191,12 +215,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { job: toPublic(job), duplicate: false };
   });
 
+  // Approve the story text (the editorial review gate) and resume the SAME job
+  // from narration. Only valid for an awaiting_text job; research/scripts/spend
+  // are preserved, and no new generation is started.
+  app.post("/api/jobs/:id/approve-text", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    if (job.state !== "awaiting_text") return { job: toPublic(job) };
+    const updated = approveTextForJob(id);
+    enqueueJob(id);
+    return { job: toPublic(updated) };
+  });
+
   app.post("/api/jobs/:id/continue", async (req, reply) => {
     const { id } = req.params as { id: string };
     const job = getJob(id);
     if (!job) return reply.code(404).send({ error: "Job not found" });
     if (job.state !== "awaiting_preview") return { job: toPublic(job) };
     approvePreview(id);
+    enqueueJob(id);
+    return { job: toPublic(getJob(id)!) };
+  });
+
+  // Reject the previewed visuals and rebuild them under the SAME job: discard the
+  // shot plans and their files, keep research/scripts/narration/master/spend, and
+  // requeue so the updated planner produces a fresh preview.
+  app.post("/api/jobs/:id/rebuild-visuals", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    if (job.state !== "awaiting_preview") return { job: toPublic(job) };
+    clearVisualsForRebuild(id);
     enqueueJob(id);
     return { job: toPublic(getJob(id)!) };
   });
@@ -211,6 +261,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     updateJob(id, { state: "queued", error: null, message: "Queued" });
     enqueueJob(id);
     return { job: toPublic(getJob(id)!) };
+  });
+
+  // Increase the approved maximum on a job that failed because the next paid call
+  // would exceed it, then requeue the SAME job so it resumes. Spend and completed
+  // work are preserved; the budget guard is unchanged and still enforced.
+  const approveSpend = z.object({ approvedMax: z.number().positive() });
+  app.post("/api/jobs/:id/approve-spend", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    if (job.state !== "failed") return { job: toPublic(job) };
+    const parsed = approveSpend.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "approvedMax (a positive number) is required." });
+    try {
+      const updated = raiseApprovedMax(id, parsed.data.approvedMax);
+      enqueueJob(id);
+      return { job: toPublic(updated) };
+    } catch (e: any) {
+      return reply.code(400).send({ error: e?.message || "Could not increase the approved maximum." });
+    }
   });
 
   app.get("/api/jobs/:id", async (req, reply) => {

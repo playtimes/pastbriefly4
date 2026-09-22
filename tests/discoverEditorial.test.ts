@@ -65,4 +65,41 @@ describe("discovery editorial policy", () => {
     expect(p).toContain("The Story of");
     expect(p).toContain("The Role of");
   });
+
+  test("the title rule forbids leaning on jargon, nicknames, comma subtitles and stray dates", async () => {
+    await findStories("anything");
+    const p = discoveryInstructions();
+
+    // Must work with zero knowledge of specialist terms and nicknames.
+    expect(p).toMatch(/military classes/i);
+    expect(p).toMatch(/depend on a nickname or a proper noun/i);
+    // No article-style comma subtitle, no dates for their own sake.
+    expect(p).toMatch(/subtitle joined on with a comma/i);
+    expect(p).toMatch(/unnecessary dates/i);
+    // The canonical bad title is called out by name.
+    expect(p).toContain("Whiskey-class");
+  });
+
+  test("the title rule prefers the shortest title and drops film-explainable context", async () => {
+    await findStories("anything");
+    const p = discoveryInstructions();
+
+    // Prefer the shortest plain-English title.
+    expect(p).toMatch(/SHORTEST plain-English title/);
+    // Context the film can explain should not be appended to the title.
+    expect(p).toMatch(/should usually not be appended to the title/);
+    // The canonical over-qualified title is called out by name.
+    expect(p).toContain("During the Cold War");
+  });
+
+  test("the hook rule requires concrete actions, not abstract summary labels", async () => {
+    await findStories("anything");
+    const p = discoveryInstructions();
+
+    // Hooks describe what concretely happened, not an abstract label for it.
+    expect(p).toMatch(/concrete actions or consequences/);
+    // Abstract summary phrases are named and discouraged.
+    expect(p).toContain("dramatic standoff");
+    expect(p).toContain("diplomatic crisis");
+  });
 });

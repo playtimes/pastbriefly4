@@ -19,7 +19,7 @@ vi.mock("../src/production/mockAssets.ts", () => ({
 }));
 
 const { respondJson } = await import("../src/providers/openai.ts");
-const { findStories } = await import("../src/production/research.ts");
+const { findStories, recheckStory } = await import("../src/production/research.ts");
 const { listStories, upsertStory } = await import("../src/server/store.ts");
 
 const respond = vi.mocked(respondJson);
@@ -151,6 +151,52 @@ describe("candidate verification before saving", () => {
     expect(opts.input).toContain("THE CENTRAL SURPRISING CLAIM");
     expect(opts.input).toContain("National Archives");
     expect(opts.webSearch).toBe(true);
+  });
+
+  test("the verifier must normalize titles even on a supported verdict", async () => {
+    discovery = { candidates: [candidate({ title: "A Candidate" })] };
+
+    await findStories("anything");
+    const verifyCall = respond.mock.calls.find((c) => (c[0] as any).schemaName === "verification");
+    const p = (verifyCall![0] as any).instructions as string;
+
+    // A "supported" verdict does not freeze the wording - the title is normalized.
+    expect(p).toMatch(/normaliz/i);
+    expect(p).toMatch(/does NOT mean the wording must stay/i);
+    // ...but improving wording never flips the verdict.
+    expect(p).toMatch(/never changes the verdict/i);
+  });
+
+  test("recheck normalizes a supported story's badly worded title", async () => {
+    const badTitle = "Soviet Whiskey-class Submarine Runs Aground in Sweden, Triggering 'Whiskey on the Rocks' Incident";
+    const saved = seed(badTitle);
+    upsertStory(saved);
+    verdicts.set(
+      badTitle,
+      verifyResult({
+        verdict: "supported",
+        title: "A Soviet Submarine Got Stuck in Sweden",
+        hook: "It ran aground yards from a secret naval base.",
+      })
+    );
+
+    const r = await recheckStory(saved as any);
+    expect(r.verdict).toBe("supported");
+    expect(r.story.title).toBe("A Soviet Submarine Got Stuck in Sweden");
+    expect(listStories().find((s) => s.id === saved.id)!.title).toBe("A Soviet Submarine Got Stuck in Sweden");
+    expect(listStories().some((s) => s.title === badTitle)).toBe(false);
+  });
+
+  test("recheck leaves a rejected story untouched", async () => {
+    const title = "A Story The Recheck Rejects";
+    const saved = seed(title);
+    upsertStory(saved);
+    verdicts.set(title, verifyResult({ verdict: "reject", title: "Should Not Be Applied" }));
+
+    const r = await recheckStory(saved as any);
+    expect(r.verdict).toBe("reject");
+    expect(r.story.title).toBe(title);
+    expect(listStories().find((s) => s.id === saved.id)!.title).toBe(title);
   });
 
   test("existing titles are excluded before verification", async () => {

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, mediaUrl } from "../api.ts";
 import { navigate } from "../App.tsx";
-import type { Story } from "../../types.ts";
+import { STEP_LABELS, type Story } from "../../types.ts";
 
 const GRADE = "[filter:saturate(0.92)_contrast(1.03)]";
 
@@ -45,6 +45,12 @@ export function Stories(): React.ReactElement {
                 <p className="kicker mb-1">{s.category}</p>
                 <h3 className="text-xl mb-1.5">{s.title}</h3>
                 <p className="text-muted text-sm line-clamp-2">{s.hook}</p>
+                {s.activeJobId && (
+                  <p className="mt-2.5 flex items-center gap-2 text-xs text-muted">
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                    {s.activeJobStep ? STEP_LABELS[s.activeJobStep] : "Generating films"}
+                  </p>
+                )}
               </div>
             </button>
           ))}

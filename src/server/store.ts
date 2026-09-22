@@ -49,6 +49,7 @@ export function upsertStory(s: Story): void {
 }
 
 function rowToStory(r: any): Story {
+  const active = activeJobForStory(r.id); // fetched once for both fields below
   return {
     id: r.id,
     slug: r.slug,
@@ -66,7 +67,8 @@ function rowToStory(r: any): Story {
     published: !!r.published,
     saved: !!r.saved,
     hasVideos: videosForStory(r.id).length > 0,
-    activeJobId: activeJobForStory(r.id)?.id ?? null,
+    activeJobId: active?.id ?? null,
+    activeJobStep: active?.step ?? null,
   };
 }
 
@@ -155,7 +157,7 @@ export function getJob(id: string): JobRecord | null {
 
 export function activeJobForStory(storyId: string): JobRecord | null {
   const r = db
-    .prepare(`SELECT * FROM jobs WHERE story_id=? AND state IN ('queued','running','awaiting_preview') ORDER BY created_at DESC LIMIT 1`)
+    .prepare(`SELECT * FROM jobs WHERE story_id=? AND state IN ('queued','running','awaiting_text','awaiting_preview') ORDER BY created_at DESC LIMIT 1`)
     .get(storyId);
   return r ? rowToJob(r) : null;
 }

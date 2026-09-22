@@ -81,10 +81,20 @@ const short = `
 In 1976, the most dangerous object in the Korean Demilitarized Zone was a tree. A single poplar had grown across the line of sight between two United Nations Command posts, so soldiers were sent to trim it. North Korean guards ordered them to stop. When they didn't, the guards seized the work party's own axes and killed two American officers. Now the United States had a choice. Retaliate, and risk a second Korean War. Or back down. Instead they picked a third option. Three days later, they came back to cut the tree down - escorted by attack helicopters, B-52 bombers from Guam, fighter jets, and an aircraft carrier off the coast. Twenty men with chainsaws felled the tree in forty-two minutes. North Korea didn't fire a shot. It was the most heavily armed gardening operation in history, and it worked.
 `.trim();
 
+// The factual spine handed to the scripts. Concrete, sourced, no filler.
+const facts = [
+  { fact: "On 18 August 1976, a US and South Korean work detail went to prune a poplar tree blocking a UN Command sight line in the Joint Security Area at Panmunjom.", sourceTitle: "Korean axe murder incident - Wikipedia", sourceUrl: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident" },
+  { fact: "North Korean soldiers seized the work party's axes and killed Captain Arthur Bonifas and First Lieutenant Mark Barrett.", sourceTitle: "Korean axe murder incident - Wikipedia", sourceUrl: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident" },
+  { fact: "On 21 August 1976, US and South Korean forces carried out Operation Paul Bunyan, cutting the tree down behind overwhelming force without firing a shot.", sourceTitle: "Korean axe murder incident - Wikipedia", sourceUrl: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident" },
+  { fact: "After the operation, North Korean leader Kim Il-sung expressed regret over the deaths, which was rare from that government.", sourceTitle: "Korean axe murder incident - Wikipedia", sourceUrl: "https://en.wikipedia.org/wiki/Korean_axe_murder_incident" },
+  { fact: "The base near the Joint Security Area was later renamed Camp Bonifas after Captain Arthur Bonifas.", sourceTitle: "Camp Bonifas - Wikipedia", sourceUrl: "https://en.wikipedia.org/wiki/Camp_Bonifas" },
+];
+
 export const paulBunyanResearch: ResearchPackage = {
   summary: paulBunyanStory.summary,
   moments: paulBunyanStory.moments,
   sources: paulBunyanStory.sources,
+  facts,
   productionNote: paulBunyanStory.productionNote,
   world,
 };
