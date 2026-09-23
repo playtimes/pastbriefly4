@@ -26,6 +26,9 @@ vi.mock("../src/production/research.ts", () => ({
     summary: "S",
     moments: [{ title: "m", detail: "d" }],
     sources: [],
+    // Live visual planning now requires verified facts, so the research fixture
+    // carries one; the value is irrelevant to these spend/resume assertions.
+    facts: [{ fact: "A concrete verified fact.", sourceTitle: "src", sourceUrl: "https://example.org" }],
     productionNote: "",
     world: { period: "1900", place: "X", palette: "p", visualDirection: "v", recurringPeople: [], recurringLocations: [], referenceImages: [] },
   })),

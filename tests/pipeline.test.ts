@@ -9,7 +9,7 @@ process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
 const { recordNarration } = await import("../src/production/narration.ts");
-const { planShots, buildRenderPlan, acquireStill } = await import("../src/production/visuals.ts");
+const { planVisuals, buildRenderPlan, acquireStill } = await import("../src/production/visuals.ts");
 const { ensureStoryDirs, inStory } = await import("../src/production/paths.ts");
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { groupSentences, wordCount } = await import("../src/production/text.ts");
@@ -20,9 +20,12 @@ const story = { ...paulBunyanStory, createdAt: new Date().toISOString() };
 
 async function makePlan(kind: "long" | "short"): Promise<RenderPlan> {
   ensureStoryDirs(story.slug);
-  const script = kind === "long" ? paulBunyanScripts.long : paulBunyanScripts.short;
-  const narr = await recordNarration(story.slug, kind, script);
-  const shots = planShots(kind, script, story, paulBunyanResearch.world, narr);
+  // One Visual Director call plans both films; select the one under test.
+  const nLong = await recordNarration(story.slug, "long", paulBunyanScripts.long);
+  const nShort = await recordNarration(story.slug, "short", paulBunyanScripts.short);
+  const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, { long: nLong, short: nShort });
+  const shots = plans[kind];
+  const narr = kind === "long" ? nLong : nShort;
   for (const s of shots) await acquireStill(story, kind, s, "images/hero.png");
   return buildRenderPlan(kind, story, shots, narr, "#d9a066");
 }

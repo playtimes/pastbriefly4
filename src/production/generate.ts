@@ -10,7 +10,7 @@ import { researchStory } from "./research.ts";
 import { writeScript, auditScripts } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
 import {
-  planShots,
+  planVisuals,
   acquireStill,
   ensureMaster,
   acquireMotion,
@@ -144,11 +144,16 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
     const narration = scratch.narration as { long: Narration; short: Narration };
 
-    // 4. Plan shots
+    // 4. Plan shots - ONE Visual Director call plans both films. Charged once (the
+    //    same preflight/record pattern), and reused on resume: once both plans are
+    //    in scratch this block is skipped, so the director is never called again.
     if (!scratch.longShots || !scratch.shortShots) {
-      scratch.longShots = planShots("long", scripts.long, story, research.world, narration.long);
-      scratch.shortShots = planShots("short", scripts.short, story, research.world, narration.short);
-      updateJob(jobId, { scratch });
+      step(jobId, "stills", "Planning the visuals", scratch);
+      budget(job, PRICING.openai.visualPlan, scratch);
+      const plans = await planVisuals(story, research, scripts, narration);
+      scratch.longShots = plans.long;
+      scratch.shortShots = plans.short;
+      record(jobId, PRICING.openai.visualPlan, scratch);
     }
 
     // Master reference still - one OpenAI image per job. Generated once and reused

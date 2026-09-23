@@ -2,15 +2,15 @@ import { existsSync } from "node:fs";
 import { config } from "../server/config.ts";
 import type { Story, Category, VisualPreview, PreviewFrame } from "../types.ts";
 import type { RenderPlan, Shot, Truth, Motion, Caption } from "../render/types.ts";
-import type { StoryWorld } from "./pipelineTypes.ts";
+import type { StoryWorld, ResearchPackage } from "./pipelineTypes.ts";
 import type { Narration } from "./narration.ts";
 import { PRICING, round } from "../server/pricing.ts";
-import { groupSentences, words } from "./text.ts";
+import { groupBeats, words } from "./text.ts";
 import { buildCues } from "./subtitles.ts";
 import { inStory, mediaRel } from "./paths.ts";
 import { writePlaceholderStill, referenceFrame } from "./mockAssets.ts";
 import { copyFileSync } from "node:fs";
-import { generateImageFile } from "../providers/openai.ts";
+import { generateImageFile, respondJson } from "../providers/openai.ts";
 import { generateMotion } from "../providers/higgsfield.ts";
 import { fetchArchive } from "./wikimedia.ts";
 
@@ -37,6 +37,11 @@ export interface PlannedShot {
   motion: Motion;
   wantsMotion: boolean;
   prompt: string;
+  // Planning intent: why this visual exists and what it must / must not show.
+  // Every shot must answer "what should the viewer understand from this visual?".
+  purpose: string;
+  mustShow: string[];
+  mustNotShow: string[];
   archiveQuery?: string;
   useMaster?: boolean; // pass the master still as a reference only where continuity helps
   caption?: Caption;
@@ -48,109 +53,430 @@ export interface PlannedShot {
   motionPath?: string;
 }
 
-function targetShots(kind: "long" | "short", durationSec: number): number {
-  return kind === "long" ? clamp(Math.round(durationSec / 11), 12, 26) : clamp(Math.round(durationSec / 5), 8, 12);
-}
-
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
-// Decide what the viewer should see across the narration, tied to the words so
-// visuals land with the story. Sparse editorial captions; a mix of media.
-export function planShots(kind: "long" | "short", script: string, story: Story, world: StoryWorld, narration: Narration): PlannedShot[] {
-  const count = targetShots(kind, narration.durationSec);
-  const groups = groupSentences(script, count);
-  const archiveEvery = kind === "long" ? 5 : 9; // a few archive candidates
-  const graphicEvery = kind === "long" ? 6 : 7;
+// ---------------------------------------------------------------------------
+// v1A.2 Visual Director
+//
+// ONE structured planning call decides what the viewer should SEE across BOTH
+// films. The model answers, for every narration beat, "what should the viewer
+// understand from this image?" and returns the medium (archive / reconstruction
+// / graphic), a concrete purpose, must-show / must-not-show constraints grounded
+// in the verified facts, whether motion helps, and a specific scene.
+//
+// Timing stays local: narration beats are built here from the script with the
+// existing sentence grouping, only the beat id + excerpt is sent to the model,
+// and word ranges / shot indexes are mapped back locally afterwards. Everything
+// after planning is ordinary deterministic code. Mock mode never calls a
+// provider - it uses a tiny deterministic fallback planner.
+// ---------------------------------------------------------------------------
 
-  // Which groups carry a story-moment caption (spread across the film).
-  const momentAt = new Map<number, number>();
-  story.moments.forEach((_, m) => {
-    const g = Math.min(groups.length - 1, Math.round(((m + 0.7) / story.moments.length) * (groups.length - 1)));
-    if (!momentAt.has(g)) momentAt.set(g, m);
+// Roughly how many meaningful visual beats a film should have, from the narration
+// length. buildBeats splits long sentences on punctuation to actually reach this
+// density (a static, sentence-bounded plan was the v1A.2 weakness), but never
+// manufactures empty fragments to hit the number.
+function targetBeats(kind: "long" | "short", durationSec: number): number {
+  return kind === "long" ? clamp(Math.round(durationSec / 8), 30, 40) : clamp(Math.round(durationSec / 4), 14, 18);
+}
+
+// One narration beat: an excerpt of the script tied to its word range. The model
+// only ever sees id + excerpt; the word range is mapped back locally afterwards.
+export interface Beat {
+  id: number;
+  excerpt: string;
+  wordStart: number;
+  wordEnd: number;
+}
+
+export function buildBeats(kind: "long" | "short", script: string, narration: Narration): Beat[] {
+  const groups = groupBeats(script, targetBeats(kind, narration.durationSec));
+  return groups.map((g, id) => ({ id, excerpt: g.text, wordStart: g.wordStart, wordEnd: g.wordEnd }));
+}
+
+// What the Visual Director decides for one beat. Deliberately small - just enough
+// to build a PlannedShot. Timing and shot index are added locally, never by the
+// model.
+export interface DirectorShot {
+  beatId: number;
+  purpose: string;
+  truth: Truth;
+  mustShow: string[];
+  mustNotShow: string[];
+  wantsMotion: boolean;
+  motion: Motion;
+  prompt: string; // a specific scene / framing for this beat (the creative seed)
+  archiveQuery: string; // empty unless truth === "archive"
+  useMaster: boolean;
+  // v1A.4, internal only (never reaches PlannedShot or the DB). When true on a
+  // LATER beat, this beat introduces no new concrete drawable visual, so assembly
+  // keeps showing the previous shot and extends its word range instead of
+  // inventing filler. Ignored on beat 0, which must always create a real visual.
+  reusePrevious?: boolean;
+}
+
+export interface DirectorPlans {
+  long: DirectorShot[];
+  short: DirectorShot[];
+}
+
+export interface DirectorInput {
+  story: Story;
+  research: ResearchPackage;
+  scripts: { long: string; short: string };
+  beats: { long: Beat[]; short: Beat[] };
+}
+
+// A Visual Director turns the story + beats into both plans in one shot. Injected
+// in tests; the default picks the live OpenAI director or the offline fallback.
+export type VisualDirector = (input: DirectorInput, respond?: typeof respondJson) => Promise<DirectorPlans>;
+
+const TRUTHS: readonly Truth[] = ["archive", "reconstruction", "graphic"];
+const MOTIONS: readonly Motion[] = ["hold", "push", "pan-left", "pan-right"];
+
+const directorShotSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["beatId", "purpose", "truth", "mustShow", "mustNotShow", "wantsMotion", "motion", "prompt", "archiveQuery", "useMaster", "reusePrevious"],
+  properties: {
+    beatId: { type: "integer" },
+    purpose: { type: "string" },
+    truth: { type: "string", enum: TRUTHS as unknown as string[] },
+    mustShow: { type: "array", items: { type: "string" } },
+    mustNotShow: { type: "array", items: { type: "string" } },
+    wantsMotion: { type: "boolean" },
+    motion: { type: "string", enum: MOTIONS as unknown as string[] },
+    prompt: { type: "string" },
+    archiveQuery: { type: "string" },
+    useMaster: { type: "boolean" },
+    reusePrevious: { type: "boolean" },
+  },
+};
+
+const DIRECTOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["long", "short"],
+  properties: {
+    long: { type: "array", items: directorShotSchema },
+    short: { type: "array", items: directorShotSchema },
+  },
+};
+
+export const DIRECTOR_INSTRUCTIONS = `You are the Visual Director for PastBriefly, a factual historical documentary. You are given one story, its FINAL verified research (facts, moments, sources, story world), the Long and Short scripts, and a list of narration beats for each film. Decide, for every beat, what the viewer should SEE. Return strict JSON: one decision object per beat id, for both films.
+
+THE CENTRAL RULE - for every beat answer: "What should the viewer understand from this image?" The purpose must describe a VISIBLE idea a storyboard artist could draw. GOOD: "Establish the Soviet submarine visibly grounded on rocks inside the narrow Swedish archipelago." "Show Swedish patrol boats forming a perimeter around the grounded submarine." "Explain how close the grounding site was to the Karlskrona naval base." BAD (never do this): "Show Cold War", "Show Soviet Sweden", "Create tension", "Espionage suspicions", or any mood/atmosphere label. If a human could not draw it, it is too vague - rewrite it.
+
+ONE FRAME MEANS ONE FRAME - every beat is ONE drawable frame: one location, one moment, one primary action, from a single vantage. Explicitly forbidden: a collage, a montage, a split screen, a split-focus that shows two different actions at once, a "through a window / through a hatch" trick used to depict a second event, a "series of shots", a before/after, or any composite that stitches together separate scenes, locations or actions. A graphic may carry several marks on ONE map or diagram ONLY because they all explain one spatial fact; it must still communicate one concrete piece of information, not a collage of unrelated scenes.
+
+FACTUAL GROUNDING (HARD FACTUAL VISUAL RULE) - the verified facts are hard constraints. Any concrete, event-specific thing you place on screen must be supported by the final fact sheet, the verified research moments, or the audited narration beat itself. Do NOT invent event-specific ships, families, crowds, meetings, equipment upgrades, public reactions, press conferences, documents, weather, military deployments, rooms or interiors, or actions just because they would make a nice image. Generic period/location presentation is acceptable ONLY when it does not claim that a specific historical event happened. If no supported drawable visual exists for a beat, set reusePrevious=true rather than inventing one. mustShow lists only the concrete things needed to communicate the beat. mustNotShow protects against obvious historical mistakes (wrong flag, wrong era, a vessel freely underway when it is aground, active battle when there was none). Keep both lists short and concrete.
+
+NO NEW VISUAL (reusePrevious) - you see every beat in order. Beat 0 must always create a real visual. On any LATER beat where the narration introduces no new concrete, factual, useful thing to show - it merely restates, reflects on, or abstractly comments - set reusePrevious=true. That keeps the previous meaningful visual on screen instead of inventing filler; your other fields for that beat still fill the schema but are ignored. reusePrevious IS THE DEFAULT for a beat whose narration mainly communicates interpretation, suspicion, uncertainty, consequence, policy significance, tension, transition, summary or reflection, when the verified facts and research give NO specific supported drawable event or object for it: in that case reusePrevious MUST be true. Do NOT invent a physical scene just so every beat gets a new image. Do NOT overuse it either: choose a genuinely new visual whenever the story introduces a real new event, object, location, action or piece of evidence.
+
+PLAUSIBLE IS NOT SUPPORTED - historically plausible is not enough. Every event-specific visual must be supported by the verified facts, the research moments, the sources, or the narration itself. You may NOT invent meetings, rooms, confrontations, crowds, reactions, equipment use, public scenes or military actions merely because they sound likely for the period or the situation. If there is no supported drawable event or object for a beat, set reusePrevious=true rather than staging a plausible-looking scene.
+
+DO NOT DRAMATIZE NEGATIONS OR LIMITATIONS - when the narration says something did not happen, was prevented, was limited, was refused, or remained uncertain, do NOT invent a confrontation or action to visualise that absence. For "access was limited", do NOT stage someone physically blocking another person at a hatch. Instead set reusePrevious, or use a supported exterior or detail already established by the facts or research.
+
+MEDIA CHOICE (truth) from story meaning:
+- "archive": real historical media could directly show or prove the beat (the actual event, real people, contemporary press/photo/document). Choose archive ONLY when a specific real historical asset (a real photo, document, film or identifiable person/scene) plausibly exists to be found. Provide a specific, event-specific archiveQuery targeting that event/person/object - never generic like "Sweden 1981", and never use archive to outsource a vague idea like "public concern", "defence preparedness" or "national anxiety". Do NOT choose archive for an abstract outcome such as an apology, a reimbursement, a policy change or public concern, unless the research or sources point to a real photo, document or event that captured it. For such abstract narration, use a concrete supported object or event if one exists, a graphic that states a concrete fact, otherwise reusePrevious.
+- "reconstruction": a physical event that must be shown but lacks suitable archive material.
+- "graphic": information that is clearer spatially or informationally - geography, route, distance, positions, timeline, a simple comparison. Never choose a graphic for atmosphere, and never a generic "military infographic". For a graphic, purpose and mustShow must state the exact information (e.g. purpose "Show the grounding site relative to the Karlskrona naval base", mustShow ["Karlskrona naval base","grounding location","relative distance"]).
+archiveQuery is "" for non-archive beats.
+
+ARCHIVE FALLBACK MUST NOT FAKE HISTORY - for an archive beat, archiveQuery seeks the real historical material, but your prompt is the RECONSTRUCTION FALLBACK used only if archive acquisition fails. That fallback must NEVER fabricate a newspaper headline, a communiqué's text, a report's text, a TV broadcast, a logo, a press photograph, or any readable historical document. Instead describe the surrounding physical scene with no readable text: e.g. for a real Soviet communiqué, "a period diplomatic office, officials handling documents, no readable text", NOT an AI-generated fake Soviet communiqué in Cyrillic. The same holds for newspapers and broadcasts.
+
+SCENE (prompt) - a specific single frame for this beat, grounded in purpose + mustShow + mustNotShow + the story world + the beat. Describe a concrete composition suited to the subject (a wide elevated vantage for geography, a medium eye-level shot for people mid-action, a tight detail for an instrument or measurement). Do NOT return generic prompts like "cinematic Cold War scene" or "dramatic military atmosphere", and do not rotate through a fixed set of camera shapes.
+
+PROGRESSION / NO REPETITION - you see the whole sequence, so make it progress. Successive shots must not restate the same composition or information. Do not repeatedly return to the same image (e.g. "the submarine on the rocks with Swedish boats") unless the new shot communicates a genuinely new event. When later narration references an event already shown, use a supported new detail, a map, a document/archive, or reusePrevious - do NOT create a new camera angle merely to claim visual variety. If a previous shot already communicated the same geography or spatial relationship, set reusePrevious rather than generating another similar map from a slightly different angle. A new shot must add new information. Prefer a meaningful arc such as establish -> geography -> discovery -> containment -> interaction -> detail/measurement -> evidence -> departure. This is guidance, not a fixed sequence to copy.
+
+BEAT TARGETS ARE GUIDANCE, NOT A QUOTA - the beat list gives roughly 30-40 beats for Long and 14-18 for Short. These are loose upper-direction targets, not a quota. Do not manufacture extra visual cuts merely to hit a number: a smaller number of meaningful, supported visuals (with reusePrevious covering the rest) is better than filler.
+
+MOTION - set wantsMotion true only when REAL movement improves the beat (a vessel moving, people approaching or interacting, refloating or towing, a physical operation). Keep it false for an archive photo, a document, a map/graphic, a static instrument detail, a portrait or static evidence. When wantsMotion is true, pick a motion that matches the movement (push for approach, pan-left/pan-right for lateral movement); otherwise motion is "hold". Never add motion just to make the film feel busy.
+
+MASTER (useMaster) - true only where visual continuity genuinely helps (a recurring person, a recurring vessel/object, the same environment where consistency matters). Most shots do NOT use the master. Never on a graphic.
+
+INDEPENDENCE - plan the Short film independently from the Long film. The Short has a faster rhythm with one immediate beat each; the Long has room for more geography, evidence and context. Do NOT derive the Short by cropping or summarising the Long.
+
+Return one decision per beat id given, for both "long" and "short".`;
+
+// The one live planning call. Builds a single payload with the story, verified
+// facts, both scripts and both beat lists, and returns both plans in one call.
+export const openAiVisualDirector: VisualDirector = async (input, respond = respondJson) => {
+  return respond<DirectorPlans>({
+    instructions: DIRECTOR_INSTRUCTIONS,
+    input: directorPayload(input),
+    schemaName: "visual_plan",
+    schema: DIRECTOR_SCHEMA,
   });
+};
 
-  let recon = 0; // advances only on reconstruction shots, so the shape cycle never repeats back-to-back
-  let graphic = 0;
+function directorPayload(input: DirectorInput): string {
+  const { story, research, scripts, beats } = input;
+  const w = research.world;
+  const beatLines = (bs: Beat[]) => bs.map((b) => `#${b.id}: ${b.excerpt}`).join("\n");
+  return [
+    `STORY: ${story.title}`,
+    `YEAR: ${story.year}`,
+    `PLACE: ${story.place}`,
+    `HOOK: ${story.hook}`,
+    `SUMMARY: ${research.summary}`,
+    "",
+    "VERIFIED FACTS (hard visual constraints - do not contradict these):",
+    (research.facts ?? []).map((f) => `- ${f.fact}`).join("\n") || "- (none provided)",
+    "",
+    "MOMENTS:",
+    research.moments.map((m) => `- ${m.title}: ${m.detail}`).join("\n") || "- (none)",
+    "",
+    "SOURCES:",
+    research.sources.map((s) => `- ${s.title}`).join("\n") || "- (none)",
+    "",
+    "STORY WORLD:",
+    `- period: ${w.period}`,
+    `- place: ${w.place}`,
+    `- palette: ${w.palette}`,
+    `- visual direction: ${w.visualDirection}`,
+    `- recurring people: ${w.recurringPeople.join("; ") || "(none)"}`,
+    `- recurring locations: ${w.recurringLocations.join("; ") || "(none)"}`,
+    "",
+    `LONG SCRIPT:\n${scripts.long}`,
+    "",
+    `SHORT SCRIPT:\n${scripts.short}`,
+    "",
+    "LONG BEATS (return one decision per beat id, in order):",
+    beatLines(beats.long),
+    "",
+    "SHORT BEATS (plan the Short film independently - do NOT crop the Long plan):",
+    beatLines(beats.short),
+    "",
+    'Return JSON { "long": [...], "short": [...] } with one decision object per beat id above.',
+  ].join("\n");
+}
 
-  return groups.map((group, i): PlannedShot => {
-    let truth: Truth = "reconstruction";
-    if (i > 0 && i % graphicEvery === 0) truth = "graphic";
-    else if (i > 0 && i % archiveEvery === 0) truth = "archive";
+// Offline, deterministic planner for mock mode, tests and the demo. It is NOT the
+// production brain - just a tiny valid plan so the pipeline runs without any
+// provider. It never derives meaning from keywords.
+export const fallbackVisualDirector: VisualDirector = async (input) => ({
+  long: fallbackDecisions("long", input.beats.long, input.research),
+  short: fallbackDecisions("short", input.beats.short, input.research),
+});
 
-    const wantsMotion = truth === "reconstruction" && i % 3 === 1;
-    const motion: Motion = truth === "graphic" ? "hold" : wantsMotion ? pickMotion(i) : i % 4 === 0 ? "push" : "hold";
-
-    let caption: Caption | undefined;
-    if (i === 0) caption = { kicker: story.year, text: story.title, emphasis: kind === "short" ? story.place : undefined, variant: "opener" };
-    else if (momentAt.has(i)) {
-      const m = story.moments[momentAt.get(i)!];
-      caption = { kicker: story.place, text: m.title, variant: "moment" };
-    }
-
-    let prompt: string;
-    let useMaster = false;
-    if (truth === "graphic") prompt = graphicPrompt(world, story, graphic++);
-    else {
-      const shape = SHOT_SHAPES[recon++ % SHOT_SHAPES.length];
-      prompt = reconstructionPrompt(kind, world, group.text, shape);
-      useMaster = shape.continuity; // the master helps recurring people/look, not every wide
-    }
-
+function fallbackDecisions(_kind: "long" | "short", beats: Beat[], research: ResearchPackage): DirectorShot[] {
+  const w = research.world;
+  const place = w.place || "the location";
+  return beats.map((beat, i): DirectorShot => {
+    const graphic = i > 0 && i % 5 === 4;
+    const truth: Truth = graphic ? "graphic" : "reconstruction";
+    const moving = truth === "reconstruction" && i > 0 && i % 6 === 3;
     return {
-      index: i,
+      beatId: beat.id,
+      purpose: graphic
+        ? `Show where this happened at ${place} and how the places relate.`
+        : `Show the key action of this moment at ${place}.`,
       truth,
-      motion,
-      wantsMotion,
-      prompt,
-      archiveQuery: truth === "archive" ? archiveQueryFor(story, groups.length, i) : undefined,
-      useMaster,
-      caption,
-      source: undefined,
-      wordStart: group.wordStart,
-      wordEnd: group.wordEnd,
+      mustShow: graphic
+        ? [place, "the spatial relationship between them"]
+        : [w.recurringPeople[0], `the ${w.period} ${place} setting`].filter(Boolean) as string[],
+      mustNotShow: ["modern vehicles, equipment or clothing"],
+      wantsMotion: moving,
+      motion: moving ? "push" : "hold",
+      prompt: beat.excerpt.slice(0, 120),
+      archiveQuery: "",
+      useMaster: truth === "reconstruction" && i > 0 && i % 4 === 2,
     };
   });
 }
 
-function pickMotion(i: number): Motion {
-  return (["push", "pan-left", "pan-right"] as Motion[])[i % 3];
+const defaultDirector: VisualDirector = (input) => (config.mode === "live" ? openAiVisualDirector(input) : fallbackVisualDirector(input));
+
+// Plan both films in ONE Visual Director call. Beats (and therefore timing and
+// shot indexes) are built and mapped locally; the director only decides what each
+// beat should show. Returns the Long and Short PlannedShot lists together.
+export async function planVisuals(
+  story: Story,
+  research: ResearchPackage,
+  scripts: { long: string; short: string },
+  narration: { long: Narration; short: Narration },
+  director: VisualDirector = defaultDirector,
+): Promise<{ long: PlannedShot[]; short: PlannedShot[] }> {
+  // Live planning is only as truthful as its inputs. A ResearchPackage with no
+  // verified facts (e.g. legacy research from before the fact sheet) defeats
+  // factual visual grounding, so refuse rather than plan ungrounded live visuals.
+  // Mock mode keeps its deterministic fallback, which needs no facts.
+  if (config.mode === "live" && !(research.facts && research.facts.length > 0)) {
+    throw new Error("Visual planning requires verified facts. Re-run the current research/text pipeline before planning visuals.");
+  }
+  const beats = {
+    long: buildBeats("long", scripts.long, narration.long),
+    short: buildBeats("short", scripts.short, narration.short),
+  };
+  const plans = await director({ story, research, scripts, beats });
+  return {
+    long: assembleShots("long", beats.long, plans?.long ?? [], story, research),
+    short: assembleShots("short", beats.short, plans?.short ?? [], story, research),
+  };
 }
 
-// Generic composition shapes rotated across reconstruction shots so successive
-// stills differ in scale, camera and subject instead of restating one framing.
-// `continuity` shapes depict recurring people/look, where the master reference
-// genuinely helps; the rest are composed freely to avoid near-duplicate frames.
-const SHOT_SHAPES: { look: string; continuity: boolean }[] = [
-  { look: "wide establishing shot from a high vantage, the location dominant and any figures small", continuity: false },
-  { look: "medium shot of the people mid-action at eye level, shallow depth of field", continuity: true },
-  { look: "tight close-up of a single object, surface or detail central to this moment", continuity: false },
-  { look: "low-angle shot looking upward, emphasising scale and tension", continuity: false },
-  { look: "over-the-shoulder view from behind a figure looking toward the main subject", continuity: true },
-  { look: "elevated three-quarter view showing movement across the location", continuity: false },
-  { look: "quiet, sparse aftermath wide, still and nearly empty", continuity: false },
-];
+// Map the director's per-beat decisions back onto the local beats: one shot per
+// beat, in narration order, with the word range and shot index assigned locally
+// (never by the model). Every value is validated and the final image prompt is
+// composed deterministically from purpose + constraints + the model's scene, so
+// prompt hygiene (aspect ratio, palette, anachronism guards) can never be lost.
+// Only the opener carries a headline caption; later beats carry none.
+function assembleShots(
+  kind: "long" | "short",
+  beats: Beat[],
+  decisions: DirectorShot[],
+  story: Story,
+  research: ResearchPackage,
+): PlannedShot[] {
+  const world = research.world;
+  const byId = new Map<number, DirectorShot>();
+  for (const d of decisions) if (d && typeof d.beatId === "number" && !byId.has(d.beatId)) byId.set(d.beatId, d);
 
-function reconstructionPrompt(kind: "long" | "short", world: StoryWorld, text: string, shape: { look: string }): string {
-  const frame = kind === "short" ? "vertical 9:16 composition" : "wide 16:9 composition";
-  return `${world.visualDirection} Shot: ${shape.look}. Scene: ${text.slice(0, 160)} Palette: ${world.palette}. Cinematic editorial historical reconstruction, ${frame}, strong subject separation, premium material rendering, not glossy or plastic.`;
+  const shots: PlannedShot[] = [];
+  beats.forEach((beat, beatPos) => {
+    const d = byId.get(beat.id);
+
+    // v1A.4 "no new visual": a LATER beat that introduces nothing new to show
+    // reuses the previous shot. We create NO new PlannedShot (so no extra media
+    // spend) and simply extend the previous shot's word range to cover this beat,
+    // preserving its visual. Beat 0 always creates a real visual, and reuse needs
+    // a previous shot to extend - otherwise we fall through and create one.
+    if (beatPos > 0 && d?.reusePrevious && shots.length > 0) {
+      shots[shots.length - 1].wordEnd = beat.wordEnd;
+      return;
+    }
+
+    const index = shots.length;
+    const truth = validTruth(d?.truth);
+    const purpose = cleanPurpose(d?.purpose, story, world, truth);
+    const { mustShow, mustNotShow } = cleanConstraints(d, truth, story, world);
+    const useMaster = truth === "reconstruction" && !!d?.useMaster;
+    const wantsMotion = truth === "reconstruction" && !!d?.wantsMotion;
+    let motion: Motion = "hold";
+    if (wantsMotion) {
+      const m = validMotion(d?.motion);
+      motion = m === "hold" ? "push" : m;
+    }
+    const scene = (d?.prompt ?? "").trim() || beat.excerpt;
+    const prompt =
+      truth === "graphic"
+        ? graphicPrompt(world, story, purpose, mustShow, scene)
+        : reconstructionPrompt(kind, world, story, purpose, mustShow, mustNotShow, scene);
+    const archiveQuery = truth === "archive" ? (d?.archiveQuery?.trim() || archiveQueryFor(story, beats.length, beatPos)) : undefined;
+    const caption: Caption | undefined =
+      index === 0 ? { kicker: story.year, text: story.title, emphasis: kind === "short" ? story.place : undefined, variant: "opener" } : undefined;
+
+    shots.push({
+      index,
+      truth,
+      motion,
+      wantsMotion,
+      prompt,
+      purpose,
+      mustShow,
+      mustNotShow,
+      archiveQuery,
+      useMaster,
+      caption,
+      source: undefined,
+      wordStart: beat.wordStart,
+      wordEnd: beat.wordEnd,
+    });
+  });
+  return shots;
 }
 
-// Informational graphics rotated so a `graphic` shot reads as a map/document/
-// diagram, never another cinematic reconstruction. Kept almost entirely visual:
-// image models render text unreliably, so the readable explanation is left to the
-// app's captions. Still one image the current renderer can place - no new engine.
-const GRAPHIC_KINDS = [
-  "a clean historical map of the region: coastline, water and land in muted blocks with a few small marker dots, no text blocks or paragraphs",
-  "an abstract timeline: a single horizontal line with a handful of evenly spaced marker dots, no sentences",
-  "an aged paper document shown as texture and form only, any writing blurred and illegible, no readable paragraphs",
-  "a simple schematic of plain shapes and connecting arrows, no labels beyond the occasional single word",
-];
+function validTruth(t: unknown): Truth {
+  return TRUTHS.includes(t as Truth) ? (t as Truth) : "reconstruction";
+}
 
-function graphicPrompt(world: StoryWorld, story: Story, n: number): string {
-  const kind = GRAPHIC_KINDS[n % GRAPHIC_KINDS.length];
-  return `Flat editorial information graphic, not a photographic scene: ${kind}. Region and period: ${story.place}, ${world.period}. Keep it almost entirely visual with minimal or no text - the app adds captions separately, so do not render paragraphs, labels or legends. Muted palette ${world.palette}, no cinematic lighting and no posed actors.`;
+function validMotion(m: unknown): Motion {
+  return MOTIONS.includes(m as Motion) ? (m as Motion) : "push";
+}
+
+// A purpose must state a visible idea. Trust a real one from the director; only
+// synthesise a concrete fallback when it is missing.
+function cleanPurpose(p: string | undefined, story: Story, world: StoryWorld, truth: Truth): string {
+  const s = (p ?? "").trim();
+  if (s.length >= 6) return s;
+  const place = world.place || story.place;
+  if (truth === "graphic") return `Show where this happened at ${place} and how the places relate.`;
+  if (truth === "archive") return `Show genuine historical material from ${story.title}.`;
+  return `Show the key action of this moment at ${place}.`;
+}
+
+// Universal generated-image hygiene that can never contradict a scene: it forbids
+// only artefacts no beat would ever legitimately need to SHOW. Scene-specific
+// restrictions (era, flags, behaviour) are owned by the director's mustNotShow,
+// so we never append deterministic content guards that could fight its mustShow.
+const IMAGE_HYGIENE = "logos, watermarks, signatures or any unintended readable text";
+
+// Keep the director's concrete constraints verbatim (only trimmed, deduped and
+// capped) and guarantee a non-empty must-show. mustNotShow is the director's own
+// fact-grounded list - no deterministic guards are injected, so it can never
+// contradict a scene-specific mustShow. Universal image hygiene lives in the
+// prompt envelope instead.
+function cleanConstraints(d: DirectorShot | undefined, truth: Truth, story: Story, world: StoryWorld): { mustShow: string[]; mustNotShow: string[] } {
+  const place = world.place || story.place;
+  let mustShow = dedupe((d?.mustShow ?? []).map((x) => String(x).trim()).filter(Boolean)).slice(0, 6);
+  if (!mustShow.length) {
+    mustShow =
+      truth === "graphic"
+        ? [place, "the spatial relationship between them"]
+        : ([world.recurringPeople[0], `the ${world.period} ${place} setting`].filter(Boolean) as string[]);
+  }
+  const mustNotShow = dedupe((d?.mustNotShow ?? []).map((x) => String(x).trim()).filter(Boolean)).slice(0, 6);
+  return { mustShow, mustNotShow };
+}
+
+function dedupe(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of list) {
+    const key = x.toLowerCase().trim();
+    if (x && !seen.has(key)) {
+      seen.add(key);
+      out.push(x);
+    }
+  }
+  return out;
+}
+
+// The final image prompt for a reconstruction. Built from the beat itself - the
+// purpose, the director's constraints and specific scene, the period and place -
+// not from a blanket story-world sentence (that used to inject the same
+// submarine-and-coast subjects into indoor, document and aftermath scenes alike).
+// The story world informs STYLE only (palette). This same builder is the clean
+// reconstruction FALLBACK for an archive beat when acquisition finds no material,
+// so it never asks the model to fake archival footage.
+function reconstructionPrompt(
+  kind: "long" | "short",
+  world: StoryWorld,
+  story: Story,
+  purpose: string,
+  mustShow: string[],
+  mustNotShow: string[],
+  scene: string,
+): string {
+  const frame = kind === "short" ? "Vertical 9:16 composition" : "Wide 16:9 composition";
+  const show = mustShow.length ? ` Must show: ${mustShow.join("; ")}.` : "";
+  const avoid = mustNotShow.length ? ` Do not show: ${mustNotShow.join("; ")}.` : "";
+  const setting = [world.place || story.place, world.period].filter(Boolean).join(", ");
+  const where = setting ? ` Setting: ${setting}.` : "";
+  return `Purpose: ${purpose}${show}${avoid} Scene: ${scene}.${where} ${frame}. Palette: ${world.palette}. Grounded historical-editorial reconstruction in the consistent PastBriefly style: photographic, period-accurate, strong subject separation, premium material rendering, not glossy or plastic. Do not include ${IMAGE_HYGIENE}.`;
+}
+
+// A graphic describes the information it must convey (purpose + must-show), not a
+// generic map/timeline template and never cinematic/reconstruction wording. Kept
+// almost entirely visual - the readable explanation is left to the app's captions.
+// The full director concept is used; it is never truncated. No new Remotion map
+// engine here.
+function graphicPrompt(world: StoryWorld, story: Story, purpose: string, mustShow: string[], scene: string): string {
+  const show = mustShow.length ? ` It must make clear: ${mustShow.join("; ")}.` : "";
+  const concept = scene ? ` Concept: ${scene}.` : "";
+  return `Flat editorial information graphic, not a photographic scene. Purpose: ${purpose}${show}${concept} Region and period: ${story.place}, ${world.period}. Keep it almost entirely visual with minimal or no text - the app adds captions separately, so do not render paragraphs, labels or legends. Muted palette ${world.palette}, flat even lighting and no posed actors. Do not include ${IMAGE_HYGIENE}.`;
 }
 
 // A specific archive query per shot: place and year anchored, plus the salient
