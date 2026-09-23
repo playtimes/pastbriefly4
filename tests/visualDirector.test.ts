@@ -12,7 +12,7 @@ process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
-const { planVisuals, buildBeats, openAiVisualDirector, DIRECTOR_INSTRUCTIONS } = await import("../src/production/visuals.ts");
+const { planVisuals, buildBeats, openAiVisualDirector, masterPrompt, DIRECTOR_INSTRUCTIONS } = await import("../src/production/visuals.ts");
 import type { DirectorInput, DirectorPlans, DirectorShot } from "../src/production/visuals.ts";
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { recordNarration } = await import("../src/production/narration.ts");
@@ -508,5 +508,97 @@ describe("v1A.5 reuse discipline instructions", () => {
     expect(DIRECTOR_INSTRUCTIONS).toMatch(/already communicated the same geography or spatial relationship/i);
     expect(DIRECTOR_INSTRUCTIONS).toMatch(/rather than generating another similar map/i);
     expect(DIRECTOR_INSTRUCTIONS).toMatch(/A new shot must add new information\./);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1 Still Generation: one shared reconstruction still-realism envelope, applied
+// to per-shot reconstructions, the archive reconstruction fallback and the master
+// - pushing images toward observed documentary photography and away from staged
+// "AI historical poster" styling. The Visual Director, PlannedShot, graphics and
+// archive acquisition are untouched. Prompt-envelope only, no AI calls here.
+// ---------------------------------------------------------------------------
+describe("v1 still-realism envelope", () => {
+  test("reconstruction stills ask for observational documentary photography", async () => {
+    const { long } = await mockPlan();
+    const recon = long.filter((s) => s.truth === "reconstruction");
+    expect(recon.length).toBeGreaterThan(0);
+    for (const s of recon) {
+      expect(s.prompt).toMatch(/observational photograph/i);
+      expect(s.prompt).toMatch(/photojournalistic/i);
+      expect(s.prompt).toMatch(/candid/i);
+    }
+  });
+
+  test("reconstruction stills forbid decorative flags/emblems and invented insignia unless Must show requires them", async () => {
+    const { long } = await mockPlan();
+    for (const s of long.filter((x) => x.truth === "reconstruction")) {
+      expect(s.prompt).toMatch(/do not add flags, banners, emblems, insignia/i);
+      expect(s.prompt).toMatch(/uniform patches/i);
+      expect(s.prompt).toMatch(/unless such an item is explicitly named in Must show/i);
+    }
+  });
+
+  test("reconstruction stills forbid staged line-ups / symmetrical posing and use minimum people", async () => {
+    const { long } = await mockPlan();
+    for (const s of long.filter((x) => x.truth === "reconstruction")) {
+      expect(s.prompt).toMatch(/no line-ups/i);
+      expect(s.prompt).toMatch(/symmetrical or ceremonial/i);
+      expect(s.prompt).toMatch(/minimum number of people/i);
+    }
+  });
+
+  test("reconstruction stills demand period clothing and forbid modern PPE/electronics unless supported", async () => {
+    const { long } = await mockPlan();
+    for (const s of long.filter((x) => x.truth === "reconstruction")) {
+      expect(s.prompt).toMatch(/period-appropriate/i);
+      expect(s.prompt).toMatch(/modern PPE/i);
+      expect(s.prompt).toMatch(/modern electronics/i);
+    }
+  });
+
+  test("reconstruction stills drop the old glossy hero-poster tail", async () => {
+    const { long } = await mockPlan();
+    for (const s of long.filter((x) => x.truth === "reconstruction")) {
+      expect(s.prompt).not.toContain("premium material rendering");
+      expect(s.prompt).not.toContain("Grounded historical-editorial reconstruction in the consistent PastBriefly style");
+    }
+  });
+
+  test("the master prompt uses the same still-realism direction and drops the cinematic hero wording", () => {
+    const p = masterPrompt(story, paulBunyanResearch.world);
+    expect(p).toMatch(/observational photograph/i);
+    expect(p).toMatch(/no propaganda-poster styling/i);
+    expect(p).toMatch(/do not add flags, banners, emblems, insignia/i);
+    expect(p).toContain(paulBunyanResearch.world.palette); // palette preserved
+    expect(p).toMatch(/Wide 16:9/); // aspect-ratio handling preserved
+    expect(p).not.toContain("Cinematic editorial, premium"); // old glossy hero wording removed
+  });
+
+  test("the archive reconstruction fallback receives the same still-realism rules", async () => {
+    const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
+      long: input.beats.long.map((b): DirectorShot => ({
+        beatId: b.id, purpose: "Show the felled poplar's stump left standing.", truth: "archive",
+        mustShow: ["the poplar stump"], mustNotShow: [], wantsMotion: false, motion: "hold",
+        prompt: "The stump left standing after the tree came down.", archiveQuery: "Operation Paul Bunyan tree 1976", useMaster: false,
+      })),
+      short: [],
+    });
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
+    expect(plans.long[0].truth).toBe("archive");
+    expect(plans.long[0].prompt).toMatch(/observational photograph/i);
+    expect(plans.long[0].prompt).toMatch(/do not add flags, banners, emblems, insignia/i);
+  });
+
+  test("graphic prompts do NOT receive reconstruction still-realism styling", async () => {
+    const { long } = await mockPlan();
+    const graphics = long.filter((s) => s.truth === "graphic");
+    expect(graphics.length).toBeGreaterThan(0);
+    for (const g of graphics) {
+      expect(g.prompt).not.toMatch(/observational photograph/i);
+      expect(g.prompt).not.toMatch(/photojournalistic/i);
+      expect(g.prompt).not.toMatch(/propaganda-poster/i);
+      expect(g.prompt).toMatch(/information graphic/i);
+    }
   });
 });

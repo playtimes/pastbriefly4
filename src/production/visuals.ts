@@ -413,6 +413,16 @@ function cleanPurpose(p: string | undefined, story: Story, world: StoryWorld, tr
 // so we never append deterministic content guards that could fight its mustShow.
 const IMAGE_HYGIENE = "logos, watermarks, signatures or any unintended readable text";
 
+// One shared still-realism ruleset for EVERY generated reconstruction: the per-shot
+// stills, the archive reconstruction fallback, and the master. The 3-still U 137
+// proof showed reconstructions drifting into staged "AI historical poster" territory
+// (oversized decorative flags, mannequin line-ups of crew, invented uniform patches,
+// modern-looking PPE, glossy hero framing). This pushes each image back toward an
+// observed documentary photograph. The symbol/insignia rule defers to the scene's
+// own "Must show" list, so it can never suppress a symbol a beat legitimately needs.
+const RECON_REALISM =
+  "Grounded documentary reconstruction, rendered as an observational photograph rather than a movie poster, concept art or a staged reenactment advertisement. Candid and imperfect, with natural asymmetry, a plausible camera position and ordinary real-world posture; the people are occupied by the real action, not posing or facing the camera. Use only the minimum number of people the action needs: no line-ups, no rows of people facing the same way, no symmetrical or ceremonial groupings, no crowd all looking toward camera, no unnecessary background figures. Natural 35mm photojournalistic framing, restrained contrast, natural practical light, believable materials and honest wear, slight real-world imperfection; no theatrical hero framing, no propaganda-poster styling, no glossy concept-art sheen. Do not add flags, banners, emblems, insignia, national symbols, medals, uniform patches, logos or readable markings, and do not decorate vehicles, hulls, walls or uniforms with them, unless such an item is explicitly named in Must show above. Do not invent modern PPE, modern tactical clothing, modern electronics, contemporary patches or badges, or modern helmets or equipment unless Must show requires them; when exact clothing or equipment is unspecified, use plain, plausible period-appropriate workwear or uniforms without decorative insignia.";
+
 // Keep the director's concrete constraints verbatim (only trimmed, deduped and
 // capped) and guarantee a non-empty must-show. mustNotShow is the director's own
 // fact-grounded list - no deterministic guards are injected, so it can never
@@ -465,7 +475,7 @@ function reconstructionPrompt(
   const avoid = mustNotShow.length ? ` Do not show: ${mustNotShow.join("; ")}.` : "";
   const setting = [world.place || story.place, world.period].filter(Boolean).join(", ");
   const where = setting ? ` Setting: ${setting}.` : "";
-  return `Purpose: ${purpose}${show}${avoid} Scene: ${scene}.${where} ${frame}. Palette: ${world.palette}. Grounded historical-editorial reconstruction in the consistent PastBriefly style: photographic, period-accurate, strong subject separation, premium material rendering, not glossy or plastic. Do not include ${IMAGE_HYGIENE}.`;
+  return `Purpose: ${purpose}${show}${avoid} Scene: ${scene}.${where} ${frame}. Palette: ${world.palette}. ${RECON_REALISM} Do not include ${IMAGE_HYGIENE}.`;
 }
 
 // A graphic describes the information it must convey (purpose + must-show), not a
@@ -621,13 +631,23 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
   shot.mediaType = "image";
 }
 
+// The master/hero reconstruction prompt. It carries the SAME restrained still-realism
+// envelope as every other reconstruction, so the continuity reference is an observed
+// documentary frame rather than a glossy hero poster that then contaminates every
+// shot that borrows it. The master has no per-shot "Must show", so its symbol rule
+// simply suppresses all decorative flags/insignia. Palette and 16:9 handling kept.
+export function masterPrompt(story: Story, world: StoryWorld): string {
+  const setting = [world.place || story.place, world.period].filter(Boolean).join(", ");
+  const where = setting ? ` Setting: ${setting}.` : "";
+  return `A defining establishing reconstruction of ${story.title}.${where} Wide 16:9 composition. Palette: ${world.palette}. ${RECON_REALISM} Do not include ${IMAGE_HYGIENE}.`;
+}
+
 // Generate the master/hero reconstruction used as a continuity reference (live).
 export async function ensureMaster(story: Story, world: StoryWorld): Promise<string> {
   const rel = "images/hero.png";
   const abs = inStory(story.slug, rel);
   if (config.mode === "live") {
-    const prompt = `${world.visualDirection} A defining establishing reconstruction of ${story.title}. Palette: ${world.palette}. Cinematic editorial, premium, wide 16:9.`;
-    await generateImageFile({ prompt, size: "1536x1024", outPath: abs });
+    await generateImageFile({ prompt: masterPrompt(story, world), size: "1536x1024", outPath: abs });
   } else if (!existsSync(abs)) {
     writePlaceholderStill(abs, { width: 1600, height: 900, index: 0, label: story.title, truth: "reconstruction", accent: accentFor(story.category) });
   }
