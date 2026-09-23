@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { config } from "../server/config.ts";
+import path from "node:path";
+import { config, ROOT } from "../server/config.ts";
 import type { Story, Category, VisualPreview, PreviewFrame } from "../types.ts";
 import type { RenderPlan, Shot, Truth, Motion, Caption } from "../render/types.ts";
 import type { StoryWorld, ResearchPackage } from "./pipelineTypes.ts";
@@ -363,7 +364,7 @@ function assembleShots(
     const prompt =
       truth === "graphic"
         ? graphicPrompt(world, story, purpose, mustShow, scene)
-        : reconstructionPrompt(kind, world, story, purpose, mustShow, mustNotShow, scene);
+        : reconstructionPrompt(kind, world, story, purpose, mustShow, mustNotShow, scene, useMaster);
     const archiveQuery = truth === "archive" ? (d?.archiveQuery?.trim() || archiveQueryFor(story, beats.length, beatPos)) : undefined;
     const caption: Caption | undefined =
       index === 0 ? { kicker: story.year, text: story.title, emphasis: kind === "short" ? story.place : undefined, variant: "opener" } : undefined;
@@ -413,15 +414,68 @@ function cleanPurpose(p: string | undefined, story: Story, world: StoryWorld, tr
 // so we never append deterministic content guards that could fight its mustShow.
 const IMAGE_HYGIENE = "logos, watermarks, signatures or any unintended readable text";
 
-// One shared still-realism ruleset for EVERY generated reconstruction: the per-shot
-// stills, the archive reconstruction fallback, and the master. The 3-still U 137
-// proof showed reconstructions drifting into staged "AI historical poster" territory
-// (oversized decorative flags, mannequin line-ups of crew, invented uniform patches,
-// modern-looking PPE, glossy hero framing). This pushes each image back toward an
-// observed documentary photograph. The symbol/insignia rule defers to the scene's
-// own "Must show" list, so it can never suppress a symbol a beat legitimately needs.
+// One shared reconstruction ruleset for EVERY generated reconstruction: the per-shot
+// stills, the archive reconstruction fallback, and the master. The successful PB1
+// proof showed the strongest direction is a historical editorial illustration, not a
+// fake archival photograph, so this opens with that PB1 language. It then KEEPS every
+// factual / anti-slop safeguard learned in Still Generation v1 (minimum people, no
+// line-ups or ceremonial posing, no invented flags/emblems/insignia, no modern
+// PPE/equipment, period-appropriate plain clothing). The symbol/insignia rule defers
+// to the scene's own "Must show" list, so it can never suppress a symbol a beat needs.
 const RECON_REALISM =
-  "Grounded documentary reconstruction, rendered as an observational photograph rather than a movie poster, concept art or a staged reenactment advertisement. Candid and imperfect, with natural asymmetry, a plausible camera position and ordinary real-world posture; the people are occupied by the real action, not posing or facing the camera. Use only the minimum number of people the action needs: no line-ups, no rows of people facing the same way, no symmetrical or ceremonial groupings, no crowd all looking toward camera, no unnecessary background figures. Natural 35mm photojournalistic framing, restrained contrast, natural practical light, believable materials and honest wear, slight real-world imperfection; no theatrical hero framing, no propaganda-poster styling, no glossy concept-art sheen. Do not add flags, banners, emblems, insignia, national symbols, medals, uniform patches, logos or readable markings, and do not decorate vehicles, hulls, walls or uniforms with them, unless such an item is explicitly named in Must show above. Do not invent modern PPE, modern tactical clothing, modern electronics, contemporary patches or badges, or modern helmets or equipment unless Must show requires them; when exact clothing or equipment is unspecified, use plain, plausible period-appropriate workwear or uniforms without decorative insignia.";
+  "Historical editorial illustration in the PastBriefly reconstruction style: painterly but detailed, with textured physical materials, a restrained muted palette, atmospheric natural light and strong subject separation; slightly imperfect and hand-rendered rather than photoreal, serious and grounded, not cartoonish. This is a documentary reconstruction illustration, not a fake archival photograph: no glossy finish, no concept art, no propaganda-poster styling, no hyper-real AI photography. Candid and imperfect, with natural asymmetry and ordinary real-world posture; the people are occupied by the real action, not posing or facing the viewer. Use only the minimum number of people the action needs: no line-ups, no rows of people facing the same way, no symmetrical or ceremonial groupings, no crowd all looking toward the viewer, no unnecessary background figures. Do not add flags, banners, emblems, insignia, national symbols, medals, uniform patches, logos or readable markings, and do not decorate vehicles, hulls, walls or uniforms with them, unless such an item is explicitly named in Must show above. Do not invent modern PPE, modern tactical clothing, modern electronics, contemporary patches or badges, or modern helmets or equipment unless Must show requires them; when exact clothing or equipment is unspecified, use plain, plausible period-appropriate workwear or uniforms without decorative insignia.";
+
+// The one canonical PB1 style reference: the tracked frame that produced the
+// successful U 137 PB1 proof. EVERY generated reconstruction (per-shot stills, the
+// archive reconstruction fallback, and the master) uses ONLY this single image for
+// visual style. Deliberately boring and predictable - no per-scene/category/story
+// selection, and StoryWorld.referenceImages is not repurposed here. Resolved against
+// the repo root (not MEDIA_DIR) because it is a tracked asset, not generated media.
+export const PB1_STYLE_REFERENCE = path.join(ROOT, "media", "style", "pb1", "tambora-summer-snow.png");
+
+// Resolve the canonical PB1 style reference for a live generation. If the tracked
+// file is missing, fail clearly rather than silently generating in a different
+// visual style.
+function pb1StyleReference(): string {
+  if (!existsSync(PB1_STYLE_REFERENCE)) {
+    throw new Error(`PB1 style reference missing at ${PB1_STYLE_REFERENCE}. Restore media/style/pb1/tambora-summer-snow.png before generating reconstructions.`);
+  }
+  return PB1_STYLE_REFERENCE;
+}
+
+// The PB1 reference is style ONLY. This concise, shared note tells the image model how
+// to use the reference image(s), so the same instruction is not duplicated across the
+// reconstruction and master prompts. When a master continuity reference is also passed
+// (useMaster), a second sentence marks it as subject/world continuity only, so the
+// master can never displace the PB1 style reference.
+const PB1_STYLE_ROLE =
+  "Use the provided style reference image only for its illustration treatment, texture, palette, lighting, atmosphere and visual character; do not copy its people, landscape, objects, composition or historical content.";
+const PB1_MASTER_ROLE =
+  "A second reference image, when present, is a subject and world continuity reference only: match the recurring subject and setting it shows, not its composition.";
+const PB1_SCENE_SOURCE = "The factual scene is defined only by this prompt's Purpose, Scene, Must show and Do not show.";
+
+function pb1ReferenceNote(useMaster: boolean): string {
+  return useMaster ? `${PB1_STYLE_ROLE} ${PB1_MASTER_ROLE} ${PB1_SCENE_SOURCE}` : `${PB1_STYLE_ROLE} ${PB1_SCENE_SOURCE}`;
+}
+
+// Reference images for a live reconstruction still. Reconstructions get the canonical
+// PB1 style reference FIRST; a useMaster shot adds the existing master SECOND for
+// subject/world continuity (order fixed so the master never replaces the PB1 style
+// reference). Graphics and real archive stills get no PB1 reference. acquireStill has
+// already converted a failed-archive shot to "reconstruction" before this is called,
+// so an archive fallback is treated like any other reconstruction.
+export function stillReferencePaths(story: Story, shot: PlannedShot, masterRef: string | null): string[] | undefined {
+  if (shot.truth !== "reconstruction") return undefined;
+  const refs = [pb1StyleReference()];
+  if (shot.useMaster && masterRef && existsSync(inStory(story.slug, masterRef))) refs.push(inStory(story.slug, masterRef));
+  return refs;
+}
+
+// The master/hero is itself a PB1-style reconstruction, so it generates through the
+// edit/reference path using only the canonical PB1 style reference.
+export function masterReferencePaths(): string[] {
+  return [pb1StyleReference()];
+}
 
 // Keep the director's concrete constraints verbatim (only trimmed, deduped and
 // capped) and guarantee a non-empty must-show. mustNotShow is the director's own
@@ -469,13 +523,14 @@ function reconstructionPrompt(
   mustShow: string[],
   mustNotShow: string[],
   scene: string,
+  useMaster: boolean,
 ): string {
   const frame = kind === "short" ? "Vertical 9:16 composition" : "Wide 16:9 composition";
   const show = mustShow.length ? ` Must show: ${mustShow.join("; ")}.` : "";
   const avoid = mustNotShow.length ? ` Do not show: ${mustNotShow.join("; ")}.` : "";
   const setting = [world.place || story.place, world.period].filter(Boolean).join(", ");
   const where = setting ? ` Setting: ${setting}.` : "";
-  return `Purpose: ${purpose}${show}${avoid} Scene: ${scene}.${where} ${frame}. Palette: ${world.palette}. ${RECON_REALISM} Do not include ${IMAGE_HYGIENE}.`;
+  return `Purpose: ${purpose}${show}${avoid} Scene: ${scene}.${where} ${frame}. Palette: ${world.palette}. ${RECON_REALISM} ${pb1ReferenceNote(useMaster)} Do not include ${IMAGE_HYGIENE}.`;
 }
 
 // A graphic describes the information it must convey (purpose + must-show), not a
@@ -613,10 +668,10 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
   }
 
   if (config.mode === "live") {
-    // Only continuity shots borrow the master; most stills are composed freely so
-    // the film is a coherent world of different frames, not one repeated framing.
-    const useRef = shot.useMaster && masterRef && existsSync(inStory(story.slug, masterRef));
-    const refs = useRef ? [inStory(story.slug, masterRef!)] : undefined;
+    // Every reconstruction (including an archive shot that fell back to
+    // reconstruction) generates from the canonical PB1 style reference; a continuity
+    // shot adds the master second. Graphics get no reference. See stillReferencePaths.
+    const refs = stillReferencePaths(story, shot, masterRef);
     await generateImageFile({ prompt: shot.prompt, size: size.oa, outPath: abs, referencePaths: refs });
   } else {
     const ref = referenceFrame(inStory(story.slug, "refs"), shot.index);
@@ -631,15 +686,26 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
   shot.mediaType = "image";
 }
 
-// The master/hero reconstruction prompt. It carries the SAME restrained still-realism
-// envelope as every other reconstruction, so the continuity reference is an observed
-// documentary frame rather than a glossy hero poster that then contaminates every
-// shot that borrows it. The master has no per-shot "Must show", so its symbol rule
-// simply suppresses all decorative flags/insignia. Palette and 16:9 handling kept.
+// The master/hero prompt. The master is reused as a CONTINUITY reference for later
+// shots, so it must be a neutral reference plate of the story's recurring subject,
+// NOT another story scene. An earlier version asked for "a defining establishing
+// reconstruction of <title>", which invented a whole scene (trucks, crews, shoreline
+// activity, a staged composition) that then risked contaminating every shot that
+// borrowed the master. So the master now shows only the recurring subject in a plain,
+// action-free presentation and explicitly forbids people, vehicles, equipment,
+// buildings, staged activity, symbols and readable markings. It keeps the SAME PB1
+// reconstruction envelope and style-only reference note (not photographic wording), and
+// stays grounded in the story title, place, period and palette without hardcoding any
+// one story.
 export function masterPrompt(story: Story, world: StoryWorld): string {
   const setting = [world.place || story.place, world.period].filter(Boolean).join(", ");
-  const where = setting ? ` Setting: ${setting}.` : "";
-  return `A defining establishing reconstruction of ${story.title}.${where} Wide 16:9 composition. Palette: ${world.palette}. ${RECON_REALISM} Do not include ${IMAGE_HYGIENE}.`;
+  const where = setting ? ` Period and place context, for palette and atmosphere only: ${setting}.` : "";
+  return (
+    `A neutral continuity reference plate of the single defining recurring subject at the center of ${story.title}: the main object, vessel or structure the story keeps returning to, shown on its own so later shots can stay visually consistent. This is a plain reference view of what that subject looks like in the PastBriefly world, NOT a scene or moment from the story. ` +
+    `Present the subject by itself in a calm, simple exterior view from a neutral three-quarter or broad side angle, with enough of it visible to read its overall form and proportions, in a restrained, near-empty setting that only situates it. No narrative action and no invented supporting scene. ` +
+    `Do not show: people, figures or crowds; vehicles, equipment or props other than the subject itself; buildings or built structures unless the subject itself is one; staged or narrative activity; dramatic action; weapons; flags, banners, emblems, insignia, national symbols, medals or decorative symbols; and no readable markings, text, numbers or signage on the subject or anywhere in the frame. ` +
+    `Wide 16:9 composition. Palette: ${world.palette}.${where} ${RECON_REALISM} ${pb1ReferenceNote(false)} Do not include ${IMAGE_HYGIENE}.`
+  );
 }
 
 // Generate the master/hero reconstruction used as a continuity reference (live).
@@ -647,7 +713,7 @@ export async function ensureMaster(story: Story, world: StoryWorld): Promise<str
   const rel = "images/hero.png";
   const abs = inStory(story.slug, rel);
   if (config.mode === "live") {
-    await generateImageFile({ prompt: masterPrompt(story, world), size: "1536x1024", outPath: abs });
+    await generateImageFile({ prompt: masterPrompt(story, world), size: "1536x1024", outPath: abs, referencePaths: masterReferencePaths() });
   } else if (!existsSync(abs)) {
     writePlaceholderStill(abs, { width: 1600, height: 900, index: 0, label: story.title, truth: "reconstruction", accent: accentFor(story.category) });
   }

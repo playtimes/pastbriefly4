@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,11 +12,12 @@ process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
-const { planVisuals, buildBeats, openAiVisualDirector, masterPrompt, DIRECTOR_INSTRUCTIONS } = await import("../src/production/visuals.ts");
-import type { DirectorInput, DirectorPlans, DirectorShot } from "../src/production/visuals.ts";
+const { planVisuals, buildBeats, openAiVisualDirector, masterPrompt, DIRECTOR_INSTRUCTIONS, stillReferencePaths, masterReferencePaths, PB1_STYLE_REFERENCE } =
+  await import("../src/production/visuals.ts");
+import type { DirectorInput, DirectorPlans, DirectorShot, PlannedShot } from "../src/production/visuals.ts";
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { recordNarration } = await import("../src/production/narration.ts");
-const { ensureStoryDirs } = await import("../src/production/paths.ts");
+const { ensureStoryDirs, inStory } = await import("../src/production/paths.ts");
 const { wordCount, groupBeats } = await import("../src/production/text.ts");
 
 const story = { ...paulBunyanStory, createdAt: new Date().toISOString() };
@@ -350,7 +351,9 @@ describe("v1A.3 planning fixes", () => {
     expect(a.prompt).toContain("Purpose:");
     expect(a.prompt).toMatch(/reconstruction/i);
     expect(a.prompt).not.toMatch(/information graphic/i);
-    expect(a.prompt).not.toMatch(/archival (footage|photo|photograph)/i);
+    // The PB1 direction explicitly disclaims fake archival imagery rather than asking
+    // for it, so the fallback never requests archival footage/photography.
+    expect(a.prompt).toMatch(/not a fake archival photograph/i);
   });
 
   test("graphics carry no cinematic/reconstruction tail", async () => {
@@ -512,21 +515,26 @@ describe("v1A.5 reuse discipline instructions", () => {
 });
 
 // ---------------------------------------------------------------------------
-// v1 Still Generation: one shared reconstruction still-realism envelope, applied
-// to per-shot reconstructions, the archive reconstruction fallback and the master
-// - pushing images toward observed documentary photography and away from staged
-// "AI historical poster" styling. The Visual Director, PlannedShot, graphics and
-// archive acquisition are untouched. Prompt-envelope only, no AI calls here.
+// PB1 Reconstruction Style v1: the successful PB1 historical editorial illustration
+// language is now the DEFAULT for every generated reconstruction (per-shot stills,
+// the archive reconstruction fallback and the master), while all Still Generation v1
+// factual / anti-slop safeguards are preserved. One canonical PB1 style reference is
+// wired in for reconstructions and the master; graphics and real archive keep no PB1
+// reference. Prompt-envelope + reference-wiring only, no AI calls here.
 // ---------------------------------------------------------------------------
-describe("v1 still-realism envelope", () => {
-  test("reconstruction stills ask for observational documentary photography", async () => {
+describe("PB1 reconstruction style prompts", () => {
+  test("reconstruction stills ask for PB1 historical editorial illustration, not fake-archive photography", async () => {
     const { long } = await mockPlan();
     const recon = long.filter((s) => s.truth === "reconstruction");
     expect(recon.length).toBeGreaterThan(0);
     for (const s of recon) {
-      expect(s.prompt).toMatch(/observational photograph/i);
-      expect(s.prompt).toMatch(/photojournalistic/i);
-      expect(s.prompt).toMatch(/candid/i);
+      expect(s.prompt).toMatch(/historical editorial illustration in the PastBriefly reconstruction style/i);
+      expect(s.prompt).toMatch(/painterly but detailed/i);
+      expect(s.prompt).toMatch(/not a fake archival photograph/i);
+      // No longer asks for observational / photojournalistic fake-archive photography.
+      expect(s.prompt).not.toMatch(/observational photograph/i);
+      expect(s.prompt).not.toMatch(/photojournalistic/i);
+      expect(s.prompt).not.toMatch(/35mm/i);
     }
   });
 
@@ -545,6 +553,7 @@ describe("v1 still-realism envelope", () => {
       expect(s.prompt).toMatch(/no line-ups/i);
       expect(s.prompt).toMatch(/symmetrical or ceremonial/i);
       expect(s.prompt).toMatch(/minimum number of people/i);
+      expect(s.prompt).toMatch(/candid/i); // candid / natural asymmetry safeguard kept
     }
   });
 
@@ -557,25 +566,85 @@ describe("v1 still-realism envelope", () => {
     }
   });
 
-  test("reconstruction stills drop the old glossy hero-poster tail", async () => {
+  test("reconstruction stills drop the old photographic and glossy hero-poster tails", async () => {
     const { long } = await mockPlan();
     for (const s of long.filter((x) => x.truth === "reconstruction")) {
       expect(s.prompt).not.toContain("premium material rendering");
       expect(s.prompt).not.toContain("Grounded historical-editorial reconstruction in the consistent PastBriefly style");
+      expect(s.prompt).not.toMatch(/rendered as an observational photograph/i);
     }
   });
 
-  test("the master prompt uses the same still-realism direction and drops the cinematic hero wording", () => {
+  test("reconstruction prompts explain the PB1 reference is style only, never content to copy", async () => {
+    const { long } = await mockPlan();
+    for (const s of long.filter((x) => x.truth === "reconstruction")) {
+      expect(s.prompt).toMatch(/style reference image only for its illustration treatment/i);
+      expect(s.prompt).toMatch(/do not copy its people, landscape, objects, composition or historical content/i);
+      expect(s.prompt).toMatch(/factual scene is defined only by this prompt's Purpose, Scene, Must show and Do not show/i);
+    }
+  });
+
+  test("a useMaster reconstruction marks the second reference as continuity only; a normal one does not", async () => {
+    const { long } = await mockPlan();
+    const withMaster = long.filter((s) => s.truth === "reconstruction" && s.useMaster);
+    const withoutMaster = long.filter((s) => s.truth === "reconstruction" && !s.useMaster);
+    expect(withMaster.length).toBeGreaterThan(0);
+    expect(withoutMaster.length).toBeGreaterThan(0);
+    for (const s of withMaster) expect(s.prompt).toMatch(/second reference image, when present, is a subject and world continuity reference only/i);
+    for (const s of withoutMaster) expect(s.prompt).not.toMatch(/second reference/i);
+  });
+
+  test("the master prompt uses the PB1 direction and the style-only reference note", () => {
     const p = masterPrompt(story, paulBunyanResearch.world);
-    expect(p).toMatch(/observational photograph/i);
+    expect(p).toMatch(/historical editorial illustration in the PastBriefly reconstruction style/i);
     expect(p).toMatch(/no propaganda-poster styling/i);
-    expect(p).toMatch(/do not add flags, banners, emblems, insignia/i);
+    expect(p).toMatch(/style reference image only for its illustration treatment/i);
+    expect(p).not.toMatch(/observational photograph/i);
     expect(p).toContain(paulBunyanResearch.world.palette); // palette preserved
     expect(p).toMatch(/Wide 16:9/); // aspect-ratio handling preserved
     expect(p).not.toContain("Cinematic editorial, premium"); // old glossy hero wording removed
   });
 
-  test("the archive reconstruction fallback receives the same still-realism rules", async () => {
+  test("the master prompt is a neutral continuity reference plate of the recurring subject, not a story scene", () => {
+    const p = masterPrompt(story, paulBunyanResearch.world);
+    // Neutral continuity/reference view of the defining subject, clearly visible.
+    expect(p).toMatch(/neutral continuity reference plate/i);
+    expect(p).toMatch(/recurring subject/i);
+    expect(p).toMatch(/neutral three-quarter or broad side angle/i);
+    expect(p).toMatch(/read its overall form/i);
+    expect(p).toMatch(/not a scene or moment from the story/i);
+    // Explicitly a reference plate, not a defining ESTABLISHING scene of the story.
+    expect(p).not.toMatch(/defining establishing reconstruction of/i);
+  });
+
+  test("the master prompt forbids people, vehicles/equipment, buildings/staged activity, symbols and action", () => {
+    const p = masterPrompt(story, paulBunyanResearch.world);
+    expect(p).toMatch(/do not show:[^]*people/i); // no people
+    expect(p).toMatch(/vehicles, equipment or props other than the subject itself/i); // no extra vehicles/equipment
+    expect(p).toMatch(/buildings or built structures/i); // no buildings
+    expect(p).toMatch(/staged or narrative activity/i); // no staged activity
+    expect(p).toMatch(/dramatic action/i); // no dramatic action
+    expect(p).toMatch(/flags, banners, emblems, insignia/i); // no flags/emblems/insignia
+    expect(p).toMatch(/no readable markings, text, numbers or signage/i); // no readable markings
+    expect(p).toMatch(/no invented supporting scene/i); // no invented scene
+  });
+
+  test("the master prompt keeps PB1 reconstruction language and the style-only reference, without photographic wording", () => {
+    const p = masterPrompt(story, paulBunyanResearch.world);
+    // Retains PB1 reconstruction language and the PB1 style-only reference instruction.
+    expect(p).toMatch(/PastBriefly reconstruction style/i);
+    expect(p).toMatch(/do not copy its people, landscape, objects, composition or historical content/i);
+    // Keeps the anti-photographic safeguards rather than reverting to photo language.
+    expect(p).toMatch(/not a fake archival photograph/i);
+    expect(p).toMatch(/no hyper-real AI photography/i);
+    // Does NOT reintroduce standalone photographic / photojournalistic direction.
+    expect(p).not.toMatch(/observational photograph/i);
+    expect(p).not.toMatch(/photojournalistic/i);
+    expect(p).not.toMatch(/premium material rendering/i);
+    expect(p).not.toMatch(/DSLR|35mm lens|shot on/i);
+  });
+
+  test("the archive reconstruction fallback receives the same PB1 style rules", async () => {
     const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
       long: input.beats.long.map((b): DirectorShot => ({
         beatId: b.id, purpose: "Show the felled poplar's stump left standing.", truth: "archive",
@@ -586,19 +655,71 @@ describe("v1 still-realism envelope", () => {
     });
     const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
     expect(plans.long[0].truth).toBe("archive");
-    expect(plans.long[0].prompt).toMatch(/observational photograph/i);
+    expect(plans.long[0].prompt).toMatch(/historical editorial illustration in the PastBriefly reconstruction style/i);
     expect(plans.long[0].prompt).toMatch(/do not add flags, banners, emblems, insignia/i);
   });
 
-  test("graphic prompts do NOT receive reconstruction still-realism styling", async () => {
+  test("graphic prompts do NOT receive PB1 reconstruction styling or the style reference note", async () => {
     const { long } = await mockPlan();
     const graphics = long.filter((s) => s.truth === "graphic");
     expect(graphics.length).toBeGreaterThan(0);
     for (const g of graphics) {
-      expect(g.prompt).not.toMatch(/observational photograph/i);
-      expect(g.prompt).not.toMatch(/photojournalistic/i);
-      expect(g.prompt).not.toMatch(/propaganda-poster/i);
+      expect(g.prompt).not.toMatch(/historical editorial illustration in the PastBriefly reconstruction style/i);
+      expect(g.prompt).not.toMatch(/painterly but detailed/i);
+      expect(g.prompt).not.toMatch(/style reference image only/i);
       expect(g.prompt).toMatch(/information graphic/i);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PB1 reference wiring: reconstructions and the master generate from the one
+// canonical PB1 style reference; graphics and real archive stills do not. The PB1
+// style reference is never displaced by the master continuity reference.
+// ---------------------------------------------------------------------------
+describe("PB1 reference wiring", () => {
+  const shot = (over: Partial<PlannedShot>): PlannedShot => ({
+    index: 0, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: "p",
+    purpose: "x", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 1, ...over,
+  });
+
+  test("the canonical reference is the tracked PB1 tambora frame and it exists", () => {
+    expect(PB1_STYLE_REFERENCE.replace(/\\/g, "/")).toMatch(/media\/style\/pb1\/tambora-summer-snow\.png$/);
+    expect(existsSync(PB1_STYLE_REFERENCE)).toBe(true);
+  });
+
+  test("a normal reconstruction passes exactly the PB1 style reference", () => {
+    expect(stillReferencePaths(story, shot({ useMaster: false }), null)).toEqual([PB1_STYLE_REFERENCE]);
+  });
+
+  test("a useMaster reconstruction passes the PB1 style reference first, then the master", () => {
+    ensureStoryDirs(story.slug);
+    const masterRel = "images/hero.png";
+    writeFileSync(inStory(story.slug, masterRel), "x");
+    const refs = stillReferencePaths(story, shot({ useMaster: true }), masterRel);
+    expect(refs).toEqual([PB1_STYLE_REFERENCE, inStory(story.slug, masterRel)]);
+    expect(refs![0]).toBe(PB1_STYLE_REFERENCE); // the master never displaces the PB1 style reference
+  });
+
+  test("a useMaster reconstruction whose master file is missing still passes just the PB1 reference", () => {
+    expect(stillReferencePaths(story, shot({ useMaster: true }), "images/missing.png")).toEqual([PB1_STYLE_REFERENCE]);
+  });
+
+  test("master generation passes the PB1 style reference", () => {
+    expect(masterReferencePaths()).toEqual([PB1_STYLE_REFERENCE]);
+  });
+
+  test("a graphic still receives no PB1 style reference", () => {
+    expect(stillReferencePaths(story, shot({ truth: "graphic" }), null)).toBeUndefined();
+  });
+
+  test("a real archive still (before any fallback) receives no PB1 style reference", () => {
+    expect(stillReferencePaths(story, shot({ truth: "archive" }), null)).toBeUndefined();
+  });
+
+  test("an archive shot that fell back to reconstruction does receive the PB1 style reference", () => {
+    // acquireStill flips shot.truth to "reconstruction" when archive acquisition fails,
+    // so the fallback is wired like any other reconstruction.
+    expect(stillReferencePaths(story, shot({ truth: "reconstruction", useMaster: false }), null)).toEqual([PB1_STYLE_REFERENCE]);
   });
 });
