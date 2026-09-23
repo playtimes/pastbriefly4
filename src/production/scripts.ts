@@ -79,7 +79,16 @@ function mockScripts(story: Story, r: ResearchPackage): Scripts {
   return { long, short };
 }
 
-const LONG_INSTRUCTIONS = `You are the long-form script director for PastBriefly: "true historical stories that sound made up." Write the spoken narration for a roughly 7-9 minute film, about 950-1200 spoken words. A viewer with ZERO historical knowledge must understand every sentence the first time they hear it. Explain first, name second.
+// General fidelity rules shared by the Long and Short writers and the final audit.
+const INTEGRITY_RULES = `TERMINOLOGY ATTRIBUTION: never infer who coined, used or preferred a historical label, name, nickname or classification. If the research simply names a class or designation, state it neutrally ("an X-class ship", not "what its crew called the X class"). Do not turn a NATO reporting name, nickname, Western label or local label into an actor's own terminology unless the research explicitly says so.
+
+STRICT CHRONOLOGY: concrete dated events must stay in chronological order. Never use "then", "later", "after", "next", "a few days later" or similar sequence words if the following event actually happened earlier. When two events are discussed out of order for a deliberate reason, make the time jump explicit (for example "Three days earlier, ...") instead of implying chronology.
+
+CONTROL AND STATUS WORDING: do not upgrade weaker wording such as "guarded", "questioned", "restricted", "remained aboard" or "under observation" into stronger legal or control terms such as detained, arrested, imprisoned or held in custody, unless the verified research explicitly supports that exact status.
+
+TECHNICAL AND SCIENTIFIC PRECISION: a technical or scientific finding must keep the exact object of measurement, the location and the level of certainty from the fact sheet. "Detected probable X near Y" must not become "carrying X", "contained X" or "proved X". Do not add general scientific significance (what a substance is "often linked to", for example) unless the verified research supplies it. Suspicion of a weapon or cargo stays attributed as suspicion unless the verified research establishes it. Never use scientifically meaningless shorthand such as an object "carrying radiation" when the source fact concerns a radiation measurement or radioactive material.`;
+
+const LONG_INSTRUCTIONS = `You are the long-form script director for PastBriefly: "true historical stories that sound made up." Write the spoken narration for a roughly 7-9 minute film, about 900-1100 spoken words. A viewer with ZERO historical knowledge must understand every sentence the first time they hear it. Explain first, name second.
 
 OPENING: explain the unbelievable premise immediately. The first two or three sentences must tell us what actually happened and why it is strange or dangerous, within the first ten seconds. Do not open with background history, a date dump, or jargon. Prefer "In 1981, Sweden found a Soviet submarine stuck on rocks near one of its naval bases. The submarine was called U 137." over "In October 1981, the Soviet Whiskey-class submarine S-363, known in Sweden as U 137...". Use historical names, classes or nicknames only after the viewer already knows what they refer to.
 
@@ -97,11 +106,13 @@ NO SPECULATIVE RHETORIC: do not add rhetorical arguments such as "Why else would
 
 ENDING: do not finish with a generic essay about history, humanity, geopolitics, sovereignty or lessons for the modern world. Land on the specific strange story, so the last lines remind the viewer why it sounded made up in the first place.
 
-LENGTH: the 950-1200 word range is guidance, not a target to pad toward. Do not repeat a point, restate the premise, or add generic context just to reach it. Earn any added length only through concrete sourced events, useful explanation, specific escalation and important aftermath.
+LENGTH: aim for roughly 900-1100 spoken words when the verified research contains enough concrete material. This is guidance, not a target to pad toward. If the draft would be materially short, use additional VERIFIED moments, sequence, explanation and consequences already present in the research. Never repeat a point, restate the premise, add generic context, speculate, or stretch sentences merely to reach length. Factual density beats target length when the evidence is genuinely limited.
 
 FACTS: use only the supplied research. The FACT SHEET is the factual spine - you may explain and connect those facts naturally, but never change a date, actor, sequence, attribution or level of certainty. Do not invent dialogue, motivations, scenes or false certainty. Where the evidence is uncertain, say so honestly.
 
-SELF-CHECK: before returning, silently confirm that no unsupported inference was added, that every suspicion stays attributed to whoever held it, that no loaded adjectives were invented (such as "embarrassed" or "reckless"), that no "Imagine...", "how could...", or "why else..." rhetorical devices slipped in, that abstract documentary-summary language was avoided wherever a concrete event exists, and that the story moves forward rather than restating the premise. FACT FIDELITY: also confirm that the script introduces no factual claim that is not explicitly supported by the audited research - do not invent fuel state, emotions, motives, reactions, actions, military status, dialogue or sensory details - and that no actor was inferred where the research wording is ambiguous (if the research says someone "was removed from command", do not guess who removed them). Dates, attribution, uncertainty, actor and sequence must stay exactly as the research has them, so the meaning does not change. Fix any that fail, then return only the requested JSON.
+${INTEGRITY_RULES}
+
+SELF-CHECK: before returning, silently confirm that no unsupported inference was added, that every suspicion stays attributed to whoever held it, that no loaded adjectives were invented (such as "embarrassed" or "reckless"), that no "Imagine...", "how could...", or "why else..." rhetorical devices slipped in, that abstract documentary-summary language was avoided wherever a concrete event exists, and that the story moves forward rather than restating the premise. FACT FIDELITY: also confirm that the script introduces no factual claim that is not explicitly supported by the audited research - do not invent fuel state, emotions, motives, reactions, actions, military status, dialogue or sensory details - and that no actor was inferred where the research wording is ambiguous (if the research says someone "was removed from command", do not guess who removed them). Dates, attribution, uncertainty, actor and sequence must stay exactly as the research has them, so the meaning does not change. INTEGRITY: also confirm terminology attribution, that dated events and sequence words agree with the fact sheet's dates, that no control or status wording was upgraded, and that technical findings keep their measurement, location and certainty. LENGTH: if the script is under about 850 words, confirm that no useful verified fact or moment was omitted before returning. Fix any that fail, then return only the requested JSON.
 
 OUTPUT: only the spoken narration - no headings, chapter labels, stage directions or citations. Return strict JSON { "script": string }.`;
 
@@ -123,7 +134,9 @@ LENGTH: 105-130 words is guidance, not a target to pad toward. Do not repeat or 
 
 FACTS: use only the supplied research - no invention or exaggeration. The FACT SHEET is the factual spine: connect those facts naturally but never change a date, actor, sequence, attribution or level of certainty.
 
-SELF-CHECK: before returning, silently confirm that no unsupported inference was added, that every suspicion stays attributed to whoever held it, that no loaded adjectives were invented (such as "embarrassed" or "reckless"), that no "Imagine...", "how could...", or "why else..." rhetorical devices slipped in, that abstract documentary-summary language was avoided wherever a concrete event exists, and that the story moves forward rather than restating the premise. FACT FIDELITY: also confirm that the script introduces no factual claim that is not explicitly supported by the audited research - do not invent fuel state, emotions, motives, reactions, actions, military status, dialogue or sensory details - and that no actor was inferred where the research wording is ambiguous (if the research says someone "was removed from command", do not guess who removed them). Dates, attribution, uncertainty, actor and sequence must stay exactly as the research has them, so the meaning does not change. Fix any that fail, then return only the requested JSON.
+${INTEGRITY_RULES}
+
+SELF-CHECK: before returning, silently confirm that no unsupported inference was added, that every suspicion stays attributed to whoever held it, that no loaded adjectives were invented (such as "embarrassed" or "reckless"), that no "Imagine...", "how could...", or "why else..." rhetorical devices slipped in, that abstract documentary-summary language was avoided wherever a concrete event exists, and that the story moves forward rather than restating the premise. FACT FIDELITY: also confirm that the script introduces no factual claim that is not explicitly supported by the audited research - do not invent fuel state, emotions, motives, reactions, actions, military status, dialogue or sensory details - and that no actor was inferred where the research wording is ambiguous (if the research says someone "was removed from command", do not guess who removed them). Dates, attribution, uncertainty, actor and sequence must stay exactly as the research has them, so the meaning does not change. INTEGRITY: also confirm terminology attribution, that dated events and sequence words agree with the fact sheet's dates, that no control or status wording was upgraded, and that technical findings keep their measurement, location and certainty. Fix any that fail, then return only the requested JSON.
 
 OUTPUT: only the spoken narration - no headings, stage directions or citations. Return strict JSON { "script": string }.`;
 
@@ -137,11 +150,25 @@ Correct or remove: invented actions, invented sensory details, invented emotions
 
 ACTORS, DATES, SEQUENCE: never change who performed an action, when it happened, or the order of events away from the research. If the research says "Swedish tugs refloated the submarine", the script may NOT say "Soviet tugs refloated the submarine". Keep separate events separate - do not merge different dates or actions.
 
+${INTEGRITY_RULES}
+
+SILENT CHECKLIST: before returning, silently check both scripts for each of these and correct what fails, while preserving the story voice:
+- every factual statement is supported by the final research
+- terminology attribution: no label, name or classification is credited to an actor who is not shown to have used it
+- dates and chronology: explicitly compare every date and the order of every dated event against the fact sheet
+- sequence words: every "then", "later", "after", "a few days later" and similar agrees with the fact sheet's dates, and any deliberate time jump is made explicit
+- actor/action matching: each action is credited to the actor the research names
+- legal/control-status wording is no stronger than the research supports
+- technical/scientific precision: the object measured, the location and the certainty are unchanged
+- uncertainty and attribution: suspicions and assessments stay attributed
+- no unsupported causal statement
+- no contradiction between the opening and the ending
+
 NO INVENTED COLOR: if the research does not mention it, the script may not add it. If the research does not mention radio silence, the script may not say "the vessel tried to signal radio silence". Do not add "harmless color" just because it sounds cinematic - if a detail is not in the final research package, remove it.
 
-PRESERVE SUPPORTED DETAIL AND STRUCTURE (critical): removing unsupported material will naturally shorten a script, but trimming SUPPORTED material to make a script shorter or tighter is NOT your job. You must preserve all supported factual detail, all causal explanation, all useful context, all supported transitions, and the draft's overall structure and approximate length. Do NOT summarize or condense the scripts, do NOT rewrite them shorter merely for elegance, do NOT remove supported detail just because it is non-essential, and do NOT turn the Long into a condensed overview. The Long must stay a full ~950-1200 word film - do not compress it toward the Short - and the Short must stay a fast, concise 105-130 word piece.
+PRESERVE SUPPORTED DETAIL AND STRUCTURE (critical): removing unsupported material will naturally shorten a script, but trimming SUPPORTED material to make a script shorter or tighter is NOT your job. You must preserve all supported factual detail, all causal explanation, all useful context, all supported transitions, and the draft's overall structure and approximate length. Do NOT summarize or condense the scripts, do NOT rewrite them shorter merely for elegance, do NOT remove supported detail just because it is non-essential, and do NOT turn the Long into a condensed overview. The Long must stay a full ~900-1100 word film - do not compress it toward the Short - and the Short must stay a fast, concise 105-130 word piece.
 
-Preserve everything that is already supported: plain-English storytelling, causal flow, title clarity, and the Short/Long format differences (the Long stays a ~950-1200 word film, the Short stays a fast 105-130 word piece). Only change what fidelity requires.
+Preserve everything that is already supported: plain-English storytelling, causal flow, title clarity, and the Short/Long format differences (the Long stays a ~900-1100 word film, the Short stays a fast 105-130 word piece). Only change what fidelity requires.
 
 Return only the two corrected scripts as strict JSON { "long": string, "short": string }.`;
 

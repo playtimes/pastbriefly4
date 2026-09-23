@@ -68,11 +68,11 @@ beforeEach(() => {
 });
 
 describe("script directors", () => {
-  test("the long director targets a ~950-1200 word film and explains before naming", async () => {
+  test("the long director targets a ~900-1100 word film and explains before naming", async () => {
     await writeScript(makeStory(), makeResearch(), "long");
     const p = instructionsFor("long");
 
-    expect(p).toMatch(/950-1200/);
+    expect(p).toMatch(/900-1100/);
     expect(p).toMatch(/Explain first, name second/i);
     // Zero-context clarity is the core rule, not documentary structure alone.
     expect(p).toMatch(/ZERO historical knowledge/i);
@@ -130,7 +130,7 @@ describe("script directors", () => {
     const short = (respond.mock.calls.at(-1)![0] as any).instructions as string;
 
     expect(long).not.toBe(short);
-    expect(long).toMatch(/950-1200/);
+    expect(long).toMatch(/900-1100/);
     expect(short).toMatch(/105-130/);
   });
 

@@ -236,6 +236,10 @@ SOURCES: return reliable cited sources (museums, government, archives, academic,
 
 Also return a short production note and a small visual world (period, place, palette, visual direction). Research must stay factual and source-grounded. Return strict JSON.`;
 
+// Shared by the audit and the final verification: both correct the package in
+// place, so the summary must stay story content rather than a verdict on it.
+const SUMMARY_RULE = `SUMMARY IS THE STORY (mandatory): the "summary" field must contain ONLY a concise factual summary of the historical story itself - what happened, who did it, where and when. Never put audit findings, verification commentary, confidence notes, methodology, source-quality commentary or reviewer notes in the summary (never write things like "All major facts in the submitted package are supported..." or "The package has been corrected..."). Correct the package IN PLACE and return the corrected research package itself, not a description of your audit. Preserve useful supported story detail in the summary rather than replacing it with a verdict.`;
+
 const RESEARCH_AUDIT_INSTRUCTIONS = `You are a historical integrity auditor for PastBriefly. You are given a DRAFT research package (summary, moments, sources, productionNote, visual world) for one story. Use fresh web search to fact-check it, then return a corrected package in the SAME schema. This is the last factual pass before the scripts are written, so the audited package must be trustworthy.
 
 AUDIT EVERY FACTUAL CLAIM: inspect the summary, every moment title and detail, every source, the productionNote, and the factual parts of the visual world (period, place, real people and locations). For each claim ask: is this directly supported by the sources; is an inference being written as fact; is the wording stronger than the evidence; is this disputed; do credible sources conflict; is the date, person, location or action actually supported? Correct or remove claims that fail. Do NOT keep a dramatic claim just because it makes the story better - if it is not supported, weaken it to what the evidence shows or cut it.
@@ -253,6 +257,8 @@ SOURCES: every returned source URL must be a URL you actually found or consulted
 FACT SHEET: audit the "facts" array like every other claim. Each fact must be concrete and directly supported, with its dates, actors, location and sequence matching the corrected moments and summary. Put attribution inside any disputed fact rather than stating it as settled. Remove duplicates and vague filler, and make sure every sourceUrl is a real source you kept in this package - drop or repoint any fact whose source you removed. Do not add fact IDs or a claim system.
 
 PRESERVE DISTINCT CHRONOLOGY: do not thin the package by merging separately dated events. When the draft (or the evidence) establishes genuinely distinct events - especially events that happened on different dates - keep them as separate moments rather than folding them into one. Auditing is for correcting or removing unsupported claims, not for compressing a well-evidenced chronology; a story with strong sourcing should keep roughly 8-12 distinct moments.
+
+${SUMMARY_RULE}
 
 Keep the package usable: preserve the concrete causal spine and the visual world, keep genuinely distinct events (especially those on different dates) as separate moments rather than merging them, and only change what the evidence requires. Return the corrected package as strict JSON in the same schema.`;
 
@@ -273,6 +279,8 @@ DISPUTED INTERPRETATIONS: still remain attributed. Do not manufacture certainty 
 FINAL FACT SHEET (you own it): the "facts" array is the factual spine handed to the scripts, so this pass is responsible for it. Before returning, confirm that every fact agrees with the final moments and summary; that its dates, actors, sequence and location agree with the rest of the package; that its sourceTitle and sourceUrl name a real source in this package that genuinely supports the fact; and that disputed points keep their attribution inside the fact. Correct or remove any fact that fails. Keep each fact concrete (a real date, actor, location or sequence), drop duplicates and vague filler, and do not invent URLs or add fact IDs.
 
 SOURCES: every source URL in the final package must be a URL you actually verified during THIS pass. Never invent or reconstruct a likely URL. If you cannot verify a URL, remove that source. Each note must accurately describe what its source supports.
+
+${SUMMARY_RULE}
 
 Preserve the concrete causal spine and the visual world. Return the verified package as strict JSON in the same schema.`;
 
