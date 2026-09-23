@@ -137,6 +137,7 @@ export interface VisualPreview {
 }
 
 export interface PreviewFrame {
+  kind: "long" | "short";
   path: string; // media-relative
   truth: "archive" | "reconstruction" | "graphic";
   motion: boolean;

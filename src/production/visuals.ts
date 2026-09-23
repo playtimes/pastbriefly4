@@ -628,7 +628,14 @@ function keyPhrase(text: string): string {
 // Resolve one shot's still. Live: OpenAI image (archive tried first for archive
 // shots). Mock: a labelled placeholder. Falls back to reconstruction if archive
 // is unavailable so a reconstruction never masquerades as archive.
-export async function acquireStill(story: Story, kind: "long" | "short", shot: PlannedShot, masterRef: string | null): Promise<void> {
+//
+// The result says what actually happened, so the caller charges only real
+// provider work: "generated" is one new OpenAI image (including an archive shot
+// that fell back to reconstruction), "archive" is a real archive still, "existing"
+// reused a file already on disk, and "mock" wrote a local placeholder.
+export type StillResult = "generated" | "archive" | "existing" | "mock";
+
+export async function acquireStill(story: Story, kind: "long" | "short", shot: PlannedShot, masterRef: string | null): Promise<StillResult> {
   const rel = `images/${kind}-${String(shot.index).padStart(2, "0")}.png`;
   const abs = inStory(story.slug, rel);
   const size = kind === "short" ? { w: 1080, h: 1920, oa: "1024x1536" } : { w: 1920, h: 1080, oa: "1536x1024" };
@@ -654,7 +661,7 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
         shot.mediaType = "image";
         shot.source = got.credit;
         shot.wantsMotion = false;
-        return;
+        return "archive";
       }
       console.warn(`[archive] no usable material for ${kind} shot ${shot.index}; using reconstruction`);
     }
@@ -664,7 +671,7 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
   if (existsSync(abs)) {
     shot.path = rel;
     shot.mediaType = "image";
-    return;
+    return "existing";
   }
 
   if (config.mode === "live") {
@@ -673,17 +680,21 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
     // shot adds the master second. Graphics get no reference. See stillReferencePaths.
     const refs = stillReferencePaths(story, shot, masterRef);
     await generateImageFile({ prompt: shot.prompt, size: size.oa, outPath: abs, referencePaths: refs });
+    shot.path = rel;
+    shot.mediaType = "image";
+    return "generated";
+  }
+
+  const ref = referenceFrame(inStory(story.slug, "refs"), shot.index);
+  if (ref) {
+    copyFileSync(ref, abs);
   } else {
-    const ref = referenceFrame(inStory(story.slug, "refs"), shot.index);
-    if (ref) {
-      copyFileSync(ref, abs);
-    } else {
-      const label = shot.caption?.text ?? story.title;
-      writePlaceholderStill(abs, { width: size.w, height: size.h, index: shot.index, label, truth: shot.truth, accent: accentFor(story.category) });
-    }
+    const label = shot.caption?.text ?? story.title;
+    writePlaceholderStill(abs, { width: size.w, height: size.h, index: shot.index, label, truth: shot.truth, accent: accentFor(story.category) });
   }
   shot.path = rel;
   shot.mediaType = "image";
+  return "mock";
 }
 
 // The master/hero prompt. The master is reused as a CONTINUITY reference for later
@@ -738,14 +749,19 @@ export function buildPreview(story: Story, longShots: PlannedShot[], shortShots:
   const graphic = all.filter((s) => s.truth === "graphic").length;
   const reconstruction = all.filter((s) => s.truth === "reconstruction").length;
   const motionSelected = all.filter((s) => s.wantsMotion).length;
-  const frames: PreviewFrame[] = longShots
-    .filter((s) => s.path)
-    .map((s) => ({
-      path: mediaRel(story.slug, s.path!),
-      truth: s.truth,
-      motion: s.wantsMotion,
-      caption: s.caption?.text ?? "",
-    }));
+  // Both films, Long first, each frame tagged with its film so the preview can
+  // show the Short as portrait instead of cropping it into a landscape card.
+  const toFrames = (kind: "long" | "short", shots: PlannedShot[]): PreviewFrame[] =>
+    shots
+      .filter((s) => s.path)
+      .map((s) => ({
+        kind,
+        path: mediaRel(story.slug, s.path!),
+        truth: s.truth,
+        motion: s.wantsMotion,
+        caption: s.caption?.text ?? "",
+      }));
+  const frames = [...toFrames("long", longShots), ...toFrames("short", shortShots)];
   return {
     moments: all.length,
     archive,

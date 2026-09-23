@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
-import { api, mediaUrl } from "../api.ts";
+import { api } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
+import { PreviewFrames } from "../previewFrames.tsx";
 import { STEP_ORDER, STEP_LABELS, type Job } from "../../types.ts";
 
 export function Creating({ slug }: { slug: string }): React.ReactElement {
@@ -187,20 +188,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
             {p.remainingMotionCost > 0 ? ` · est. remaining motion $${p.remainingMotionCost.toFixed(2)}` : ""}
           </p>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-          {p.frames.map((f, i) => (
-            <div key={i} className="surface overflow-hidden">
-              <div className="relative aspect-video">
-                <img src={mediaUrl(f.path)} alt="" className="w-full h-full object-cover" />
-                {f.motion && <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-accent" title="motion" />}
-              </div>
-              <div className="px-2 py-1.5">
-                <p className="text-[0.6rem] tracking-widest uppercase text-muted">{f.truth}</p>
-                {f.caption && <p className="text-xs truncate">{f.caption}</p>}
-              </div>
-            </div>
-          ))}
-        </div>
+        <PreviewFrames frames={p.frames} />
         <div className="flex items-center gap-3">
           <button onClick={cont} disabled={continuing || rebuilding} className="btn btn-primary text-lg">
             {continuing ? "Continuing…" : "Continue"}

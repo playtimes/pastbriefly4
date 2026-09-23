@@ -5,7 +5,7 @@ import { PRICING, round, ttsUsd } from "../server/pricing.ts";
 import { getJob, getStory, updateJob, addVideo, setScripts, type JobRecord } from "../server/store.ts";
 import type { JobStep, Story, Video } from "../types.ts";
 import { now } from "../server/db.ts";
-import { ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
+import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
 import { researchStory } from "./research.ts";
 import { writeScript, auditScripts } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
@@ -160,7 +160,12 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     // on resume/Continue: keyed off scratch, not hero.png existing (which may be a
     // discovery placeholder). Labelled as still work so a failure here reads as
     // image generation rather than the preceding narration step.
+    // No masterRef yet means this job has not started visual assets. Shot files
+    // are story-scoped, so clear an older job's shot stills, archive stills and
+    // motion first; otherwise acquireStill would find and reuse them. Once
+    // masterRef exists (resume, rebuild-visuals) this never runs again.
     if (!scratch.masterRef) {
+      clearWorkingVisuals(story.slug);
       step(jobId, "stills", "Creating the reference image", scratch);
       budget(job, PRICING.openai.image, scratch);
       scratch.masterRef = await ensureMaster(story, research.world);
@@ -172,8 +177,12 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
         if (shot.truth === "archive" && !shot.path) {
-          await acquireStill(story, kind, shot, master);
-          updateJob(jobId, { scratch });
+          // Preflight the possible reconstruction fallback so a failed archive
+          // search can never push spend past the cap; charge only if it generated.
+          if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
+          const result = await acquireStill(story, kind, shot, master);
+          if (result === "generated") record(jobId, PRICING.openai.image, scratch);
+          else updateJob(jobId, { scratch });
         }
       }
     }
@@ -182,9 +191,9 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
         if (!shot.path) {
-          if (config.mode === "live" && shot.truth !== "archive") budget(job, PRICING.openai.image, scratch);
-          await acquireStill(story, kind, shot, master);
-          if (config.mode === "live" && shot.mediaType === "image" && shot.truth !== "archive") record(jobId, PRICING.openai.image, scratch);
+          if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
+          const result = await acquireStill(story, kind, shot, master);
+          if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
       }
