@@ -91,8 +91,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       openaiApiKey: z.string().max(400).optional(),
       elevenlabsApiKey: z.string().max(400).optional(),
       elevenlabsVoiceId: z.string().max(200).optional(),
-      higgsfieldApiKey: z.string().max(400).optional(),
-      higgsfieldApiSecret: z.string().max(400).optional(),
+      runwayApiSecret: z.string().max(400).optional(),
       youtubeApiKey: z.string().max(400).optional(),
     })
     .strict();

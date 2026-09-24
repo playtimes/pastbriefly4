@@ -11,10 +11,13 @@ export const PRICING = {
   elevenlabs: {
     perThousandChars: 0.3,
   },
-  higgsfield: {
-    video: 0.35, // one 5s Kling clip
+  runway: {
+    video5s: 0.6, // one 5s Gen-4.5 clip: 12 credits/s x 5s x $0.01/credit
   },
 } as const;
+
+// Every Runway motion clip is exactly this long; pricing and the renderer rely on it.
+export const MOTION_CLIP_SECONDS = 5;
 
 export function round(n: number): number {
   return Math.round(n * 100) / 100;

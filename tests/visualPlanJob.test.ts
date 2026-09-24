@@ -69,7 +69,7 @@ vi.mock("../src/providers/openai.ts", async () => {
 });
 
 vi.mock("../src/production/wikimedia.ts", () => ({ fetchArchive: vi.fn(async () => null) }));
-vi.mock("../src/providers/higgsfield.ts", () => ({ generateMotion: vi.fn(async () => {}) }));
+vi.mock("../src/providers/runway.ts", () => ({ generateMotion: vi.fn(async () => {}) }));
 
 const { runJob, newJobId } = await import("../src/production/generate.ts");
 const { createJob, getJob, updateJob, upsertStory } = await import("../src/server/store.ts");

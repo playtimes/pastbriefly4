@@ -38,7 +38,9 @@ export const Shot: React.FC<{ shot: ShotType; durationInFrames: number; format: 
 const Media: React.FC<{ shot: ShotType; frame: number; duration: number; format: "long" | "short" }> = ({ shot, frame, duration, format }) => {
   const src = staticFile(shot.path);
   if (shot.mediaType === "video") {
-    return <OffthreadVideo src={src} style={{ width: "100%", height: "100%", objectFit: "cover", filter: ART_FILTER }} />;
+    // A 5s clip under a longer beat plays once; past its end Remotion keeps showing
+    // the final frame (no loop, no black tail). Covered by tests/render.test.ts.
+    return <OffthreadVideo src={src} muted style={{ width: "100%", height: "100%", objectFit: "cover", filter: ART_FILTER }} />;
   }
 
   // Long stills (the real PB1 frames are portrait) must not be hard-cropped into

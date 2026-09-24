@@ -102,7 +102,7 @@ function Credentials({ status, onSaved }: { status: SettingsStatus; onSaved: (s:
     <section className="surface p-5 flex flex-col gap-4">
       <h2 className="text-xl">Provider credentials</h2>
       <p className="text-muted text-sm">
-        Live mode needs OpenAI, ElevenLabs and Higgsfield keys; YouTube is optional. Leave a field blank to keep its
+        Live mode needs OpenAI, ElevenLabs and Runway keys; YouTube is optional. Leave a field blank to keep its
         current value.
       </p>
 
@@ -118,8 +118,8 @@ function Credentials({ status, onSaved }: { status: SettingsStatus; onSaved: (s:
             className="w-full rounded-lg bg-field border border-line px-3 py-2 text-sm text-ink outline-none transition focus:border-accent/55"
           />
         </div>
-        <Secret label="Higgsfield API key" configured={status.higgsfield.apiKeySet} value={form.higgsfieldApiKey ?? ""} onChange={(v) => field("higgsfieldApiKey", v)} />
-        <Secret label="Higgsfield API secret" configured={status.higgsfield.apiSecretSet} value={form.higgsfieldApiSecret ?? ""} onChange={(v) => field("higgsfieldApiSecret", v)} />
+        <Secret label="Runway API secret" configured={status.runway.apiSecretSet} value={form.runwayApiSecret ?? ""} onChange={(v) => field("runwayApiSecret", v)} />
+        <p className="text-muted text-xs -mt-2">Motion model: {status.runway.videoModel} (5s image-to-video)</p>
         <Secret label="YouTube Data API key" configured={status.youtube.apiKeySet} value={form.youtubeApiKey ?? ""} onChange={(v) => field("youtubeApiKey", v)} />
       </div>
 

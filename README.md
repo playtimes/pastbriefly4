@@ -44,7 +44,7 @@ src/
   app/         React + Tailwind UI (Stories, Story, Creating, Videos)
   server/      Fastify + better-sqlite3: config, db, store, routes, worker, security
   production/  research → scripts → narration → visuals → generate (the pipeline)
-  providers/   openai, elevenlabs, higgsfield (live API clients)
+  providers/   openai, elevenlabs, runway (live API clients)
   render/      Remotion: Root, LongVideo, ShortVideo, Shot, Subtitles, PastBrieflyFrame, theme
   types.ts     shared types
 media/
@@ -57,7 +57,7 @@ media/
 - **mock** (default): local, free, offline. Placeholder stills, silent narration,
   no motion generation. Proves the full product and renderer.
 - **live**: real research (OpenAI), scripts (OpenAI), stills (OpenAI images),
-  narration (ElevenLabs), selective motion (Higgsfield). Every paid run is gated
+  narration (ElevenLabs), selective motion (Runway). Every paid run is gated
   by one cost approval and one visual-direction review. Costs are reserved against
   the approved maximum, and completed paid work is reused on resume.
 

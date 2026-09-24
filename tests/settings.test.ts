@@ -57,3 +57,29 @@ describe("saving provider credentials", () => {
     expect(config.youtube.apiKey).toBe("yt-second");
   });
 });
+
+describe("the Runway API secret", () => {
+  test("is write-only: saved and applied, but never returned to the browser", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/settings", payload: { runwayApiSecret: "key_runway-SECRET-abc123" } });
+    expect(res.statusCode).toBe(200);
+    expect(config.runway.apiSecret).toBe("key_runway-SECRET-abc123");
+    expect(res.json().runway).toEqual({ apiSecretSet: true, videoModel: "gen4.5" });
+    expect(res.payload).not.toContain("runway-SECRET");
+
+    const get = await app.inject({ method: "GET", url: "/api/settings" });
+    expect(get.json().runway.apiSecretSet).toBe(true);
+    expect(get.payload).not.toContain("runway-SECRET");
+    expect(get.json()).not.toHaveProperty("higgsfield");
+  });
+
+  test("a blank Runway secret keeps the current value", async () => {
+    await app.inject({ method: "POST", url: "/api/settings", payload: { runwayApiSecret: "key_keep-me" } });
+    await app.inject({ method: "POST", url: "/api/settings", payload: { runwayApiSecret: "" } });
+    expect(config.runway.apiSecret).toBe("key_keep-me");
+  });
+
+  test("the retired Higgsfield fields are rejected", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/settings", payload: { higgsfieldApiKey: "x" } });
+    expect(res.statusCode).toBe(400);
+  });
+});

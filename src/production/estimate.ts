@@ -37,7 +37,7 @@ export function estimateJob(story: Story): CostEstimate {
     { label: "Narration (ElevenLabs)", usd: round(ttsUsd(c.longChars) + ttsUsd(c.shortChars)), detail: `~${c.longChars + c.shortChars} chars` },
     { label: "Reference image (OpenAI images)", usd: PRICING.openai.image, detail: "1 master still" },
     { label: "Cinematic stills (OpenAI images)", usd: round(c.images * PRICING.openai.image), detail: `${c.images} images` },
-    { label: "Selective motion (Higgsfield, 5s)", usd: round(c.motion * PRICING.higgsfield.video), detail: `${c.motion} clips` },
+    { label: "Selective motion (Runway Gen-4.5, 5s)", usd: round(c.motion * PRICING.runway.video5s), detail: `${c.motion} clips` },
   ];
   const total = round(lines.reduce((a, l) => a + l.usd, 0));
   return { total, lines };

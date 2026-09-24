@@ -14,7 +14,7 @@ export interface SettingsStatus {
   mode: "mock" | "live";
   openai: { apiKeySet: boolean; model: string; imageModel: string };
   elevenlabs: { apiKeySet: boolean; voiceId: string; model: string };
-  higgsfield: { apiKeySet: boolean; apiSecretSet: boolean; videoModel: string; publicAssetBase: string };
+  runway: { apiSecretSet: boolean; videoModel: string };
   youtube: { apiKeySet: boolean };
 }
 
@@ -24,8 +24,7 @@ export interface SettingsInput {
   openaiApiKey?: string;
   elevenlabsApiKey?: string;
   elevenlabsVoiceId?: string;
-  higgsfieldApiKey?: string;
-  higgsfieldApiSecret?: string;
+  runwayApiSecret?: string;
   youtubeApiKey?: string;
 }
 

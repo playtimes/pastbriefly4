@@ -27,7 +27,7 @@ export interface ResearchPackage {
 export interface VisualMoment {
   truth: "archive" | "reconstruction" | "graphic";
   motion: "hold" | "push" | "pan-left" | "pan-right";
-  wantsMotion: boolean; // a candidate for Higgsfield in a live run
+  wantsMotion: boolean; // a candidate for Runway motion in a live run
   prompt: string; // reconstruction/graphic image prompt
   archiveQuery?: string; // Wikimedia search terms for archive shots
   caption?: { kicker?: string; text: string; emphasis?: string };

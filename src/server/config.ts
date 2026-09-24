@@ -52,8 +52,11 @@ interface SavedSettings {
   openaiApiKey?: string;
   elevenlabsApiKey?: string;
   elevenlabsVoiceId?: string;
+  // Legacy Higgsfield keys may still sit in an existing settings.json. They are
+  // kept on disk untouched but no longer read or exposed.
   higgsfieldApiKey?: string;
   higgsfieldApiSecret?: string;
+  runwayApiSecret?: string;
   youtubeApiKey?: string;
 }
 
@@ -104,11 +107,9 @@ export const config = {
     voiceId: pick(saved.elevenlabsVoiceId || process.env.ELEVENLABS_VOICE_ID),
     model: pick(process.env.ELEVENLABS_MODEL, "eleven_multilingual_v2"),
   },
-  higgsfield: {
-    apiKey: pick(saved.higgsfieldApiKey || process.env.HIGGSFIELD_API_KEY),
-    apiSecret: pick(saved.higgsfieldApiSecret || process.env.HIGGSFIELD_API_SECRET),
-    videoModel: pick(process.env.HIGGSFIELD_VIDEO_MODEL, "kling-video/v2.5-turbo/pro/image-to-video"),
-    publicAssetBase: pick(process.env.HIGGSFIELD_PUBLIC_ASSET_BASE),
+  runway: {
+    apiSecret: pick(saved.runwayApiSecret || process.env.RUNWAYML_API_SECRET),
+    videoModel: pick(process.env.RUNWAY_VIDEO_MODEL, "gen4.5"),
   },
   youtube: {
     apiKey: pick(saved.youtubeApiKey || process.env.YOUTUBE_API_KEY),
@@ -141,7 +142,7 @@ export interface SettingsStatus {
   mode: ProviderMode;
   openai: { apiKeySet: boolean; model: string; imageModel: string };
   elevenlabs: { apiKeySet: boolean; voiceId: string; model: string };
-  higgsfield: { apiKeySet: boolean; apiSecretSet: boolean; videoModel: string; publicAssetBase: string };
+  runway: { apiSecretSet: boolean; videoModel: string };
   youtube: { apiKeySet: boolean };
 }
 
@@ -150,12 +151,7 @@ export function settingsStatus(): SettingsStatus {
     mode: config.mode,
     openai: { apiKeySet: !!config.openai.apiKey, model: config.openai.model, imageModel: config.openai.imageModel },
     elevenlabs: { apiKeySet: !!config.elevenlabs.apiKey, voiceId: config.elevenlabs.voiceId, model: config.elevenlabs.model },
-    higgsfield: {
-      apiKeySet: !!config.higgsfield.apiKey,
-      apiSecretSet: !!config.higgsfield.apiSecret,
-      videoModel: config.higgsfield.videoModel,
-      publicAssetBase: config.higgsfield.publicAssetBase,
-    },
+    runway: { apiSecretSet: !!config.runway.apiSecret, videoModel: config.runway.videoModel },
     youtube: { apiKeySet: !!config.youtube.apiKey },
   };
 }
@@ -166,8 +162,7 @@ export interface SettingsInput {
   openaiApiKey?: string;
   elevenlabsApiKey?: string;
   elevenlabsVoiceId?: string;
-  higgsfieldApiKey?: string;
-  higgsfieldApiSecret?: string;
+  runwayApiSecret?: string;
   youtubeApiKey?: string;
 }
 
@@ -182,8 +177,7 @@ export function saveSettings(input: SettingsInput): void {
   set("openaiApiKey", input.openaiApiKey);
   set("elevenlabsApiKey", input.elevenlabsApiKey);
   set("elevenlabsVoiceId", input.elevenlabsVoiceId);
-  set("higgsfieldApiKey", input.higgsfieldApiKey);
-  set("higgsfieldApiSecret", input.higgsfieldApiSecret);
+  set("runwayApiSecret", input.runwayApiSecret);
   set("youtubeApiKey", input.youtubeApiKey);
 
   try {
@@ -196,7 +190,6 @@ export function saveSettings(input: SettingsInput): void {
   if (next.openaiApiKey) config.openai.apiKey = next.openaiApiKey;
   if (next.elevenlabsApiKey) config.elevenlabs.apiKey = next.elevenlabsApiKey;
   if (next.elevenlabsVoiceId) config.elevenlabs.voiceId = next.elevenlabsVoiceId;
-  if (next.higgsfieldApiKey) config.higgsfield.apiKey = next.higgsfieldApiKey;
-  if (next.higgsfieldApiSecret) config.higgsfield.apiSecret = next.higgsfieldApiSecret;
+  if (next.runwayApiSecret) config.runway.apiSecret = next.runwayApiSecret;
   if (next.youtubeApiKey) config.youtube.apiKey = next.youtubeApiKey;
 }

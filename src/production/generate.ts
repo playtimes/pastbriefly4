@@ -214,9 +214,9 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
         if (shot.wantsMotion && !shot.motionPath) {
-          if (config.mode === "live") budget(job, PRICING.higgsfield.video, scratch);
+          if (config.mode === "live") budget(job, PRICING.runway.video5s, scratch);
           await acquireMotion(story, kind, shot);
-          if (shot.motionPath) record(jobId, PRICING.higgsfield.video, scratch);
+          if (shot.motionPath) record(jobId, PRICING.runway.video5s, scratch);
           else updateJob(jobId, { scratch });
         }
       }

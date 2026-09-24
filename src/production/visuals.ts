@@ -12,7 +12,7 @@ import { inStory, mediaRel } from "./paths.ts";
 import { writePlaceholderStill, referenceFrame } from "./mockAssets.ts";
 import { copyFileSync } from "node:fs";
 import { generateImageFile, respondJson } from "../providers/openai.ts";
-import { generateMotion } from "../providers/higgsfield.ts";
+import { generateMotion } from "../providers/runway.ts";
 import { fetchArchive } from "./wikimedia.ts";
 
 export const FPS = 30;
@@ -731,13 +731,33 @@ export async function ensureMaster(story: Story, world: StoryWorld): Promise<str
   return rel;
 }
 
+// The Runway motion prompt. The source still already owns composition, subjects,
+// clothing, vessels, environment and the PB1 illustration style, so the still
+// prompt is NOT resent; this only asks Runway to animate what the frame implies,
+// with the shot's purpose as brief context and its planned camera move.
+const MOTION_BASE =
+  "Animate only the movement already implied by this frame. " +
+  "Preserve the exact composition, subjects, vessel design, clothing, environment, lighting, palette and illustrated PastBriefly style of the source image. " +
+  "Subtle restrained documentary motion. Natural water, wind and environmental movement where visible. " +
+  "Do not add or remove objects or people. No morphing, no new text, no dramatic action, no exaggerated body movement.";
+const CAMERA: Record<Motion, string> = {
+  hold: "Camera: locked off and still.",
+  push: "Camera: a slow, gentle push in.",
+  "pan-left": "Camera: a slow, gentle pan to the left.",
+  "pan-right": "Camera: a slow, gentle pan to the right.",
+};
+
+export function motionPrompt(shot: Pick<PlannedShot, "purpose" | "motion">): string {
+  const purpose = (shot.purpose ?? "").trim();
+  return [MOTION_BASE, purpose ? `Context: ${purpose}` : "", CAMERA[shot.motion] ?? CAMERA.hold].filter(Boolean).join(" ");
+}
+
 // Live only: turn a still into motion (after the visual preview is approved).
+// The local still is sent to Runway directly; no public asset URL is involved.
 export async function acquireMotion(story: Story, kind: "long" | "short", shot: PlannedShot): Promise<void> {
   if (config.mode !== "live" || !shot.path) return; // mock keeps the transform motion
-  if (!config.higgsfield.publicAssetBase) throw new Error("HIGGSFIELD_PUBLIC_ASSET_BASE not set - cannot give Higgsfield a reachable still URL.");
   const rel = `motion/${kind}-${String(shot.index).padStart(2, "0")}.mp4`;
-  const imageUrl = `${config.higgsfield.publicAssetBase.replace(/\/$/, "")}/media/${mediaRel(story.slug, shot.path)}`;
-  await generateMotion({ prompt: shot.prompt, imageUrl, outPath: inStory(story.slug, rel) });
+  await generateMotion({ prompt: motionPrompt(shot), imagePath: inStory(story.slug, shot.path), kind, outPath: inStory(story.slug, rel) });
   shot.motionPath = rel;
   shot.mediaType = "video";
 }
@@ -768,7 +788,7 @@ export function buildPreview(story: Story, longShots: PlannedShot[], shortShots:
     reconstruction,
     graphic,
     motionSelected,
-    remainingMotionCost: config.mode === "live" ? round(motionSelected * PRICING.higgsfield.video) : 0,
+    remainingMotionCost: config.mode === "live" ? round(motionSelected * PRICING.runway.video5s) : 0,
     frames,
   };
 }
