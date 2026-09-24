@@ -2,6 +2,7 @@ import React from "react";
 import { AbsoluteFill, Img, OffthreadVideo, interpolate, staticFile, useCurrentFrame } from "remotion";
 import type { Shot as ShotType, Caption } from "./types.ts";
 import { theme, ART_FILTER } from "./theme.ts";
+import { framingTransform } from "./framing.ts";
 
 // One shot: a still (with simple motion) or a clip, plus its editorial copy in
 // the PB1 language - accent kicker block, heavy outlined headline with an inline
@@ -38,59 +39,34 @@ export const Shot: React.FC<{ shot: ShotType; durationInFrames: number; format: 
 const Media: React.FC<{ shot: ShotType; frame: number; duration: number; format: "long" | "short" }> = ({ shot, frame, duration, format }) => {
   const src = staticFile(shot.path);
   if (shot.mediaType === "video") {
-    // A 5s clip under a longer beat plays once; past its end Remotion keeps showing
-    // the final frame (no loop, no black tail). Covered by tests/render.test.ts.
+    // A motion clip is a finite edit slot: the edit plan never gives it more
+    // screen time than the clip itself, so the next event cuts in as it ends.
     return <OffthreadVideo src={src} muted style={{ width: "100%", height: "100%", objectFit: "cover", filter: ART_FILTER }} />;
   }
-
-  // Long stills (the real PB1 frames are portrait) must not be hard-cropped into
-  // 16:9 - that destroys the composition. Seat the full still, contained, over a
-  // blurred/graded fill of itself: a premium PastBriefly way to hold a portrait
-  // image in a wide frame. Motion is a gentle breath so the composition is kept.
-  if (format === "long") {
-    const t = duration > 1 ? frame / (duration - 1) : 0;
-    const breath = 1 + t * 0.03;
-    return (
-      <AbsoluteFill>
-        <Img
-          src={src}
-          style={{ width: "100%", height: "100%", objectFit: "cover", filter: "saturate(0.6) contrast(1.02) brightness(0.42) blur(30px)", transform: "scale(1.14)" }}
-        />
-        <AbsoluteFill style={{ background: "radial-gradient(circle at 50% 46%, transparent 34%, rgba(9,8,7,0.55) 100%)" }} />
-        <AbsoluteFill style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <Img
-            src={src}
-            style={{
-              maxWidth: "100%",
-              maxHeight: "100%",
-              objectFit: "contain",
-              filter: ART_FILTER,
-              transform: `scale(${breath})`,
-              transformOrigin: "center",
-              boxShadow: "0 26px 90px rgba(0,0,0,0.62)",
-            }}
-          />
-        </AbsoluteFill>
-      </AbsoluteFill>
-    );
-  }
-
-  // Short is already vertical, so the portrait still fills the 9:16 frame.
-  const { scale, x } = motionTransform(shot.motion ?? "hold", frame, duration);
-  return (
-    <Img
-      src={src}
-      style={{
-        width: "100%",
-        height: "100%",
-        objectFit: "cover",
-        filter: ART_FILTER,
-        transform: `scale(${scale}) translateX(${x}%)`,
-        transformOrigin: "center",
-      }}
-    />
-  );
+  return <Img src={src} style={stillStyle(shot, frame, duration, format)} />;
 };
+
+// Every still is full-bleed: objectFit cover crops the source (1536x1024 for Long,
+// portrait for Short) cleanly into the canvas, with no blurred duplicate behind it
+// and no floating-picture shadow. The event's framing sets a restrained crop; Long
+// adds a slow breath and Short keeps its simple planned motion on top.
+export function stillStyle(shot: ShotType, frame: number, duration: number, format: "long" | "short"): React.CSSProperties {
+  const f = framingTransform(shot.framing);
+  const t = duration > 1 ? frame / (duration - 1) : 0;
+  const { scale, x } = format === "long" ? { scale: 1 + t * 0.03, x: 0 } : motionTransform(shot.motion ?? "hold", frame, duration);
+  return {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    filter: ART_FILTER,
+    transform: `scale(${round3(f.scale * scale)})${x ? ` translateX(${round3(x)}%)` : ""}`,
+    transformOrigin: `${f.originX}% ${f.originY}%`,
+  };
+}
+
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
+}
 
 // Simple, story-serving motion only. Slight overscale avoids exposing edges.
 function motionTransform(motion: ShotType["motion"], frame: number, duration: number): { scale: number; x: number } {

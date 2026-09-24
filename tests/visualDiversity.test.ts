@@ -55,13 +55,16 @@ describe("visual planning diversity", () => {
   test("preview counts archive, reconstruction and graphic separately", async () => {
     const { long, short } = await plan();
     const preview = buildPreview(story, long, short);
-    const all = [...long, ...short];
-    const graphic = all.filter((s) => s.truth === "graphic").length;
-    const reconstruction = all.filter((s) => s.truth === "reconstruction").length;
+    // Truth counts cover the unique used assets; every other slot reuses one of them.
+    const assets = [...long, ...short].filter((s) => s.edit === "new");
+    const graphic = assets.filter((s) => s.truth === "graphic").length;
+    const reconstruction = assets.filter((s) => s.truth === "reconstruction").length;
     expect(preview.graphic).toBe(graphic);
     expect(preview.reconstruction).toBe(reconstruction);
     // Graphics are their own bucket, never folded into reconstruction.
-    expect(preview.archive + preview.reconstruction + preview.graphic).toBe(all.length);
+    expect(preview.archive + preview.reconstruction + preview.graphic).toBe(assets.length);
+    expect(preview.uniqueAssets).toBe(assets.length);
+    expect(preview.reusedPresentations).toBe(long.length + short.length - assets.length);
   });
 
   test("Long carries materially more visual beats than Short", async () => {

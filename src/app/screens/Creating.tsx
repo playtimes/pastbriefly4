@@ -184,7 +184,9 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
           <p className="kicker mb-1">One quick look</p>
           <h1 className="text-3xl">Visual direction</h1>
           <p className="text-muted mt-2">
-            {p.moments} visual moments · {p.archive} archive · {p.reconstruction} reconstruction · {p.graphic} graphic · {p.motionSelected} selected for motion
+            {p.moments} slots
+            {p.uniqueAssets !== undefined ? ` · ${p.uniqueAssets} unique assets · ${p.reusedPresentations ?? 0} reused presentations` : ""} · {p.archive} archive ·{" "}
+            {p.reconstruction} reconstruction · {p.graphic} graphic · {p.motionSelected} selected for motion
             {p.remainingMotionCost > 0 ? ` · est. remaining motion $${p.remainingMotionCost.toFixed(2)}` : ""}
           </p>
         </div>

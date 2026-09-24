@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import type { Story } from "../src/types.ts";
 
-// The REAL production job must plan both films with exactly ONE structured Visual
-// Director call, reuse the plan on resume, and charge the planning call exactly
+// The REAL production job must plan both films with exactly TWO structured planning
+// calls (coverage, then edit), reuse the plan on resume, and charge each planning call exactly
 // once. Every provider is stubbed; these runs stop at the preview gate or fail
 // early, never rendering.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pb4-visual-plan-job-"));
@@ -48,16 +48,16 @@ vi.mock("../src/production/narration.ts", () => ({
   })),
 }));
 
-// respondJson is the Visual Director call here (research is stubbed above, so it
-// is the only respondJson user in the pipeline). Count it and return a minimal
-// valid plan; missing beats are synthesised locally, so the pipeline proceeds.
+// respondJson carries the two planning calls here (research is stubbed above, so
+// they are its only users in the pipeline): the Coverage Director, then the Editor.
+// Count them and return minimal valid answers, so the pipeline proceeds.
 vi.mock("../src/providers/openai.ts", async () => {
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const nodePath = await import("node:path");
   return {
-    respondJson: vi.fn(async () => {
+    respondJson: vi.fn(async (opts: { schemaName?: string; input?: string }) => {
       h.respondCalls++;
-      return { long: [], short: [] };
+      return (await import("./slotPlan.ts")).minimalPlan(opts);
     }),
     imageMimeType: () => "image/png",
     generateImageFile: vi.fn(async (opts: { outPath: string }) => {
@@ -102,41 +102,41 @@ beforeEach(() => {
   h.failMaster = false;
 });
 
-describe("runJob plans both films with one Visual Director call", () => {
+describe("runJob plans both films with two planning calls (coverage, then edit)", () => {
   test("exactly one structured planning call produces both plans, reused on resume", async () => {
     const story = makeStory();
     const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
 
     await runJob(job.id, { autoApproveText: true }); // stops at the preview gate
     expect(getJob(job.id)!.state).toBe("awaiting_preview");
-    expect(h.respondCalls).toBe(1); // ONE call planned both films
+    expect(h.respondCalls).toBe(2); // TWO calls (coverage, then edit) planned both films
 
     const scratch = getJob(job.id)!.scratch as any;
     expect(scratch.longShots.length).toBeGreaterThan(0);
     expect(scratch.shortShots.length).toBeGreaterThan(0);
 
     await runJob(job.id, { autoApproveText: true }); // resume: plans are reused
-    expect(h.respondCalls).toBe(1); // the director is never called again
+    expect(h.respondCalls).toBe(2); // the planners are never called again
   });
 
-  test("the planning call is charged exactly once", async () => {
+  test("each of the two planning calls is charged exactly once", async () => {
     h.failMaster = true; // fail right after planning so spend freezes on the plan
     const story = makeStory();
     const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
 
     await expect(runJob(job.id, { autoApproveText: true })).rejects.toThrow(/master failed/);
 
-    expect(h.respondCalls).toBe(1);
-    const expected = round(PRICING.openai.research + 3 * PRICING.openai.script + ttsUsd(LONG.length) + ttsUsd(SHORT.length) + PRICING.openai.visualPlan);
+    expect(h.respondCalls).toBe(2);
+    const expected = round(PRICING.openai.research + 3 * PRICING.openai.script + ttsUsd(LONG.length) + ttsUsd(SHORT.length) + 2 * PRICING.openai.visualPlan);
     expect(getJob(job.id)!.spent).toBe(expected);
 
-    // Retry the same job: the plan is reused (no second director call, no second
+    // Retry the same job: the plan is reused (no further planning call, no further
     // planning charge), and the master image now succeeds through to the gate.
     h.failMaster = false;
     updateJob(job.id, { state: "queued", error: null });
     await runJob(job.id, { autoApproveText: true });
 
     expect(getJob(job.id)!.state).toBe("awaiting_preview");
-    expect(h.respondCalls).toBe(1); // still exactly one planning call across both runs
+    expect(h.respondCalls).toBe(2); // still exactly two planning calls across both runs
   });
 });

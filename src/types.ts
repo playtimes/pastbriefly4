@@ -1,5 +1,7 @@
 // Shared types across server, production, render and app.
 
+import type { Framing } from "./render/types.ts";
+
 export const CATEGORIES = [
   "Conflicts & Standoffs",
   "Money & Deception",
@@ -63,6 +65,7 @@ export type JobStep =
   | "preview"
   | "narration"
   | "build"
+  | "rendering"
   | "finishing";
 
 // Human-facing labels for each step, in order.
@@ -74,12 +77,13 @@ export const STEP_LABELS: Record<JobStep, string> = {
   stills: "Creating missing scenes",
   preview: "Reviewing visual direction",
   narration: "Recording narration",
-  build: "Building the films",
+  build: "Adding motion",
+  rendering: "Rendering the films",
   finishing: "Finishing",
 };
 
 // The steps shown in the Creating screen, in the order they run.
-export const STEP_ORDER: JobStep[] = ["research", "scripts", "narration", "archive", "stills", "build", "finishing"];
+export const STEP_ORDER: JobStep[] = ["research", "scripts", "narration", "archive", "stills", "build", "rendering", "finishing"];
 
 export interface Job {
   id: string;
@@ -127,10 +131,13 @@ export interface StoryReview {
 
 // The taste gate shown before spending on motion.
 export interface VisualPreview {
-  moments: number;
+  moments: number; // edit slots, both films
+  uniqueAssets?: number; // media assets actually acquired (each used asset once)
+  reusedPresentations?: number; // slots that show an already-acquired asset again (no cost)
   archive: number;
   reconstruction: number;
   graphic: number;
+  motionCandidates?: number; // slots eligible for motion under the local rules
   motionSelected: number;
   remainingMotionCost: number;
   frames: PreviewFrame[];
@@ -142,6 +149,19 @@ export interface PreviewFrame {
   truth: "archive" | "reconstruction" | "graphic";
   motion: boolean;
   caption: string;
+  // Film Grammar v2E: every frame is one fixed local edit slot (its index is the
+  // slot id) covering phrase beats startBeat-endBeat. It shows one presentation
+  // (base or a detail crop) of one media asset; a "reuse" frame shows an asset
+  // that another slot (its owner) acquired. focus names a detail's elements.
+  edit?: "new" | "reuse";
+  framing?: Framing;
+  asset?: string;
+  presentation?: "base" | "detail-left" | "detail-center" | "detail-right";
+  focus?: string;
+  startBeat?: number;
+  endBeat?: number;
+  startSec?: number;
+  durationSec?: number;
 }
 
 export type VideoKind = "long" | "short";

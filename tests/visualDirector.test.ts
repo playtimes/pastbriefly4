@@ -3,22 +3,26 @@ import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// v1A.2 Visual Director: ONE structured planning call decides what the viewer
-// should SEE for both films. Timing (narration beats) is built and mapped
-// locally, never by the model. Mock mode never touches a provider - it uses a
-// tiny deterministic fallback planner.
+// Visual planning: timing (narration beats -> fixed edit slots) is built and
+// mapped locally, never by a model. Since Film Grammar v2E two structured calls
+// plan both films: the Coverage Director proposes each film's media library and
+// the Editor assigns one legal presentation of it to every fixed slot. Mock mode
+// never touches a provider - it uses tiny deterministic fallback planners.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pb4-visual-director-"));
 process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
-const { planVisuals, buildBeats, openAiVisualDirector, masterPrompt, DIRECTOR_INSTRUCTIONS, stillReferencePaths, masterReferencePaths, PB1_STYLE_REFERENCE } =
-  await import("../src/production/visuals.ts");
-import type { DirectorInput, DirectorPlans, DirectorShot, PlannedShot } from "../src/production/visuals.ts";
+const {
+  planVisuals, buildBeats, planSlots, openAiCoverageDirector, openAiEditor, validateCoverage, buildPresentations, masterPrompt, COVERAGE_INSTRUCTIONS, EDITOR_INSTRUCTIONS,
+  stillReferencePaths, masterReferencePaths, PB1_STYLE_REFERENCE,
+} = await import("../src/production/visuals.ts");
+import type { CoverageAsset, CoverageInput, EditorInput, EditorPlans, PlannedShot, VisualDirectors } from "../src/production/visuals.ts";
+const { minimalAsset, fillEdit } = await import("./slotPlan.ts");
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { recordNarration } = await import("../src/production/narration.ts");
 const { ensureStoryDirs, inStory } = await import("../src/production/paths.ts");
-const { wordCount, groupBeats } = await import("../src/production/text.ts");
+const { wordCount } = await import("../src/production/text.ts");
 
 const story = { ...paulBunyanStory, createdAt: new Date().toISOString() };
 
@@ -29,22 +33,41 @@ async function narration() {
   return { long, short };
 }
 
-// The mock (offline) plan, produced by the fallback planner - no provider.
+// The mock (offline) plan, produced by the fallback planners - no provider.
 async function mockPlan() {
   return planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration());
 }
 
+// Test planners: the Coverage Director returns the given Long assets (and the Short
+// ones); the Editor fills every slot `pick` leaves open with "L00:base" / "S00:base",
+// or the next legal presentation where that would repeat an adjacent slot.
+function planners(long: Partial<CoverageAsset>[], pick: (slotId: number) => [string, number] | undefined = () => undefined, short: Partial<CoverageAsset>[] = [{}]): VisualDirectors {
+  return {
+    coverage: async (_i: CoverageInput) => ({ longAssets: long.map((a) => minimalAsset(a)), shortAssets: short.map((a) => minimalAsset(a)) }) as never,
+    editor: async (input: EditorInput): Promise<EditorPlans> => {
+      const ids = (kind: "long" | "short", p: (id: number) => string | undefined) =>
+        fillEdit(input.slots[kind].map((s) => s.id), input.presentations[kind].map((x) => x.id), p);
+      const long = ids("long", (id) => pick(id)?.[0]);
+      const short = ids("short", () => undefined);
+      return {
+        long: input.slots.long.map((s, i) => ({ slotId: s.id, presentationId: long[i], motionPriority: pick(s.id)?.[1] ?? 0 })),
+        short: input.slots.short.map((s, i) => ({ slotId: s.id, presentationId: short[i], motionPriority: 0 })),
+      };
+    },
+  };
+}
+
 describe("mock mode plans offline, with no provider", () => {
-  test("planVisuals uses the deterministic fallback planner, not the model", async () => {
-    // In mock mode planVisuals routes to the offline fallback director. Its output
+  test("planVisuals uses the deterministic fallback planners, not the model", async () => {
+    // In mock mode planVisuals routes to the offline fallback planners. Their output
     // is fully deterministic, so matching its exact signature proves no model call
-    // happened: reconstruction purposes are the fixed fallback string, and a
-    // graphic lands on every fifth beat.
+    // happened: reconstruction purposes are the fixed fallback string, and every
+    // fourth asset (L03) is a graphic.
     const plans = await mockPlan();
     expect(plans.long.length).toBeGreaterThan(0);
     expect(plans.short.length).toBeGreaterThan(0);
     expect(plans.long[1].purpose).toMatch(/^Show the key action of this moment at/);
-    expect(plans.long[4].truth).toBe("graphic"); // fallback places a graphic at i % 5 === 4
+    expect(plans.long.find((s) => s.assetId === "L03")?.truth).toBe("graphic");
   });
 });
 
@@ -61,7 +84,8 @@ describe("every shot has a reason to exist", () => {
 
   test("reconstruction prompts are built from purpose and constraints", async () => {
     const { long } = await mockPlan();
-    const recon = long.filter((s) => s.truth === "reconstruction");
+    // A reframe reuses its source asset (and its prompt) with its own purpose.
+    const recon = long.filter((s) => s.edit === "new" && s.truth === "reconstruction");
     expect(recon.length).toBeGreaterThan(0);
     for (const s of recon) {
       expect(s.prompt).toContain("Purpose:");
@@ -126,71 +150,55 @@ describe("narration beats are created and mapped locally", () => {
   });
 });
 
-describe("planVisuals maps director decisions with local timing and index", () => {
-  // A fake director that returns one deterministic decision per beat, so we can
-  // prove the mapping, not the model. Timing and index must come from the beats.
-  const fakeDirector = async (input: DirectorInput): Promise<DirectorPlans> => ({
-    long: input.beats.long.map((b, i): DirectorShot => ({
-      beatId: b.id,
-      purpose: `Purpose number ${i}`,
-      truth: i === 2 ? "graphic" : i === 3 ? "archive" : "reconstruction",
-      mustShow: ["a specific stranded submarine"],
-      mustNotShow: ["a wrong national flag"],
-      wantsMotion: i === 1 || i === 2, // beat 2 is a graphic: motion must be forced off
-      motion: i === 1 ? "pan-left" : "push",
-      prompt: `scene ${i}`,
-      archiveQuery: i === 3 ? "specific archive query" : "",
-      useMaster: i === 1 || i === 2, // beat 2 is a graphic: master must be forced off
-    })),
-    short: input.beats.short.map((b): DirectorShot => ({
-      beatId: b.id,
-      purpose: "Short film purpose",
-      truth: "reconstruction",
-      mustShow: ["x"],
-      mustNotShow: ["y"],
-      wantsMotion: false,
-      motion: "hold",
-      prompt: "short scene",
-      archiveQuery: "",
-      useMaster: false,
-    })),
-  });
+describe("planVisuals maps the library and the edit with local timing and index", () => {
+  // Deterministic test planners, so we prove the mapping, not the model. Timing
+  // and index must come from the slots. L00 is a moving, master-borrowing
+  // reconstruction; L01 is a graphic that asks for motion and the master (both
+  // must be forced off); L02 is archive with a specific query. The Editor gives
+  // the graphic and archive priority 0: a priority there is rejected outright.
+  const lib: Partial<CoverageAsset>[] = [
+    { purpose: "Purpose of the reconstruction", mustShow: [{ description: "a specific stranded submarine", region: "center" }], mustNotShow: ["a wrong national flag"], prompt: "scene one", useMaster: true, motionCapable: true },
+    { truth: "graphic", purpose: "Show where the tree stood.", useMaster: true, motionCapable: true },
+    { truth: "archive", purpose: "Show the real site.", archiveQuery: "specific archive query" },
+  ];
+  const pick = (i: number): [string, number] | undefined => (i === 1 ? ["L00:base", 2] : i === 2 ? ["L01:base", 0] : i === 3 ? ["L02:base", 0] : undefined);
+  const fake = () => planners(lib, pick, [{ purpose: "Short film purpose" }]);
 
-  test("index and word ranges are assigned locally from the beats", async () => {
+  test("index and word ranges are assigned locally from the slots", async () => {
     const narr = await narration();
-    const beats = buildBeats("long", paulBunyanScripts.long, narr.long);
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, fakeDirector);
+    const slots = planSlots("long", paulBunyanScripts.long, narr.long);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, fake());
 
-    expect(plans.long.length).toBe(beats.length);
+    expect(plans.long.length).toBe(slots.length);
     plans.long.forEach((s, i) => {
       expect(s.index).toBe(i);
-      expect(s.wordStart).toBe(beats[i].wordStart);
-      expect(s.wordEnd).toBe(beats[i].wordEnd);
+      expect(s.wordStart).toBe(slots[i].wordStart);
+      expect(s.wordEnd).toBe(slots[i].wordEnd);
     });
     expect(plans.long[0].wordStart).toBe(0);
   });
 
-  test("director purposes, motion, master and archiveQuery are preserved", async () => {
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fakeDirector);
+  test("asset purposes, motion, master and archiveQuery are preserved", async () => {
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fake());
 
-    // Purpose is used verbatim in the shot and the prompt.
-    expect(plans.long[5].purpose).toBe("Purpose number 5");
-    // A moving reconstruction keeps its motion, master and (no) archive query.
+    // The asset's purpose is used verbatim on every slot that shows it.
+    expect(plans.long[5].purpose).toBe("Purpose of the reconstruction");
+    // The selected motion slot keeps its motion, master and (no) archive query.
     const s1 = plans.long[1];
     expect(s1.truth).toBe("reconstruction");
     expect(s1.wantsMotion).toBe(true);
-    expect(s1.motion).toBe("pan-left");
+    expect(s1.motion).toBe("push");
     expect(s1.useMaster).toBe(true);
     expect(s1.archiveQuery).toBeUndefined();
-    expect(s1.prompt).toContain("Purpose number 1");
-    expect(s1.prompt).toContain("scene 1");
+    expect(s1.prompt).toContain("Purpose of the reconstruction");
+    expect(s1.prompt).toContain("scene one");
     expect(s1.prompt).toContain("a specific stranded submarine");
     expect(s1.prompt).toContain("a wrong national flag");
     expect(s1.prompt).toContain("Wide 16:9 composition");
   });
 
-  test("a graphic decision cannot carry motion or the master", async () => {
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fakeDirector);
+  test("a graphic asset cannot carry motion or the master", async () => {
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fake());
     const g = plans.long[2];
     expect(g.truth).toBe("graphic");
     expect(g.wantsMotion).toBe(false);
@@ -200,8 +208,8 @@ describe("planVisuals maps director decisions with local timing and index", () =
     expect(g.prompt).toMatch(/information graphic/i);
   });
 
-  test("an archive decision keeps its specific query; non-archive shots have none", async () => {
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fakeDirector);
+  test("an archive asset keeps its specific query; non-archive shots have none", async () => {
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fake());
     const a = plans.long[3];
     expect(a.truth).toBe("archive");
     expect(a.archiveQuery).toBe("specific archive query");
@@ -210,46 +218,63 @@ describe("planVisuals maps director decisions with local timing and index", () =
   });
 
   test("the Short film is planned independently, not cropped from the Long", async () => {
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fakeDirector);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), fake());
     expect(plans.short.length).not.toBe(plans.long.length);
     expect(plans.short[0].purpose).toBe("Short film purpose");
+    expect(plans.short.every((s) => s.assetId.startsWith("S"))).toBe(true);
   });
 });
 
-describe("the live director makes exactly one structured call with the full context", () => {
-  test("openAiVisualDirector calls respondJson once and includes facts, scripts and both beat lists", async () => {
+describe("the live planners each make exactly one structured call with the full context", () => {
+  async function inputs() {
     const narr = await narration();
-    const input: DirectorInput = {
-      story,
-      research: paulBunyanResearch,
-      scripts: paulBunyanScripts,
-      beats: {
-        long: buildBeats("long", paulBunyanScripts.long, narr.long),
-        short: buildBeats("short", paulBunyanScripts.short, narr.short),
-      },
-    };
-
-    let calls = 0;
-    let captured: any = null;
-    const fakeRespond = (async (opts: any) => {
-      calls++;
-      captured = opts;
-      return { long: [], short: [] };
+    const slots = { long: planSlots("long", paulBunyanScripts.long, narr.long), short: planSlots("short", paulBunyanScripts.short, narr.short) };
+    const library = { long: validateCoverage("long", [minimalAsset()]), short: validateCoverage("short", [minimalAsset({ truth: "graphic" })]) };
+    const presentations = { long: buildPresentations(library.long), short: buildPresentations(library.short) };
+    const base = { story, research: paulBunyanResearch, scripts: paulBunyanScripts, slots };
+    return { coverage: base, editor: { ...base, library, presentations } };
+  }
+  const capture = () => {
+    const seen: any[] = [];
+    const respond = (async (opts: any) => {
+      seen.push(opts);
+      return {};
     }) as any;
+    return { seen, respond };
+  };
 
-    await openAiVisualDirector(input, fakeRespond);
-
-    expect(calls).toBe(1); // ONE call plans both films
-    expect(captured.schemaName).toBe("visual_plan");
-    // Final verified facts, both scripts and both beat lists are all in the payload.
-    expect(captured.input).toContain(paulBunyanResearch.facts[0].fact);
-    expect(captured.input).toContain("LONG SCRIPT");
-    expect(captured.input).toContain("SHORT SCRIPT");
-    expect(captured.input).toContain("LONG BEATS");
-    expect(captured.input).toContain("SHORT BEATS");
-    expect(captured.input).toContain(paulBunyanResearch.world.visualDirection);
+  test("the Coverage Director calls respondJson once with facts, scripts and both slot grids", async () => {
+    const { coverage } = await inputs();
+    const { seen, respond } = capture();
+    await openAiCoverageDirector(coverage, respond);
+    expect(seen).toHaveLength(1); // ONE call proposes both libraries
+    expect(seen[0].schemaName).toBe("coverage_plan");
+    expect(seen[0].instructions).toBe(COVERAGE_INSTRUCTIONS);
+    // Final verified facts, both scripts and both slot grids are all in the payload.
+    expect(seen[0].input).toContain(paulBunyanResearch.facts[0].fact);
+    expect(seen[0].input).toContain("LONG SCRIPT");
+    expect(seen[0].input).toContain("SHORT SCRIPT");
+    expect(seen[0].input).toContain("LONG SLOTS");
+    expect(seen[0].input).toContain("SHORT SLOTS");
+    expect(seen[0].input).toContain(paulBunyanResearch.world.visualDirection);
     // No web search - planning uses the provided research, not the internet.
-    expect(captured.webSearch).toBeFalsy();
+    expect(seen[0].webSearch).toBeFalsy();
+  });
+
+  test("the Editor calls respondJson once with the slots, the library and a schema of legal presentation ids", async () => {
+    const { editor } = await inputs();
+    const { seen, respond } = capture();
+    await openAiEditor(editor, respond);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].schemaName).toBe("edit_plan");
+    expect(seen[0].instructions).toBe(EDITOR_INSTRUCTIONS);
+    expect(seen[0].input).toContain(paulBunyanResearch.facts[0].fact);
+    expect(seen[0].input).toContain("LONG MEDIA LIBRARY");
+    expect(seen[0].input).toContain("SHORT MEDIA LIBRARY");
+    expect(seen[0].input).toContain("LONG SLOTS");
+    expect(seen[0].schema.properties.long.items.properties.presentationId.enum).toEqual(["L00:base", "L00:detail-center"]);
+    expect(seen[0].schema.properties.short.items.properties.presentationId.enum).toEqual(["S00:base"]);
+    expect(seen[0].webSearch).toBeFalsy();
   });
 });
 
@@ -265,32 +290,6 @@ describe("v1A.3 planning fixes", () => {
     expect(plans.short.length).toBeGreaterThan(0);
   });
 
-  test("a long compound sentence is split into several beats, ranges stay contiguous", () => {
-    // Sentence grouping alone would keep this as ONE beat; punctuation splitting
-    // must turn it into several, without ever dropping or overlapping a word.
-    const oneLongSentence =
-      "The convoy rolled in at dawn, engineers carried chainsaws to the tree, a security platoon fanned out around them, attack helicopters circled overhead, heavy bombers held far above, and an aircraft carrier waited off the coast.";
-    const beats = groupBeats(oneLongSentence, 6);
-    expect(beats.length).toBeGreaterThan(3);
-    expect(beats[0].wordStart).toBe(0);
-    for (let i = 1; i < beats.length; i++) expect(beats[i].wordStart).toBe(beats[i - 1].wordEnd);
-    expect(beats.at(-1)!.wordEnd).toBe(wordCount(oneLongSentence));
-    for (const b of beats) expect(b.wordEnd - b.wordStart).toBeGreaterThan(1); // no empty/tiny fragments
-  });
-
-  test("beat splitting can exceed the sentence count when sentences are long", () => {
-    // Three long, comma-rich sentences. The old sentence grouping capped this at 3
-    // beats (too static for a script written in long sentences, like the real U137
-    // script); punctuation splitting must produce more, with ranges still contiguous.
-    const text =
-      "The convoy rolled in at dawn, engineers carried chainsaws, and a platoon fanned out. Overhead, helicopters circled, bombers held high, and fighters escorted them. Off the coast, a carrier waited, its task force ready, while the border stood at full alert.";
-    const beats = groupBeats(text, 9);
-    expect(beats.length).toBeGreaterThan(3); // more beats than the 3 sentences
-    expect(beats[0].wordStart).toBe(0);
-    for (let i = 1; i < beats.length; i++) expect(beats[i].wordStart).toBe(beats[i - 1].wordEnd);
-    expect(beats.at(-1)!.wordEnd).toBe(wordCount(text));
-  });
-
   test("prompts are not prefixed with the blanket story-world visual direction", async () => {
     const { long } = await mockPlan();
     for (const s of long) {
@@ -298,51 +297,36 @@ describe("v1A.3 planning fixes", () => {
     }
   });
 
-  test("the full director scene is used verbatim, never truncated", async () => {
+  test("the full Coverage scene is used verbatim, never truncated", async () => {
     const longScene =
       "A wide, eye-level reconstruction of the engineers steadying the poplar as the first cut bites, the security platoon ringed behind them in loose cover, the low DMZ buildings and the empty bridge held far back in misted light, every figure in period-correct mid-1970s fatigues, the whole frame quiet and watchful rather than heroic and composed to read clearly at a glance without any caption at all.";
     expect(longScene.length).toBeGreaterThan(200);
-    const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
-      long: input.beats.long.map((b): DirectorShot => ({
-        beatId: b.id, purpose: "Show the engineers taking the first cut.", truth: "reconstruction",
-        mustShow: ["engineers with a chainsaw"], mustNotShow: [], wantsMotion: false, motion: "hold",
-        prompt: longScene, archiveQuery: "", useMaster: false,
-      })),
-      short: [],
-    });
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
+    const plans = await planVisuals(
+      story, paulBunyanResearch, paulBunyanScripts, await narration(),
+      planners([{ purpose: "Show the engineers taking the first cut.", mustShow: [{ description: "engineers with a chainsaw", region: "center" }], prompt: longScene }]),
+    );
     expect(plans.long[0].prompt).toContain(longScene); // the whole scene survives, no "..." cut
   });
 
   test("deterministic guards never contradict a scene-specific mustShow", async () => {
-    // A legacy/aftermath beat may legitimately require modern equipment. No blanket
-    // "no modern equipment" guard may be injected to fight the director's mustShow.
-    const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
-      long: input.beats.long.map((b): DirectorShot => ({
-        beatId: b.id, purpose: "Show a modern patrol vessel on watch.", truth: "reconstruction",
-        mustShow: ["modern Swedish naval vessel"], mustNotShow: ["Soviet insignia"], wantsMotion: false, motion: "hold",
-        prompt: "A modern patrol boat holding station in the archipelago.", archiveQuery: "", useMaster: false,
-      })),
-      short: [],
-    });
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
+    // A legacy/aftermath asset may legitimately require modern equipment. No blanket
+    // "no modern equipment" guard may be injected to fight the asset's mustShow.
+    const plans = await planVisuals(
+      story, paulBunyanResearch, paulBunyanScripts, await narration(),
+      planners([{ purpose: "Show a modern patrol vessel on watch.", mustShow: [{ description: "modern Swedish naval vessel", region: "center" }], mustNotShow: ["Soviet insignia"], prompt: "A modern patrol boat holding station in the archipelago." }]),
+    );
     const s = plans.long[0];
     expect(s.mustShow).toContain("modern Swedish naval vessel");
-    expect(s.mustNotShow).toEqual(["Soviet insignia"]); // exactly the director's list, nothing injected
+    expect(s.mustNotShow).toEqual(["Soviet insignia"]); // exactly the asset's list, nothing injected
     expect(s.mustNotShow.join(" ")).not.toMatch(/modern vehicles|anachronistic/i);
     expect(s.prompt).not.toMatch(/Do not show:[^.]*modern vehicles/i);
   });
 
-  test("an archive beat's stored prompt is a clean reconstruction fallback, not fake archival footage", async () => {
-    const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
-      long: input.beats.long.map((b): DirectorShot => ({
-        beatId: b.id, purpose: "Show the felled poplar's stump left standing as a marker.", truth: "archive",
-        mustShow: ["the poplar stump"], mustNotShow: [], wantsMotion: false, motion: "hold",
-        prompt: "The stump left standing after the tree came down.", archiveQuery: "Operation Paul Bunyan tree 1976", useMaster: false,
-      })),
-      short: [],
-    });
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
+  test("an archive asset's stored prompt is a clean reconstruction fallback, not fake archival footage", async () => {
+    const plans = await planVisuals(
+      story, paulBunyanResearch, paulBunyanScripts, await narration(),
+      planners([{ truth: "archive", purpose: "Show the felled poplar's stump left standing as a marker.", mustShow: [{ description: "the poplar stump", region: "center" }], prompt: "The stump left standing after the tree came down.", archiveQuery: "Operation Paul Bunyan tree 1976" }, {}]),
+    );
     const a = plans.long[0];
     expect(a.truth).toBe("archive");
     expect(a.archiveQuery).toBe("Operation Paul Bunyan tree 1976"); // acquisition still drives it
@@ -364,153 +348,126 @@ describe("v1A.3 planning fixes", () => {
     }
   });
 
-  test("the director instructions demand one drawable frame, not a montage", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/one drawable frame/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/montage/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/split screen/i);
+  test("the Coverage instructions demand one frame per asset, not a montage", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/ONE ASSET = ONE FRAME/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/montage/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/split screen/i);
   });
 });
 
 // ---------------------------------------------------------------------------
-// v1A.4: "no new visual" reuse, plus tightened factual / one-frame / archive
-// / repetition instructions. Small, focused - no giant snapshots.
+// v1A.4 "no new visual" reuse. Since Film Grammar v2D a visual that serves several
+// phrases is one fixed edit slot that PB4 built over several beats; no planner can
+// group or extend anything.
 // ---------------------------------------------------------------------------
-describe("v1A.4 no-new-visual reuse", () => {
-  // A director that asks to reuse the previous visual on beat 0 (must be ignored)
-  // and on beat 2 (must fold into beat 1's shot). Every other beat is a fresh
-  // reconstruction with a distinct scene so we can prove the visual is preserved.
-  const reuseDirector = async (input: DirectorInput): Promise<DirectorPlans> => ({
-    long: input.beats.long.map((b, i): DirectorShot => ({
-      beatId: b.id,
-      purpose: `Purpose ${i}`,
-      truth: "reconstruction",
-      mustShow: ["a concrete subject"],
-      mustNotShow: [],
-      wantsMotion: false,
-      motion: "hold",
-      prompt: `scene ${i}`,
-      archiveQuery: "",
-      useMaster: false,
-      reusePrevious: i === 0 || i === 2, // beat 0 reuse must be ignored; beat 2 folds into beat 1
-    })),
-    short: [],
-  });
+describe("no new visual: one slot covers several phrase beats", () => {
+  // In the mock grid, Long slot 0 covers beats 0-1 and slot 5 covers beats 6-7.
+  const oneAsset = () => planners([{ prompt: "the one scene" }]);
 
-  test("reusePrevious is never honoured on beat 0 - it always creates a real visual", async () => {
+  test("the first slot always starts at beat 0 with a real visual", async () => {
     const narr = await narration();
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, reuseDirector);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, oneAsset());
     expect(plans.long[0].wordStart).toBe(0);
-    expect(plans.long[0].prompt).toContain("scene 0"); // beat 0 produced its own visual
+    expect(plans.long[0].prompt).toContain("the one scene");
   });
 
-  test("a reused later beat creates no new shot and extends the previous shot's wordEnd", async () => {
+  test("a slot over several beats is one shot covering all their words and screen time", async () => {
     const narr = await narration();
     const beats = buildBeats("long", paulBunyanScripts.long, narr.long);
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, reuseDirector);
-
-    // Only beat 2 is reused (beat-0 reuse is ignored), so exactly one shot is saved.
-    expect(plans.long.length).toBe(beats.length - 1);
-    // Beat 1's shot now spans beat 2 as well, and the previous visual is preserved.
-    expect(plans.long[1].prompt).toContain("scene 1");
-    expect(plans.long[1].wordEnd).toBe(beats[2].wordEnd);
-    // Word coverage stays contiguous across the fold (next shot is beat 3).
-    expect(plans.long[2].wordStart).toBe(beats[3].wordStart);
-    expect(plans.long[2].wordStart).toBe(plans.long[1].wordEnd);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, oneAsset());
+    expect(plans.long.length).toBeLessThan(beats.length);
+    expect(plans.long[5]).toMatchObject({ startBeat: 6, endBeat: 7, wordStart: beats[6].wordStart, wordEnd: beats[7].wordEnd, startSec: beats[6].startSec, endSec: beats[7].endSec });
+    expect(plans.long[6].wordStart).toBe(beats[8].wordStart);
+    expect(plans.long[6].wordStart).toBe(plans.long[5].wordEnd);
   });
 
-  test("an unsupported beat is represented by reuse instead of an invented filler shot", async () => {
-    // The reused beat (2) must not appear as its own "scene 2" filler visual anywhere.
-    // Match the exact assembled scene ("Scene: scene 2.") so it can't collide with
-    // "scene 20", "scene 21", etc. from later beats.
+  test("a covered phrase gets no invented filler shot of its own", async () => {
     const narr = await narration();
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, reuseDirector);
-    expect(plans.long.some((s) => s.prompt.includes("Scene: scene 2."))).toBe(false);
+    const beats = buildBeats("long", paulBunyanScripts.long, narr.long);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, oneAsset());
+    expect(plans.long.some((s) => s.wordStart === beats[7].wordStart)).toBe(false);
   });
 
-  test("indexes stay sequential and contiguous after a reuse fold", async () => {
+  test("indexes stay sequential and word coverage contiguous", async () => {
     const narr = await narration();
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, reuseDirector);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, oneAsset());
     plans.long.forEach((s, i) => expect(s.index).toBe(i));
     for (let i = 1; i < plans.long.length; i++) expect(plans.long[i].wordStart).toBe(plans.long[i - 1].wordEnd);
   });
 });
 
-describe("v1A.4 tightened director instructions", () => {
+describe("v1A.4 tightened instructions, carried into the Coverage Director", () => {
   test("forbid inventing event-specific visual facts just to make an image", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/do not invent/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/press conferences/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/equipment upgrades/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/crowds/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/do NOT invent/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/press conferences/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/sonar equipment/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/crowds/i);
   });
 
   test("one-frame rule explicitly forbids collage, split-focus and dual action", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/collage/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/split-focus/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/two different actions/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/hatch/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/one location, one moment, one primary action/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/collage/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/split-focus/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/two different actions/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/hatch/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/one location, one moment, one primary action/i);
   });
 
   test("archive fallback instruction forbids faking readable historical documents", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/reconstruction fallback/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/never fabricate/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/newspaper headline/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/communiqué/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/no readable text/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/reconstruction fallback/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/never fabricate/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/newspaper headline/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/communiqué/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/no readable text/i);
   });
 
-  test("repetition rule prefers reuse or a supported detail over another arbitrary angle", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/reusePrevious/);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/new camera angle merely/i);
+  test("repetition prefers reuse and real details over near-duplicate assets", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/do not manufacture near-duplicates: the Editor reuses assets and cuts to their details/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/REPETITION AND OVERUSE/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/A base followed by one of its details is a natural documentary cut/);
   });
 
-  test("beat targets are described as guidance, not a quota", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/not a quota/i);
+  test("the library is not a quota of new images", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/A LIBRARY, NOT A QUOTA/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/Do not create one asset per slot/);
+    expect(COVERAGE_INSTRUCTIONS).not.toMatch(/30-40 beats/);
   });
 });
 
 // ---------------------------------------------------------------------------
-// v1A.5: reuse discipline. Instructions-only tightening (no new fields, no AI
-// calls, no schema change): abstract/unsupported beats must prefer reusePrevious,
-// plausible-but-unsupported scenes are forbidden, negations/limitations must not
-// be dramatized, archive requires a plausible real asset, and repeated geography
-// prefers reuse over another map.
+// v1A.5: reuse discipline. Instructions-only (no AI calls): abstract/unsupported
+// phrases never get an invented scene, plausible-but-unsupported scenes are
+// forbidden, negations/limitations must not be dramatized, archive requires a
+// plausible real asset, and repeated geography prefers reuse over another map.
 // ---------------------------------------------------------------------------
 describe("v1A.5 reuse discipline instructions", () => {
-  test("abstract, unsupported beats must prefer reusePrevious as the default", () => {
-    // The abstract categories are named and tied to a mandatory reuse.
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/reusePrevious IS THE DEFAULT/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/interpretation, suspicion, uncertainty/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/policy significance/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/reusePrevious MUST be true/);
+  test("abstract, unsupported phrases are never illustrated with an invented scene", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/When narration is abstract \(interpretation, suspicion, consequence, policy, reflection\), do not invent a physical scene for it/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/ABSTRACT NARRATION - when a slot mainly carries interpretation, suspicion, consequence, policy, transition or reflection/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/Do not pick an unrelated scene just because it is new/);
+    for (const t of [COVERAGE_INSTRUCTIONS, EDITOR_INSTRUCTIONS]) expect(t).not.toMatch(/hold IS THE DEFAULT|reusePrevious/i);
   });
 
   test("plausible is not supported: likely-looking scenes may not be invented", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/historically plausible is not enough/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/PLAUSIBLE IS NOT SUPPORTED/);
-    // The forbidden invention list is explicit.
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/may NOT invent meetings, rooms, confrontations/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/merely because they sound likely/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/PLAUSIBLE IS NOT SUPPORTED: historically likely is not enough/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/do NOT invent event-specific meetings, rooms or interiors/);
   });
 
   test("negations and limitations must not be dramatized into a confrontation", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/DO NOT DRAMATIZE NEGATIONS OR LIMITATIONS/);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/did not happen, was prevented, was limited/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/access was limited/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/blocking another person at a hatch/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/Do not dramatize negations or limitations/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/did not happen, was prevented, limited/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/access was limited/i);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/blocking another person at a hatch/i);
   });
 
-  test("archive requires a plausible real historical asset, not an abstract outcome", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/specific real historical asset[^.]*plausibly exists/i);
-    // The abstract outcomes that must NOT trigger an archive choice are named.
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/Do NOT choose archive for an abstract outcome/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/an apology, a reimbursement, a policy change or public concern/i);
+  test("archive requires a plausible real historical subject, not an abstract outcome", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/specific real historical person, vessel, event, photograph, document, newspaper or film plausibly exists/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/Do NOT choose archive for an abstract outcome/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/an apology, a reimbursement, a policy change or public concern/);
   });
 
-  test("repeated geography prefers reuse over another map, and a shot must add information", () => {
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/already communicated the same geography or spatial relationship/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/rather than generating another similar map/i);
-    expect(DIRECTOR_INSTRUCTIONS).toMatch(/A new shot must add new information\./);
+  test("repeated geography prefers reuse over another map, and an asset must add information", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/do not propose another similar map from a slightly different angle: the Editor reuses it/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/A new asset must add new information\./);
   });
 });
 
@@ -586,8 +543,8 @@ describe("PB1 reconstruction style prompts", () => {
 
   test("a useMaster reconstruction marks the second reference as continuity only; a normal one does not", async () => {
     const { long } = await mockPlan();
-    const withMaster = long.filter((s) => s.truth === "reconstruction" && s.useMaster);
-    const withoutMaster = long.filter((s) => s.truth === "reconstruction" && !s.useMaster);
+    const withMaster = long.filter((s) => s.edit === "new" && s.truth === "reconstruction" && s.useMaster);
+    const withoutMaster = long.filter((s) => s.edit === "new" && s.truth === "reconstruction" && !s.useMaster);
     expect(withMaster.length).toBeGreaterThan(0);
     expect(withoutMaster.length).toBeGreaterThan(0);
     for (const s of withMaster) expect(s.prompt).toMatch(/second reference image, when present, is a subject and world continuity reference only/i);
@@ -645,15 +602,10 @@ describe("PB1 reconstruction style prompts", () => {
   });
 
   test("the archive reconstruction fallback receives the same PB1 style rules", async () => {
-    const director = async (input: DirectorInput): Promise<DirectorPlans> => ({
-      long: input.beats.long.map((b): DirectorShot => ({
-        beatId: b.id, purpose: "Show the felled poplar's stump left standing.", truth: "archive",
-        mustShow: ["the poplar stump"], mustNotShow: [], wantsMotion: false, motion: "hold",
-        prompt: "The stump left standing after the tree came down.", archiveQuery: "Operation Paul Bunyan tree 1976", useMaster: false,
-      })),
-      short: [],
-    });
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), director);
+    const plans = await planVisuals(
+      story, paulBunyanResearch, paulBunyanScripts, await narration(),
+      planners([{ truth: "archive", purpose: "Show the felled poplar's stump left standing.", mustShow: [{ description: "the poplar stump", region: "center" }], prompt: "The stump left standing after the tree came down.", archiveQuery: "Operation Paul Bunyan tree 1976" }, {}]),
+    );
     expect(plans.long[0].truth).toBe("archive");
     expect(plans.long[0].prompt).toMatch(/historical editorial illustration in the PastBriefly reconstruction style/i);
     expect(plans.long[0].prompt).toMatch(/do not add flags, banners, emblems, insignia/i);
@@ -679,7 +631,7 @@ describe("PB1 reconstruction style prompts", () => {
 // ---------------------------------------------------------------------------
 describe("PB1 reference wiring", () => {
   const shot = (over: Partial<PlannedShot>): PlannedShot => ({
-    index: 0, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: "p",
+    index: 0, edit: "new", assetId: "L00", presentation: "base", framing: "wide", startSec: 0, endSec: 1, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: "p",
     purpose: "x", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 1, ...over,
   });
 

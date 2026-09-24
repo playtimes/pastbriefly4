@@ -14,26 +14,28 @@ process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
 const { planVisuals } = await import("../src/production/visuals.ts");
-import type { DirectorInput, DirectorPlans, DirectorShot } from "../src/production/visuals.ts";
+import type { VisualDirectors } from "../src/production/visuals.ts";
+const { minimalAsset } = await import("./slotPlan.ts");
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 
 const story = { ...paulBunyanStory, createdAt: new Date().toISOString() };
 const fakeNarr = () => ({ audioRel: "a", audioMediaRel: "a", durationSec: 300, words: [{ word: "a", start: 0, end: 0.5 }] });
 const narration = { long: fakeNarr(), short: fakeNarr() } as any;
 
-// If planning ever reached a director despite missing facts, this makes it loud.
-const trap = (async () => {
-  throw new Error("director must not run without facts");
-}) as any;
+// If planning ever reached a planner despite missing facts, this makes it loud.
+const fail = async (): Promise<never> => {
+  throw new Error("planners must not run without facts");
+};
+const trap: VisualDirectors = { coverage: fail, editor: fail };
 
-// A minimal valid plan so the "facts present" path can proceed without a provider.
-const okDirector = async (input: DirectorInput): Promise<DirectorPlans> => ({
-  long: input.beats.long.map((b): DirectorShot => ({
-    beatId: b.id, purpose: "Show the moment.", truth: "reconstruction", mustShow: ["x"], mustNotShow: [],
-    wantsMotion: false, motion: "hold", prompt: "a specific scene", archiveQuery: "", useMaster: false,
-  })),
-  short: [],
-});
+// A minimal valid library and edit so the "facts present" path can proceed without a provider.
+const okDirectors: VisualDirectors = {
+  coverage: async () => ({ longAssets: [minimalAsset()], shortAssets: [minimalAsset()] }) as never,
+  editor: async (input) => ({
+    long: input.slots.long.map((s) => ({ slotId: s.id, presentationId: s.id % 2 ? "L00:detail-center" : "L00:base", motionPriority: 0 })),
+    short: input.slots.short.map((s) => ({ slotId: s.id, presentationId: s.id % 2 ? "S00:detail-center" : "S00:base", motionPriority: 0 })),
+  }),
+};
 
 describe("live visual planning requires a fact sheet", () => {
   test("planVisuals rejects an empty facts array in live mode, before any call", async () => {
@@ -44,7 +46,7 @@ describe("live visual planning requires a fact sheet", () => {
   });
 
   test("with verified facts present, live planning proceeds", async () => {
-    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narration, okDirector);
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narration, okDirectors);
     expect(plans.long.length).toBeGreaterThan(0);
     expect(plans.long[0].purpose).toBe("Show the moment.");
   });

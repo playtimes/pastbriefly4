@@ -76,7 +76,7 @@ function makeStory(): Story {
 }
 
 function shot(index: number, extra: Record<string, unknown> = {}) {
-  return { index, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: `scene ${index}`, purpose: "p", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 0, ...extra };
+  return { index, edit: "new", assetId: `L${String(index).padStart(2, "0")}`, presentation: "base", framing: "wide", startSec: index, endSec: index + 1, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: `scene ${index}`, purpose: "p", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 0, ...extra };
 }
 
 // A job whose research, scripts, narration and shot plans are already done, so

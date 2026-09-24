@@ -5,7 +5,7 @@ export const PRICING = {
   openai: {
     research: 0.18, // the research stage: draft + audit + final verification (3 web-search passes)
     script: 0.03, // one script completion
-    visualPlan: 0.05, // one Visual Director planning call (both films, no web search)
+    visualPlan: 0.05, // one visual planning call: Coverage or Editor (both films, no web search)
     image: 0.08, // one gpt-image-1 still
   },
   elevenlabs: {

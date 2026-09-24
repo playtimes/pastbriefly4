@@ -53,7 +53,7 @@ vi.mock("../src/providers/openai.ts", async () => {
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const nodePath = await import("node:path");
   return {
-    respondJson: vi.fn(async () => ({})),
+    respondJson: vi.fn(async (o: { input?: string }) => (await import("./slotPlan.ts")).minimalPlan(o)),
     imageMimeType: () => "image/png",
     generateImageFile: vi.fn(async (opts: { outPath: string }) => {
       h.imageCalls.push(opts.outPath);

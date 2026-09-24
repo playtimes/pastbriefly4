@@ -4,6 +4,10 @@
 export type Truth = "archive" | "reconstruction" | "graphic";
 export type Motion = "hold" | "push" | "pan-left" | "pan-right";
 
+// How an edit slot presents its still: a clean full-frame crop (wide), a modest
+// push (medium), or a stronger crop toward one region of the image (detail-*).
+export type Framing = "wide" | "medium" | "detail-left" | "detail-center" | "detail-right";
+
 export interface Caption {
   kicker?: string;
   text: string;
@@ -21,6 +25,7 @@ export interface Shot {
   path: string; // staticFile name, staged into the render's public dir
   truth: Truth;
   motion?: Motion;
+  framing?: Framing;
   caption?: Caption;
   source?: string;
 }

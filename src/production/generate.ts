@@ -16,8 +16,11 @@ import {
   acquireMotion,
   buildPreview,
   buildRenderPlan,
+  resolveReuse,
+  assertFilmGrammarPlan,
   accentFor,
   type PlannedShot,
+  type RejectedCandidate,
 } from "./visuals.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import type { Scripts } from "./scripts.ts";
@@ -32,6 +35,7 @@ interface Scratch {
   masterRef?: string;
   longShots?: PlannedShot[];
   shortShots?: PlannedShot[];
+  coverageRejected?: RejectedCandidate[]; // Coverage candidates discarded by validation (film, raw index, reason)
   spent?: number;
 }
 
@@ -144,17 +148,24 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
     const narration = scratch.narration as { long: Narration; short: Narration };
 
-    // 4. Plan shots - ONE Visual Director call plans both films. Charged once (the
-    //    same preflight/record pattern), and reused on resume: once both plans are
-    //    in scratch this block is skipped, so the director is never called again.
+    // 4. Plan shots - TWO planning calls cover both films: the Coverage Director
+    //    (media library), then the Editor (one presentation per fixed slot). Each
+    //    call is preflighted and charged once it returns, even if its answer then
+    //    fails validation (which stops the job before any acquisition). Reused on
+    //    resume: once both plans are in scratch this block is skipped.
     if (!scratch.longShots || !scratch.shortShots) {
       step(jobId, "stills", "Planning the visuals", scratch);
-      budget(job, PRICING.openai.visualPlan, scratch);
-      const plans = await planVisuals(story, research, scripts, narration);
+      const plans = await planVisuals(story, research, scripts, narration, undefined, {
+        before: () => budget(job, PRICING.openai.visualPlan, scratch),
+        after: () => record(jobId, PRICING.openai.visualPlan, scratch),
+      });
       scratch.longShots = plans.long;
       scratch.shortShots = plans.short;
-      record(jobId, PRICING.openai.visualPlan, scratch);
+      scratch.coverageRejected = plans.coverageRejected;
+      updateJob(jobId, { scratch });
     }
+    // A plan stored by an older planner (e.g. a v1 shot list) is never reinterpreted.
+    for (const [kind, shots] of films(scratch)) assertFilmGrammarPlan(kind, shots);
 
     // Master reference still - one OpenAI image per job. Generated once and reused
     // on resume/Continue: keyed off scratch, not hero.png existing (which may be a
@@ -176,7 +187,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     step(jobId, "archive", "Finding historical material", scratch);
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
-        if (shot.truth === "archive" && !shot.path) {
+        if (shot.edit === "new" && shot.truth === "archive" && !shot.path) {
           // Preflight the possible reconstruction fallback so a failed archive
           // search can never push spend past the cap; charge only if it generated.
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
@@ -190,7 +201,8 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     step(jobId, "stills", "Creating missing scenes", scratch);
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
-        if (!shot.path) {
+        // Only the owning ("new") slot acquires an asset; its reuses share that still below.
+        if (shot.edit === "new" && !shot.path) {
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
           const result = await acquireStill(story, kind, shot, master);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
@@ -198,6 +210,10 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
         }
       }
     }
+
+    // Reuses point at their asset owner's still: no provider work and no charge.
+    for (const [kind, shots] of films(scratch)) resolveReuse(story, kind, shots);
+    updateJob(jobId, { scratch });
 
     // 5. Visual preview gate
     const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
@@ -210,10 +226,10 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
 
     // 6. Motion (only after the preview is approved)
-    step(jobId, "build", "Building the films", scratch);
+    step(jobId, "build", "Adding motion", scratch);
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
-        if (shot.wantsMotion && !shot.motionPath) {
+        if (shot.edit === "new" && shot.wantsMotion && !shot.motionPath) {
           if (config.mode === "live") budget(job, PRICING.runway.video5s, scratch);
           await acquireMotion(story, kind, shot);
           if (shot.motionPath) record(jobId, PRICING.runway.video5s, scratch);
@@ -223,6 +239,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
 
     // 7. Render both films
+    step(jobId, "rendering", "Rendering the films", scratch);
     const longPlan = buildRenderPlan("long", story, scratch.longShots!, narration.long, accent);
     const shortPlan = buildRenderPlan("short", story, scratch.shortShots!, narration.short, accent);
     await renderFilms(storyDir(story.slug), [
@@ -275,7 +292,8 @@ export function newJobId(): string {
 // so the existing poll reflects this without any extra writes.
 export function jobProgress(job: { step: JobStep; scratch: Record<string, any> }): { current: number; total: number } | null {
   const s = (job.scratch ?? {}) as Scratch;
-  const shots = [...(s.longShots ?? []), ...(s.shortShots ?? [])];
+  // Progress counts the assets being made: a reuse shares its owner's still.
+  const shots = [...(s.longShots ?? []), ...(s.shortShots ?? [])].filter((sh) => sh.edit !== "reuse");
   switch (job.step) {
     case "scripts": {
       const p = s.scriptParts ?? {};

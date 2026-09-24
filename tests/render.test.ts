@@ -60,7 +60,9 @@ describe("Remotion renderer", () => {
       "-f", "lavfi", "-i", "color=c=blue:s=320x180:d=0.5:r=30",
       "-filter_complex", "concat=n=2:v=1:a=0", "-pix_fmt", "yuv420p", path.join(pub, "clip.mp4"),
     ]);
-    // The clip sits under a 3s shot: it must play once, then hold its final frame.
+    // Renderer safety net only: the edit plan never gives a clip more screen time
+    // than the clip (buildRenderPlan refuses it), but if a clip were ever short of
+    // its shot, Remotion must not loop, jump back or go black.
     const clipPlan: RenderPlan = {
       ...plan("long"),
       durationInFrames: 90,
@@ -89,7 +91,7 @@ describe("Remotion renderer", () => {
     expect(p.durationSec).toBeGreaterThan(0.5);
   });
 
-  test("a clip shorter than its shot holds its final frame: no black tail, no loop, no jump back", () => {
+  test("safety net: a clip shorter than its shot never loops, jumps back or goes black", () => {
     const blue = (px: number[]) => px[2] > 90 && px[2] > px[0] + 40;
     const red = (px: number[]) => px[0] > 90 && px[0] > px[2] + 40;
     expect(red(pixelAt(clipOut, 0.2))).toBe(true); // the clip plays from its start

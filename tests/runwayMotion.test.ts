@@ -48,6 +48,12 @@ function makeStory(): Story {
 function makeShot(over: Partial<PlannedShot> = {}): PlannedShot {
   return {
     index: 7,
+    edit: "new",
+    assetId: "L07",
+    presentation: "base",
+    framing: "wide",
+    startSec: 0,
+    endSec: 4,
     truth: "reconstruction",
     motion: "push",
     wantsMotion: true,
@@ -130,12 +136,22 @@ describe("Runway pricing", () => {
 });
 
 describe("render plan for 5s clips", () => {
-  test("a video shot is never re-cut into repeats", () => {
-    const words = Array.from({ length: 40 }, (_, i) => ({ word: "w", start: i * 0.5, end: i * 0.5 + 0.4 }));
-    const shot = makeShot({ index: 0, wordStart: 0, motionPath: "motion/long-00.mp4", mediaType: "video" });
-    const plan = buildRenderPlan("long", makeStory(), [shot], { audioRel: "audio/long.mp3", audioMediaRel: "", durationSec: 20, words } as any, "#d9a066");
-    expect(plan.shots).toHaveLength(1); // 20s+ on one clip: no MAX_HOLD re-cut
+  const words = Array.from({ length: 40 }, (_, i) => ({ word: "w", start: i * 0.5, end: i * 0.5 + 0.4 }));
+  const narr = { audioRel: "audio/long.mp3", audioMediaRel: "", durationSec: 20, words } as any;
+
+  test("a video event inside the clip window renders as one shot and the next event cuts in", () => {
+    const clip = makeShot({ index: 0, startSec: 0, endSec: 4.5, motionPath: "motion/long-00.mp4", mediaType: "video" });
+    const next = makeShot({ index: 1, assetId: "L08", startSec: 4.5, endSec: 20.5, wantsMotion: false, path: "images/long-01.png" });
+    const plan = buildRenderPlan("long", makeStory(), [clip, next], narr, "#d9a066");
+    expect(plan.shots).toHaveLength(2); // the edit plan owns cuts: no MAX_HOLD re-cut of the 16s still
     expect(plan.shots[0].mediaType).toBe("video");
+    expect(plan.shots[0].endFrame - plan.shots[0].startFrame).toBeLessThanOrEqual(5 * 30);
+    expect(plan.shots[1].mediaType).toBe("image");
+  });
+
+  test("a video event longer than the clip is refused rather than frozen on its last frame", () => {
+    const shot = makeShot({ index: 0, startSec: 0, endSec: 20.5, motionPath: "motion/long-00.mp4", mediaType: "video" });
+    expect(() => buildRenderPlan("long", makeStory(), [shot], narr, "#d9a066")).toThrow(/motion clip/);
   });
 });
 
