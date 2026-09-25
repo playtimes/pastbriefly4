@@ -9,8 +9,9 @@ import path from "node:path";
 // L00.. / S00..); PB4 derives every legal presentation (base, plus reconstruction
 // detail crops per mustShow region); the Editor picks one presentation per slot;
 // PB4 selects motion under a local budget; each used asset is acquired once.
-// Everything is validated locally and never repaired. Mock mode only: no provider
-// is ever called.
+// Everything is validated locally. The only fixes: a motion priority on a slot that
+// cannot move is dropped, and an adjacent identical presentation may get one
+// targeted repair call. Mock mode only: no provider is ever called.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pb4-film-grammar-"));
 process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
@@ -32,9 +33,10 @@ vi.mock("../src/production/mockAssets.ts", async (importOriginal) => {
 const {
   buildBeats, buildEditSlots, slotGridProblems, planSlots, planVisuals, resolveReuse, acquireStill, buildRenderPlan, buildPreview, assertFilmGrammarPlan, VisualPlanError,
   fallbackCoverageDirector, fallbackEditor, coveragePayload, editorPayload, editorSchema, slotBlock, validateCoverage, screenCoverage, buildPresentations, validateEdit, selectMotion, assembleEdit, libraryBlock,
+  normalizeMotionPriorities, adjacentRepeatTargets, editRepairPayload, editRepairSchema, applyEditRepair, repairAllowedIds, EDIT_REPAIR_INSTRUCTIONS,
   BEAT_HARD_MAX_SEC, SLOT_MAX_SEC, END_TAIL_SEC, COVERAGE_INSTRUCTIONS, COVERAGE_SCHEMA, EDITOR_INSTRUCTIONS, MOTION_BUDGET, MAX_MUST_SHOW, FPS,
 } = await import("../src/production/visuals.ts");
-import type { Beat, CoverageAsset, CoverageInput, EditorInput, EditorPlans, EditSlot, PlannedShot, Presentation, VisualDirectors } from "../src/production/visuals.ts";
+import type { Beat, CoverageAsset, CoverageInput, EditorInput, EditorPlans, EditRepairInput, EditSlot, PlannedShot, Presentation, VisualDirectors } from "../src/production/visuals.ts";
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { fillEdit } = await import("./slotPlan.ts");
 const { recordNarration } = await import("../src/production/narration.ts");
@@ -569,6 +571,32 @@ describe("editor: exactly one legal presentation per fixed slot", () => {
     expect(() => validateEdit("long", slots, [a(0, "L00:base", 1), a(1, "L00:detail-center"), a(2), a(3, "L00:detail-right")], still)).toThrow(/motionPriority 1 on "L00:base", which is not motion eligible/);
   });
 
+  test("a motion priority on a slot with motion allowed: no is normalized locally to 0, nothing else changes", () => {
+    const longSlots = slotsOf("long", [4, 4, 6.4, 4]);
+    expect(longSlots.map((s) => s.motionAllowed)).toEqual([true, true, false, true]);
+    const plan0 = [a(0), a(1, "L00:detail-center"), a(2, "L00:base"), a(3, "L01:base")];
+    const raw = plan0.map((x) => (x.slotId === 2 ? a(2, "L00:base", 2) : x));
+    const { plan, normalized } = normalizeMotionPriorities(longSlots, raw);
+    expect(normalized).toEqual([2]);
+    expect(plan).toEqual(plan0); // priority 0, presentation unchanged, every other assignment as it was
+    expect(raw[2].motionPriority).toBe(2); // the Editor's answer itself is not mutated
+    expect(validateEdit("long", longSlots, plan, pres)).toEqual(plan0);
+    expect(selectMotion("long", longSlots, validateEdit("long", longSlots, plan, pres), pres, validateCoverage("long", [asset(), asset(graphicAsset)])).candidates).not.toContain(2);
+    // Priorities on allowed slots, invalid priorities and malformed items are left for validation.
+    expect(normalizeMotionPriorities(longSlots, [a(0, "L00:base", 3), a(2, "L00:base", 4), { slotId: "x" }]).plan).toEqual([a(0, "L00:base", 3), a(2, "L00:base", 4), { slotId: "x" }]);
+    // Unnormalized, validateEdit itself still refuses it; planVisuals always normalizes first.
+    expect(() => validateEdit("long", longSlots, raw, pres)).toThrow(/^Invalid edit plan: long slot 2 \(beats 2-2, 6\.40s\): motionPriority 2 on a slot with motion allowed: no; its priority must be 0\.$/);
+  });
+
+  test("planVisuals drops a priority on a slot that cannot move, without any extra call", async () => {
+    let calls = 0;
+    const counted = (ed: ReturnType<typeof editor>) => async (i: EditorInput) => (calls++, ed(i));
+    const plans = await plan(directors(coverage(), counted(editor({ 0: ["L00:base", 2] }, { 0: ["S00:base", 3] }))));
+    expect(calls).toBe(1);
+    expect(plans.long[0]).toMatchObject({ assetId: "L00", presentation: "base", motionPriority: 0, motionCandidate: false, wantsMotion: false });
+    expect(plans.short[0]).toMatchObject({ assetId: "S00", presentation: "base", motionPriority: 0, motionCandidate: false });
+  });
+
   test("the same presentation later (a callback) and base -> detail of one asset on adjacent slots are allowed", () => {
     const callback = [a(0, "L01:base"), a(1), a(2, "L01:base"), a(3)]; // L01:base and L00:base each return after one other slot
     expect(validateEdit("long", slots, callback, pres)).toEqual(callback);
@@ -576,7 +604,7 @@ describe("editor: exactly one legal presentation per fixed slot", () => {
     expect(validateEdit("long", slots, coverage, pres)).toEqual(coverage);
   });
 
-  test("an Editor plan with an adjacent identical presentation fails the whole plan before assembly, never repaired", async () => {
+  test("an adjacent identical presentation is never normalized: with no repair director it fails the whole plan before assembly", async () => {
     await expect(plan(directors(coverage([{}, graphicAsset]), editor({ 4: ["L01:base"], 5: ["L01:base"] })))).rejects.toThrow(
       /^Invalid edit plan: long slot 5 \(beats 6-7, [\d.]+s\): presentationId "L01:base" repeats slot 4; adjacent slots must not show the identical presentation\.$/,
     );
@@ -584,6 +612,164 @@ describe("editor: exactly one legal presentation per fixed slot", () => {
     // The same pick with another slot between them is a legal callback.
     const plans = await plan(directors(coverage([{}, graphicAsset]), editor({ 4: ["L01:base"], 6: ["L01:base"] })));
     expect([plans.long[4].assetId, plans.long[5].assetId, plans.long[6].assetId]).toEqual(["L01", "L00", "L01"]);
+  });
+
+  describe("one targeted repair for adjacent identical presentations", () => {
+    // A counting repair director that returns the given replacements per film, keyed by target slot.
+    function repairer(long: Picks = {}, short: Picks = {}) {
+      const calls: EditRepairInput[] = [];
+      const picks = (p: Picks) => Object.fromEntries(Object.entries(p).map(([id, [presentationId, motionPriority = 0]]) => [id, { presentationId, motionPriority }]));
+      const repair = async (input: EditRepairInput) => (calls.push(input), { long: picks(long), short: picks(short) });
+      return { repair, calls };
+    }
+    const dup = editor({ 4: ["L01:base"], 5: ["L01:base"] });
+    const run = async (ed: ReturnType<typeof editor>, fix: ReturnType<typeof repairer>, cov = coverage([{}, graphicAsset])) => {
+      let coverageCalls = 0;
+      const counted = async (i: CoverageInput) => (coverageCalls++, cov(i));
+      const out = plan({ coverage: counted, editor: ed, repair: fix.repair });
+      return { out, coverageCalls: () => coverageCalls };
+    };
+
+    test("targets: the later slot of each pair; in a run of three the middle slot; never two adjacent targets", () => {
+      const e = (...ids: string[]) => ids.map((presentationId, slotId) => ({ slotId, presentationId, motionPriority: 0 }));
+      expect(adjacentRepeatTargets(e("A", "B", "C"))).toEqual([]);
+      expect(adjacentRepeatTargets(e("A", "A", "B"))).toEqual([1]);
+      expect(adjacentRepeatTargets(e("A", "A", "A", "B"))).toEqual([1]);
+      expect(adjacentRepeatTargets(e("A", "A", "A", "A"))).toEqual([1, 3]);
+      expect(adjacentRepeatTargets(e("A", "A", "B", "B"))).toEqual([1, 3]);
+    });
+
+    test("the repair receives only the targets and their context, and only the targeted assignment changes", async () => {
+      const without = await plan(directors(coverage([{}, graphicAsset]), editor({ 4: ["L01:base"], 5: ["L00:detail-center"] })));
+      const fix = repairer({ 5: ["L00:detail-center"] });
+      const { out, coverageCalls } = await run(dup, fix);
+      const plans = await out;
+      expect(fix.calls).toHaveLength(1);
+      expect(coverageCalls()).toBe(1); // no Coverage call during repair
+      const input = fix.calls[0];
+      expect(input.targets).toEqual({ long: [5], short: [] });
+      expect(input.edit.long[5].presentationId).toBe("L01:base");
+      const text = editRepairPayload(input);
+      expect(text).toContain(`TARGET SLOT #5\n`);
+      expect(text).toMatch(/current: L01:base\nproblem: "L01:base" is identical to slot 4; adjacent slots must not show the identical presentation\nmust differ from: L01:base \(slot 4\), L00:[a-z-]+ \(slot 6\)\nnearby slots:\n {2}#2 /);
+      expect(text).toContain("  #5 L01:base  <- TARGET: ");
+      expect(text).not.toMatch(/^ {2}#1 /m); // only the nearby slots
+      expect(text).toContain("LONG MEDIA LIBRARY");
+      expect(text).not.toMatch(/SHORT/); // the Short has no target, so none of it is sent
+      const schema = editRepairSchema(input) as any;
+      expect(schema.required).toEqual(["long"]);
+      expect(schema.properties.long).toMatchObject({ type: "object", additionalProperties: false, required: ["5"] });
+      expect(Object.keys(schema.properties.long.properties)).toEqual(["5"]);
+      // Every untouched assignment (and so every planned shot) is exactly what it was.
+      expect(plans.long.map((s) => [s.assetId, s.presentation, s.motionPriority])).toEqual(without.long.map((s) => [s.assetId, s.presentation, s.motionPriority]));
+      expect(plans.short).toEqual(without.short);
+    });
+
+    test("Long and Short duplicates share one repair call; both are applied", async () => {
+      const fix = repairer({ 5: ["L00:detail-center"] }, { 2: ["S00:detail-center"] });
+      const { out } = await run(editor({ 4: ["L01:base"], 5: ["L01:base"] }, { 1: ["S00:detail-right"], 2: ["S00:detail-right"] }), fix);
+      const plans = await out;
+      expect(fix.calls).toHaveLength(1);
+      expect(fix.calls[0].targets).toEqual({ long: [5], short: [2] });
+      expect(editRepairPayload(fix.calls[0])).toMatch(/LONG REPAIR TARGETS \(5\)[\s\S]*SHORT REPAIR TARGETS \(2\)/);
+      expect([plans.long[5].assetId, plans.long[5].presentation, plans.short[2].presentation]).toEqual(["L00", "detail-center", "detail-center"]);
+    });
+
+    test("the repaired plan is validated in full; a failed repair stops with no second repair call", async () => {
+      const illegal = repairer({ 6: ["L00:detail-center", 2] }); // a priority on a detail (slot 6 may move) is not normalized
+      await expect((await run(editor({ 5: ["L01:base"], 6: ["L01:base"] }), illegal)).out).rejects.toThrow(/^Invalid edit plan: long slot 6 .*motionPriority 2 on "L00:detail-center", which is not motion eligible/);
+      expect(illegal.calls).toHaveLength(1);
+      // A legal, allowed replacement is still followed by full validation of both films.
+      const ok = repairer({ 5: ["L00:detail-center"] });
+      const plans = await (await run(dup, ok)).out;
+      expect(ok.calls).toHaveLength(1);
+      expect(plans.long.every((s, i) => i === 0 || s.assetId !== plans.long[i - 1].assetId || s.presentation !== plans.long[i - 1].presentation)).toBe(true);
+    });
+
+    test("each target's schema enum excludes its neighbours' ids, including its own current id", async () => {
+      const fix = repairer({ 5: ["L00:detail-center"] }, { 2: ["S00:detail-center"] });
+      await (await run(editor({ 4: ["L01:base"], 5: ["L01:base"], 6: ["L00:detail-right"] }, { 1: ["S00:detail-right"], 2: ["S00:detail-right"], 3: ["S00:base"] }), fix)).out;
+      const input = fix.calls[0];
+      const schema = editRepairSchema(input) as any;
+      const long5 = schema.properties.long.properties["5"];
+      expect(long5).toMatchObject({ type: "object", additionalProperties: false });
+      expect([...long5.required].sort()).toEqual(["motionPriority", "presentationId"]);
+      expect(long5.properties.presentationId.enum).toEqual(["L00:base", "L00:detail-center"]); // not L01:base (slot 4, and current) nor L00:detail-right (slot 6)
+      expect(schema.properties.short.properties["2"].properties.presentationId.enum).toEqual(["S00:detail-center"]); // not S00:detail-right nor S00:base
+      expect(schema.required).toEqual(["long", "short"]);
+      expect(repairAllowedIds(input)).toEqual({ long: { 5: ["L00:base", "L00:detail-center"] }, short: { 2: ["S00:detail-center"] } });
+    });
+
+    test("different targets in one film get different allowed enums", () => {
+      const presentations = { long: buildPresentations(validateCoverage("long", [asset(), asset(graphicAsset)])), short: [] };
+      const e = (...ids: string[]) => ids.map((presentationId, slotId) => ({ slotId, presentationId, motionPriority: 0 }));
+      const edit = { long: e("L01:base", "L01:base", "L00:base", "L00:detail-center", "L00:detail-center", "L00:detail-right"), short: [] };
+      const targets = { long: adjacentRepeatTargets(edit.long), short: [] };
+      expect(targets.long).toEqual([1, 4]);
+      const allowed = repairAllowedIds({ presentations, edit, targets });
+      expect(allowed.long[1]).toEqual(["L00:detail-center", "L00:detail-right"]);
+      expect(allowed.long[4]).toEqual(["L00:base", "L01:base"]);
+      const schema = editRepairSchema({ story, slots: { long: slotsOf("long", [4, 4, 4, 4, 4, 4]), short: [] }, library: { long: [], short: [] }, presentations, edit, targets }) as any;
+      expect(schema.properties.long.required).toEqual(["1", "4"]);
+      expect(schema.properties.long.properties["1"].properties.presentationId.enum).toEqual(allowed.long[1]);
+      expect(schema.properties.long.properties["4"].properties.presentationId.enum).toEqual(allowed.long[4]);
+    });
+
+    test("the original forbidden adjacent presentation cannot be returned: absent from the enum, refused if returned anyway", async () => {
+      const still = repairer({ 5: ["L01:base"] }); // the same hidden hold again
+      await expect((await run(dup, still)).out).rejects.toThrow(/^Invalid edit repair: long slot 5: presentationId "L01:base" is not allowed there; it must differ from its neighbours/);
+      expect(still.calls).toHaveLength(1);
+      expect((editRepairSchema(still.calls[0]) as any).properties.long.properties["5"].properties.presentationId.enum).not.toContain("L01:base");
+      const next = repairer({ 5: ["L00:base"] }); // the other neighbour's presentation
+      await expect((await run(editor({ 4: ["L01:base"], 5: ["L01:base"], 6: ["L00:base"] }), next)).out).rejects.toThrow(/^Invalid edit repair: long slot 5: presentationId "L00:base" is not allowed there/);
+      expect(next.calls).toHaveLength(1);
+    });
+
+    test("a target with no legal presentation left fails before the repair call", async () => {
+      const log: string[] = [];
+      const hooks = { before: () => log.push("before"), after: () => log.push("after") };
+      const fix = repairer({ 5: ["L00:base"] });
+      // Two base-only graphics: a target between L00:base and L01:base has nothing left.
+      const run2 = planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), { coverage: coverage([graphicAsset, graphicAsset]), editor: editor({ 4: ["L01:base"], 5: ["L01:base"], 6: ["L00:base"] }), repair: fix.repair }, hooks);
+      await expect(run2).rejects.toThrow(/^Invalid edit repair: long slot \d+ has no legal presentation left that differs from its neighbours \(L0[01]:base, L0[01]:base\)\.$/);
+      expect(fix.calls).toHaveLength(0);
+      expect(log).toEqual(["before", "after", "before", "after"]); // Coverage and Editor only
+    });
+
+    test("the repair may replace only its targets, and must replace every one", async () => {
+      await expect((await run(dup, repairer({ 5: ["L00:detail-center"], 3: ["L01:base"] }))).out).rejects.toThrow(/^Invalid edit repair: long slot 3 is not a repair target \(targets: 5\)\.$/);
+      await expect((await run(dup, repairer({}, { 1: ["S00:base"] }))).out).rejects.toThrow(/^Invalid edit repair: long has no replacement for target slot 5\.$/);
+      await expect((await run(dup, repairer({ 5: ["L00:detail-center"] }, { 1: ["S00:base"] }))).out).rejects.toThrow(/^Invalid edit repair: short slot 1 is not a repair target \(targets: none\)\.$/);
+    });
+
+    test("no repair call for a valid plan, or for any defect other than an adjacent repeat", async () => {
+      const fix = repairer();
+      await (await run(editor({ 4: ["L01:base"], 6: ["L01:base"] }), fix)).out;
+      await expect((await run(editor({ 4: ["L01:base"], 5: ["L01:base"], 2: ["L00:detail-left"] }), fix)).out).rejects.toThrow(/"L00:detail-left" is not a legal long presentation/);
+      expect(fix.calls).toHaveLength(0);
+    });
+
+    test("the repair call runs the paid-call hooks once, as a third planning call", async () => {
+      const log: string[] = [];
+      const hooks = { before: () => log.push("before"), after: () => log.push("after") };
+      const fix = repairer({ 5: ["L00:detail-center"] });
+      await planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), { coverage: coverage([{}, graphicAsset]), editor: dup, repair: fix.repair }, hooks);
+      expect(log).toEqual(["before", "after", "before", "after", "before", "after"]);
+    });
+
+    test("applyEditRepair returns every untouched assignment unchanged", () => {
+      const e = [0, 1, 2, 3].map((slotId) => ({ slotId, presentationId: slotId === 2 ? "L00:base" : "L01:base", motionPriority: slotId }));
+      const out = applyEditRepair("long", e, { 1: ["L00:detail-center"] }, { 1: { presentationId: "L00:detail-center", motionPriority: 0 } });
+      expect(out).toEqual([e[0], { slotId: 1, presentationId: "L00:detail-center", motionPriority: 0 }, e[2], e[3]]);
+      expect(applyEditRepair("long", e, {}, undefined)).toEqual(e);
+      expect(() => applyEditRepair("long", e, { 1: ["L00:detail-center"] }, [{ slotId: 1, presentationId: "L00:detail-center", motionPriority: 0 }])).toThrow(/replacements are not an object keyed by target slot/);
+    });
+
+    test("the repair instructions stay narrow and use plain hyphens", () => {
+      expect(EDIT_REPAIR_INSTRUCTIONS).toMatch(/For each target slot only, choose one replacement presentation/);
+      expect(EDIT_REPAIR_INSTRUCTIONS).toMatch(/Every other slot is fixed and is not yours to change: do not return it/);
+      expect(EDIT_REPAIR_INSTRUCTIONS).not.toMatch(/U 137|U137|[‒-―]/);
+    });
   });
 
   test("the Editor schema only allows listed presentation ids, per film", () => {
@@ -1076,6 +1262,18 @@ describe("instructions: coverage director and editor", () => {
     expect(COVERAGE_INSTRUCTIONS).toMatch(/never manufacture elements merely to create crops/);
   });
 
+  test("Coverage: detail crops are one visual family; the Long needs deeper coverage for sustained sections, with no quota", () => {
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/an asset's base view and its detail crops are ONE visual family/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/Detail crops are useful coverage, but they cannot substitute indefinitely for genuinely different documentary material/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/THE LONG NEEDS DEEPER COVERAGE THAN THE SHORT - the Long has sustained narrative sections/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/For each such sustained section, provide multiple materially different assets where the verified facts support them/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/a different subject, the people involved, the action, the evidence, an object, the geography, archive, the environment, the consequence/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/This is depth, not a quota: there is no fixed asset count/);
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/Do not manufacture unsupported scenes just for variety, and do not create near-duplicate assets/);
+    // No hard number of Long assets is introduced.
+    expect(COVERAGE_INSTRUCTIONS).not.toMatch(/\d+\s*(-\s*\d+\s*)?(unique |different |distinct )?assets (per|for (a|the|each)) (Long|sustained|section)/i);
+  });
+
   test("Editor: sequences, reuse, same-subject variety, archive alignment, callbacks, no hidden holds", () => {
     expect(EDITOR_INSTRUCTIONS).toMatch(/establishing base -> supported detail -> different subject or evidence -> archive -> callback, rather than new asset -> new asset -> new asset -> new asset/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/Reuse is desirable when it creates coverage, continuity, a callback or a scale change, but do not overuse one asset just because it has many presentations/);
@@ -1091,12 +1289,17 @@ describe("instructions: coverage director and editor", () => {
     expect(EDITOR_INSTRUCTIONS).toMatch(/ARCHIVE MUST MATCH THE WORDS - an archive presentation must directly support the CURRENT slot's narration/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/Do not place a related famous person or event merely because it belongs to the story/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/when returning to an asset shortly after it appeared, prefer another of its legal presentations where that is meaningful; an exact earlier crop should return only when the repeated composition itself serves the story/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/TEMPORAL ALIGNMENT - do not anticipate later facts, evidence or events\. A visual about information the film introduces later must not be placed earlier merely because it belongs to the same story or sequence\. Every presentation must support the CURRENT slot's narration or be a genuinely supported cutaway for that current thought\./);
   });
 
   test("Editor: motion priority only where motion is eligible; the local budget is unchanged", () => {
     expect(EDITOR_INSTRUCTIONS).toMatch(/A priority above 0 is useful ONLY when all three hold: the slot is 5s or shorter \("motion allowed: yes"\), the chosen presentation is the base of a motion-capable reconstruction, and visible physical movement would improve the shot/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/Never give a priority, least of all 3, to a slot that cannot move/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/if it says no, motionPriority MUST be 0, or the whole plan is rejected/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/Every slot lists "motion allowed": if it says no, motionPriority MUST be 0; a priority there can never take effect\./);
+    expect(EDITOR_INSTRUCTIONS).not.toMatch(/on that slot rejects the whole plan/);
+    expect(EDITOR_INSTRUCTIONS).not.toMatch(/simply wasted/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/FINAL CHECK - before returning, verify for each film: every slot appears exactly once; no two adjacent slots share the same presentationId; and every motionPriority above 0 is on a "motion eligible: yes" presentation AND on a slot marked "motion allowed: yes"\.\n\nReturn, for both/);
     expect(MOTION_BUDGET).toEqual({ long: 5, short: 3 });
     expect(SLOT_MAX_SEC).toEqual({ long: 7, short: 6 });
     expect(MOTION_CLIP_SECONDS).toBe(5);

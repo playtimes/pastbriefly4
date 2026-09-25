@@ -465,6 +465,10 @@ SCENE (prompt) - one specific single frame grounded in purpose, mustShow (with i
 
 COVERAGE AND VARIETY - for the story's important physical events, give the Editor useful coverage: an establishing view, the action, the evidence or object, the people involved, the geography. Choose only what helps the narration. Avoid a library dominated by one primary subject at a similar scale (for example many submarine-wide or ship-wide compositions): distinct actions involving the same subject should differ in scale, subject or evidence. If one asset already communicates a geography or spatial relationship, do not propose another similar map from a slightly different angle: the Editor reuses it. A new asset must add new information. Give the Editor what it needs for intentional callbacks and for a clear ending.
 
+DETAIL CROPS ARE NOT NEW COVERAGE - an asset's base view and its detail crops are ONE visual family: the same image, the same moment, the same vantage. Detail crops are useful coverage, but they cannot substitute indefinitely for genuinely different documentary material. A film that cuts only between the base and crops of one asset still shows the viewer one picture.
+
+THE LONG NEEDS DEEPER COVERAGE THAN THE SHORT - the Long has sustained narrative sections where the narration stays on one important subject or event for many slots in a row. For each such sustained section, provide multiple materially different assets where the verified facts support them, so the Editor can move between independent visual families rather than cycling one image and its crops. Prefer real variation in documentary information: a different subject, the people involved, the action, the evidence, an object, the geography, archive, the environment, the consequence. This is depth, not a quota: there is no fixed asset count. Do not manufacture unsupported scenes just for variety, and do not create near-duplicate assets; every factual safeguard above still applies. When the verified facts genuinely support only one view, fewer assets are correct.
+
 INDEPENDENCE - plan the Short library independently from the Long library. The Short is faster and simpler; the Long has room for more geography, evidence and context. Do not derive the Short by cropping or summarising the Long. Long slots can only use longAssets and Short slots only shortAssets.
 
 THE SHORT IS A COVERAGE KIT, NOT ONE IMAGE PER SLOT - the Short has about 15 fixed slots; do not propose almost one unique asset per slot. Design a compact, reusable coverage kit: roughly 7-10 useful unique assets for a ~50 second Short is usually enough when base and detail reuse can tell the story (guidance, not a quota). Give Short reconstructions useful, distinct left/center/right visible elements so the Editor has legal detail cuts, but never manufacture elements merely to create crops.
@@ -777,15 +781,19 @@ EVERY SLOT IS AN ACTUAL CUT - the exact same presentationId may NEVER appear in 
 
 ARCHIVE MUST MATCH THE WORDS - an archive presentation must directly support the CURRENT slot's narration. Do not place a related famous person or event merely because it belongs to the story (BAD: a prime minister's archive image starting on narration about a diplomatic protest). Put archive where that person, event or media is actually being spoken about.
 
+TEMPORAL ALIGNMENT - do not anticipate later facts, evidence or events. A visual about information the film introduces later must not be placed earlier merely because it belongs to the same story or sequence. Every presentation must support the CURRENT slot's narration or be a genuinely supported cutaway for that current thought.
+
 ABSTRACT NARRATION - when a slot mainly carries interpretation, suspicion, consequence, policy, transition or reflection, use a supported asset that fits: a detail or callback of an earlier asset, an archive item, or a graphic that states a concrete fact. Do not pick an unrelated scene just because it is new.
 
 REPETITION AND OVERUSE - track the recent sequence as you go. Avoid three consecutive slots dominated by the same primary subject at a similar scale. Different presentation ids do not make a run varied: submarine wide -> submarine detail -> submarine wide -> submarine detail -> submarine wide is still one subject. Break long same-subject runs with a supported reset where the narration allows: a person, an object or evidence, geography, archive, the environment or another action. Do not lean on one asset for most of a sequence when other supported assets fit: reuse is a tool for detail and callbacks, not a way to avoid variety. Prefer useful alternation where the narration supports it (environment, subject, person, evidence, geography, archive, detail, action, intentional return), without rotating categories mechanically.
 
 CALLBACKS AND ENDING - reuse an earlier asset when the narration returns to it, so the callback reads as intentional. Exact presentation reuse must be intentional: when returning to an asset shortly after it appeared, prefer another of its legal presentations where that is meaningful; an exact earlier crop should return only when the repeated composition itself serves the story. Give each film a deliberate ending: a final image that closes the story, not an arbitrary last asset.
 
-MOTION PRIORITY - 0 none, 1 useful, 2 strong, 3 standout. PastBriefly chooses the actual motion itself: only a base presentation of a motion-capable reconstruction, on a slot marked "motion allowed: yes", can move; at most ${MOTION_BUDGET.long} clips in the Long and ${MOTION_BUDGET.short} in the Short; at most one clip per asset; highest priority first, earlier slots winning ties. A priority above 0 is useful ONLY when all three hold: the slot is 5s or shorter ("motion allowed: yes"), the chosen presentation is the base of a motion-capable reconstruction, and visible physical movement would improve the shot (a vessel moving, refloating or towing, water, a physical operation). Never give a priority, least of all 3, to a slot that cannot move (a long slot, a detail, archive, a graphic): it is simply wasted. Every presentation lists "motion eligible": if it says no, motionPriority MUST be 0, or the whole plan is rejected. Give 3 only for the few standout moments. Most slots are 0. Never raise a priority just to make the film feel busy.
+MOTION PRIORITY - 0 none, 1 useful, 2 strong, 3 standout. PastBriefly chooses the actual motion itself: only a base presentation of a motion-capable reconstruction, on a slot marked "motion allowed: yes", can move; at most ${MOTION_BUDGET.long} clips in the Long and ${MOTION_BUDGET.short} in the Short; at most one clip per asset; highest priority first, earlier slots winning ties. A priority above 0 is useful ONLY when all three hold: the slot is 5s or shorter ("motion allowed: yes"), the chosen presentation is the base of a motion-capable reconstruction, and visible physical movement would improve the shot (a vessel moving, refloating or towing, water, a physical operation). Never give a priority, least of all 3, to a slot that cannot move (a long slot, a detail, archive, a graphic). Every slot lists "motion allowed": if it says no, motionPriority MUST be 0; a priority there can never take effect. Every presentation lists "motion eligible": if it says no, motionPriority MUST be 0, or the whole plan is rejected. Give 3 only for the few standout moments. Most slots are 0. Never raise a priority just to make the film feel busy.
 
 INDEPENDENCE - Long slots use only Long presentations (L..), Short slots only Short presentations (S..). Edit the Short on its own faster rhythm; do not mirror the Long.
+
+FINAL CHECK - before returning, verify for each film: every slot appears exactly once; no two adjacent slots share the same presentationId; and every motionPriority above 0 is on a "motion eligible: yes" presentation AND on a slot marked "motion allowed: yes".
 
 Return, for both "long" and "short", exactly one assignment per slot, in slot order.`;
 
@@ -854,11 +862,29 @@ export function editorPayload(input: EditorInput): string {
   ].join("\n");
 }
 
+// Local, deterministic cleanup before validation: a motionPriority of 1-3 on a slot
+// with motion allowed: no could never carry a clip, so it becomes 0. Nothing else in
+// any assignment changes. Returns the cleaned answer and the slot ids it touched.
+export function normalizeMotionPriorities(slots: EditSlot[], raw: unknown): { plan: unknown; normalized: number[] } {
+  if (!Array.isArray(raw)) return { plan: raw, normalized: [] };
+  const normalized: number[] = [];
+  const plan = raw.map((item) => {
+    const a = (item && typeof item === "object" ? item : {}) as Partial<EditorAssignment>;
+    const slot = isInt(a.slotId) ? slots.find((s) => s.id === a.slotId) : undefined;
+    if (!slot || slot.motionAllowed || !MOTION_PRIORITIES.includes(a.motionPriority as 0) || a.motionPriority === 0) return item;
+    normalized.push(slot.id);
+    return { ...a, motionPriority: 0 };
+  });
+  return { plan, normalized };
+}
+
 // Validate one film's Editor answer against its fixed slots and legal
 // presentations. Returns the assignments in slot order. Nothing is repaired:
 // coverage (every slot exactly once), then each presentation and priority, and no
 // two adjacent slots with the identical presentation (a later callback is fine).
-export function validateEdit(kind: "long" | "short", slots: EditSlot[], raw: unknown, presentations: Presentation[]): EditorAssignment[] {
+// allowAdjacentRepeats skips only that last check, so planVisuals can tell an
+// answer whose only defect is a hidden hold (repairable) from any other failure.
+export function validateEdit(kind: "long" | "short", slots: EditSlot[], raw: unknown, presentations: Presentation[], allowAdjacentRepeats = false): EditorAssignment[] {
   const last = slots.length - 1;
   const reject = (reason: string): never => {
     throw new VisualPlanError(`Invalid edit plan: ${kind} ${reason}.`);
@@ -886,12 +912,168 @@ export function validateEdit(kind: "long" | "short", slots: EditSlot[], raw: unk
     if ((a.motionPriority as number) > 0 && !legal.get(a.presentationId)!.motionEligible) {
       return reject(`${label}: motionPriority ${a.motionPriority} on "${a.presentationId}", which is not motion eligible; its priority must be 0`);
     }
+    if ((a.motionPriority as number) > 0 && !slot.motionAllowed) {
+      return reject(`${label}: motionPriority ${a.motionPriority} on a slot with motion allowed: no; its priority must be 0`);
+    }
     // The same presentation on two adjacent slots is a hidden hold, not a cut.
-    if (slot.id > 0 && bySlot.get(slot.id - 1)!.presentationId === a.presentationId) {
+    if (!allowAdjacentRepeats && slot.id > 0 && bySlot.get(slot.id - 1)!.presentationId === a.presentationId) {
       return reject(`${label}: presentationId "${a.presentationId}" repeats slot ${slot.id - 1}; adjacent slots must not show the identical presentation`);
     }
     return { slotId: slot.id, presentationId: a.presentationId, motionPriority: a.motionPriority as number };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Targeted repair: adjacent identical presentations only
+// ---------------------------------------------------------------------------
+
+// Which slots to re-pick so no two adjacent slots share a presentation: the later
+// slot of each repeated pair, except when the slot before it is already a target
+// (in a run of three, re-picking the middle slot clears both pairs). Targets are
+// therefore never adjacent, and every target's neighbours stay fixed.
+export function adjacentRepeatTargets(edit: EditorAssignment[]): number[] {
+  const targets: number[] = [];
+  for (let i = 1; i < edit.length; i++) {
+    if (edit[i].presentationId === edit[i - 1].presentationId && targets.at(-1) !== i - 1) targets.push(edit[i].slotId);
+  }
+  return targets;
+}
+
+export interface EditRepairInput {
+  story: Story;
+  slots: { long: EditSlot[]; short: EditSlot[] };
+  library: { long: MediaAsset[]; short: MediaAsset[] };
+  presentations: { long: Presentation[]; short: Presentation[] };
+  edit: EditorPlans; // the Editor's answer after motion normalization, in slot order
+  targets: { long: number[]; short: number[] };
+}
+
+// The answer, per film: target slot id -> its replacement.
+export type EditRepairAnswer = Partial<Record<"long" | "short", Record<string, { presentationId: string; motionPriority: number }>>>;
+
+export type EditRepairDirector = (input: EditRepairInput, respond?: typeof respondJson) => Promise<EditRepairAnswer>;
+
+export const EDIT_REPAIR_INSTRUCTIONS = `You are the Editor for PastBriefly, repairing one defect in an edit that is otherwise final. Each TARGET slot shows the exact same presentation as a neighbouring slot: a hidden hold, not a cut. For each target slot only, choose one replacement presentation from that film's listed library. The replacement must directly support the target slot's narration (or be a genuinely supported cutaway for it) and must differ from every presentationId listed under "must differ from". Every other slot is fixed and is not yours to change: do not return it. motionPriority is 0 unless the replacement is "motion eligible: yes" AND the target slot says "motion allowed: yes". Return exactly one replacement per target slot, nothing else.`;
+
+// Per film, per target: every legal presentation of that film except the ids of
+// the target's two neighbours (which stay fixed), so the answer can never repeat
+// an adjacent slot; that includes the target's own current id. Which of them to
+// use is still the model's choice. A target with nothing left fails here, before
+// any provider call.
+export type RepairAllowed = { long: Record<number, string[]>; short: Record<number, string[]> };
+
+export function repairAllowedIds(input: Pick<EditRepairInput, "presentations" | "edit" | "targets">): RepairAllowed {
+  const film = (kind: "long" | "short") => {
+    const edit = input.edit[kind];
+    return Object.fromEntries(
+      input.targets[kind].map((t) => {
+        const forbidden = [edit[t - 1], edit[t + 1]].filter(Boolean).map((e) => e.presentationId);
+        const allowed = input.presentations[kind].map((p) => p.id).filter((id) => !forbidden.includes(id));
+        if (!allowed.length) {
+          throw new VisualPlanError(`Invalid edit repair: ${kind} slot ${t} has no legal presentation left that differs from its neighbours (${forbidden.join(", ")}).`);
+        }
+        return [t, allowed];
+      }),
+    );
+  };
+  return { long: film("long"), short: film("short") };
+}
+
+// Keyed by target slot id, so every target is returned exactly once and nothing
+// else can be; each target's presentationId enum holds only its own allowed ids.
+export function editRepairSchema(input: EditRepairInput) {
+  const allowed = repairAllowedIds(input);
+  const films = (["long", "short"] as const).filter((k) => input.targets[k].length);
+  const replacement = (ids: string[]) => ({
+    type: "object",
+    additionalProperties: false,
+    required: ["presentationId", "motionPriority"],
+    properties: {
+      presentationId: { type: "string", enum: ids },
+      motionPriority: { type: "integer", enum: [...MOTION_PRIORITIES] },
+    },
+  });
+  const replacements = (kind: "long" | "short") => ({
+    type: "object",
+    additionalProperties: false,
+    required: input.targets[kind].map(String),
+    properties: Object.fromEntries(input.targets[kind].map((t) => [String(t), replacement(allowed[kind][t])])),
+  });
+  return { type: "object", additionalProperties: false, required: films, properties: Object.fromEntries(films.map((k) => [k, replacements(k)])) };
+}
+
+// Only what one re-pick needs: the film's library, and per target its slot, the
+// problem, the ids it must differ from, and the nearby slots with their assignments.
+export function editRepairPayload(input: EditRepairInput): string {
+  const { story, slots, library, presentations, edit, targets } = input;
+  const film = (kind: "long" | "short") => {
+    const name = kind.toUpperCase();
+    const at = (id: number) => edit[kind][id].presentationId;
+    const target = (t: number) => {
+      const near = slots[kind].filter((s) => Math.abs(s.id - t) <= 3);
+      const neighbours = [t - 1, t + 1].filter((n) => n >= 0 && n < slots[kind].length);
+      const repeats = neighbours.filter((n) => at(n) === at(t));
+      return [
+        `TARGET ${slotBlock(slots[kind][t])}`,
+        `current: ${at(t)}`,
+        `problem: "${at(t)}" is identical to slot${repeats.length > 1 ? "s" : ""} ${repeats.join(" and ")}; adjacent slots must not show the identical presentation`,
+        `must differ from: ${neighbours.map((n) => `${at(n)} (slot ${n})`).join(", ")}`,
+        "nearby slots:",
+        ...near.map((s) => `  #${s.id} ${at(s.id)}${s.id === t ? "  <- TARGET" : ""}: "${s.excerpt}"`),
+      ].join("\n");
+    };
+    return [
+      `${name} MEDIA LIBRARY (${library[kind].length} assets, ${presentations[kind].length} legal presentations):`,
+      "",
+      library[kind].map((a) => libraryBlock(a, presentations[kind])).join("\n\n"),
+      "",
+      `${name} REPAIR TARGETS (${targets[kind].join(", ")}):`,
+      "",
+      targets[kind].map(target).join("\n\n"),
+    ];
+  };
+  const films = (["long", "short"] as const).filter((k) => targets[k].length);
+  return [
+    `STORY: ${story.title} (${story.year}, ${story.place})`,
+    "",
+    ...films.flatMap((k) => [...film(k), ""]),
+    `Return JSON { ${films.map((k) => `"${k}": { ${targets[k].map((t) => `"${t}": { "presentationId", "motionPriority" }`).join(", ")} }`).join(", ")} }: exactly one replacement per target slot.`,
+  ].join("\n");
+}
+
+export const openAiEditRepair: EditRepairDirector = async (input, respond = respondJson) => {
+  return respond<EditRepairAnswer>({
+    instructions: EDIT_REPAIR_INSTRUCTIONS,
+    input: editRepairPayload(input),
+    schemaName: "edit_repair",
+    schema: editRepairSchema(input),
+  });
+};
+
+// Apply one film's repair answer: exactly one replacement per target, each one of
+// that target's allowed ids, nothing for any other slot. Every untouched assignment
+// is returned as it was; the result is then normalized and fully validated again
+// by the caller.
+export function applyEditRepair(kind: "long" | "short", edit: EditorAssignment[], allowed: Record<number, string[]>, raw: unknown): unknown[] {
+  const reject = (reason: string): never => {
+    throw new VisualPlanError(`Invalid edit repair: ${kind} ${reason}.`);
+  };
+  const targets = Object.keys(allowed).map(Number);
+  const answer = raw === undefined && !targets.length ? {} : raw;
+  if (!answer || typeof answer !== "object" || Array.isArray(answer)) return reject("replacements are not an object keyed by target slot");
+  const byTarget = new Map<number, unknown>();
+  for (const [key, item] of Object.entries(answer)) {
+    const slotId = Number(key);
+    if (!targets.includes(slotId)) return reject(`slot ${key} is not a repair target (targets: ${targets.join(", ") || "none"})`);
+    const pick = (item && typeof item === "object" ? item : {}) as Partial<EditorAssignment>;
+    if (!allowed[slotId].includes(pick.presentationId as string)) {
+      return reject(`slot ${slotId}: presentationId ${JSON.stringify(pick.presentationId ?? null)} is not allowed there; it must differ from its neighbours (${allowed[slotId].length} allowed ids)`);
+    }
+    byTarget.set(slotId, { slotId, presentationId: pick.presentationId, motionPriority: pick.motionPriority });
+  }
+  const missing = targets.filter((t) => !byTarget.has(t));
+  if (missing.length) return reject(`has no replacement for target slot${missing.length > 1 ? "s" : ""} ${missing.join(", ")}`);
+  return edit.map((e) => byTarget.get(e.slotId) ?? e);
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,7 +1246,7 @@ function fallbackEdit(slots: EditSlot[], presentations: Presentation[]): EditorA
     let p = callback ? own[0] : own[(i % 3) % own.length];
     if (p.id === prev && presentations.length > 1) p = presentations[(presentations.indexOf(p) + 1) % presentations.length];
     prev = p.id;
-    return { slotId: i, presentationId: p.id, motionPriority: p.motionEligible && i % 3 === 0 ? 2 : 0 };
+    return { slotId: i, presentationId: p.id, motionPriority: p.motionEligible && slot.motionAllowed && i % 3 === 0 ? 2 : 0 };
   });
 }
 
@@ -1075,10 +1257,13 @@ function fallbackEdit(slots: EditSlot[], presentations: Presentation[]): EditorA
 export interface VisualDirectors {
   coverage: CoverageDirector;
   editor: EditorDirector;
+  repair?: EditRepairDirector; // absent: an adjacent identical presentation simply fails the plan
 }
 
 const defaultDirectors = (): VisualDirectors =>
-  config.mode === "live" ? { coverage: openAiCoverageDirector, editor: openAiEditor } : { coverage: fallbackCoverageDirector, editor: fallbackEditor };
+  config.mode === "live"
+    ? { coverage: openAiCoverageDirector, editor: openAiEditor, repair: openAiEditRepair }
+    : { coverage: fallbackCoverageDirector, editor: fallbackEditor };
 
 // Paid-call hooks: `before` runs before each planning call (budget preflight),
 // `after` once each call has returned (the call is paid for even if its answer
@@ -1092,7 +1277,8 @@ export interface PlanningHooks {
 // locally; Coverage proposes candidate media (screened before the Editor is ever
 // called: invalid candidates are discarded and returned as coverageRejected, the
 // Editor sees only the valid library); PB4 derives the legal presentations; the Editor assigns one per
-// slot (validated before anything is acquired); PB4 picks motion; assembly makes
+// slot (validated before anything is acquired; an adjacent identical presentation
+// may get one targeted repair call, a third call); PB4 picks motion; assembly makes
 // one planned shot per slot. Returns the Long and Short planned shots.
 export async function planVisuals(
   story: Story,
@@ -1125,9 +1311,30 @@ export async function planVisuals(
   hooks.before?.();
   const plans = await directors.editor({ story, research, scripts, slots, library, presentations });
   hooks.after?.();
+  // A priority on a slot that cannot move is dropped locally; every other defect
+  // except an adjacent identical presentation fails the plan here.
+  const checked = {
+    long: validateEdit("long", slots.long, normalizeMotionPriorities(slots.long, plans?.long).plan, presentations.long, true),
+    short: validateEdit("short", slots.short, normalizeMotionPriorities(slots.short, plans?.short).plan, presentations.short, true),
+  };
+  // Adjacent identical presentations get at most ONE targeted repair call, which may
+  // re-pick only the target slots; no retry. The result is validated in full, so a
+  // failed repair stops the plan with the normal validation error.
+  const targets = { long: adjacentRepeatTargets(checked.long), short: adjacentRepeatTargets(checked.short) };
+  let answer: { long: unknown; short: unknown } = checked;
+  if (directors.repair && (targets.long.length || targets.short.length)) {
+    const allowed = repairAllowedIds({ presentations, edit: checked, targets }); // a target with no option fails before the call
+    hooks.before?.();
+    const fix = await directors.repair({ story, slots, library, presentations, edit: checked, targets });
+    hooks.after?.();
+    answer = {
+      long: normalizeMotionPriorities(slots.long, applyEditRepair("long", checked.long, allowed.long, fix?.long)).plan,
+      short: normalizeMotionPriorities(slots.short, applyEditRepair("short", checked.short, allowed.short, fix?.short)).plan,
+    };
+  }
   const edit = {
-    long: validateEdit("long", slots.long, plans?.long, presentations.long),
-    short: validateEdit("short", slots.short, plans?.short, presentations.short),
+    long: validateEdit("long", slots.long, answer.long, presentations.long),
+    short: validateEdit("short", slots.short, answer.short, presentations.short),
   };
 
   const film = (kind: "long" | "short") => {

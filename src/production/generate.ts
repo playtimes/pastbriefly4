@@ -150,7 +150,8 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
 
     // 4. Plan shots - TWO planning calls cover both films: the Coverage Director
     //    (media library), then the Editor (one presentation per fixed slot). Each
-    //    call is preflighted and charged once it returns, even if its answer then
+    //    call (and the Editor's one optional targeted repair call) is preflighted
+    //    and charged once it returns, even if its answer then
     //    fails validation (which stops the job before any acquisition). Reused on
     //    resume: once both plans are in scratch this block is skipped.
     if (!scratch.longShots || !scratch.shortShots) {
