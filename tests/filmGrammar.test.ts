@@ -10,8 +10,9 @@ import path from "node:path";
 // detail crops per mustShow region); the Editor picks one presentation per slot;
 // PB4 selects motion under a local budget; each used asset is acquired once.
 // Everything is validated locally. The only fixes: a motion priority on a slot that
-// cannot move is dropped, and an adjacent identical presentation may get one
-// targeted repair call. Mock mode only: no provider is ever called.
+// cannot move is dropped, an adjacent identical presentation may get one
+// targeted repair call, and either/or mustShow candidates may get one Coverage
+// repair call. Mock mode only: no provider is ever called.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pb4-film-grammar-"));
 process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
@@ -33,10 +34,11 @@ vi.mock("../src/production/mockAssets.ts", async (importOriginal) => {
 const {
   buildBeats, buildEditSlots, slotGridProblems, planSlots, planVisuals, resolveReuse, acquireStill, buildRenderPlan, buildPreview, assertFilmGrammarPlan, VisualPlanError,
   fallbackCoverageDirector, fallbackEditor, coveragePayload, editorPayload, editorSchema, slotBlock, validateCoverage, screenCoverage, buildPresentations, validateEdit, selectMotion, assembleEdit, libraryBlock,
-  normalizeMotionPriorities, adjacentRepeatTargets, editRepairPayload, editRepairSchema, applyEditRepair, repairAllowedIds, EDIT_REPAIR_INSTRUCTIONS,
+  normalizeMotionPriorities, adjacentRepeatTargets, archiveHolds, ARCHIVE_HOLD_MAX_SEC, editRepairPayload, editRepairSchema, applyEditRepair, repairAllowedIds, EDIT_REPAIR_INSTRUCTIONS,
+  applyCoverageRepair, coverageRepairSchema, coverageRepairPayload, openAiCoverageRepair, COVERAGE_REPAIR_INSTRUCTIONS, REPAIR_DESCRIPTION_PATTERN,
   BEAT_HARD_MAX_SEC, SLOT_MAX_SEC, END_TAIL_SEC, COVERAGE_INSTRUCTIONS, COVERAGE_SCHEMA, EDITOR_INSTRUCTIONS, MOTION_BUDGET, MAX_MUST_SHOW, FPS,
 } = await import("../src/production/visuals.ts");
-import type { Beat, CoverageAsset, CoverageInput, EditorInput, EditorPlans, EditRepairInput, EditSlot, PlannedShot, Presentation, VisualDirectors } from "../src/production/visuals.ts";
+import type { Beat, CoverageAsset, CoverageInput, CoverageRepairInput, EditorInput, EditorPlans, EditRepairInput, EditSlot, PlannedShot, Presentation, VisualDirectors } from "../src/production/visuals.ts";
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
 const { fillEdit } = await import("./slotPlan.ts");
 const { recordNarration } = await import("../src/production/narration.ts");
@@ -493,8 +495,8 @@ describe("presentation library: legal presentations are derived locally", () => 
       ]);
     });
 
-    test("an archive base is marked base only, no details, no motion", () => {
-      expect(block(1)).toContain("  L01:base - archive, wide: Show the real site in 1976.\n    type: archive\n    detail views: none (base only: cut away and return later, never hold it on adjacent slots)\n    adjacent repeat: FORBIDDEN\n    motion eligible: no (motionPriority must be 0)");
+    test("an archive base is marked base only, no details, no motion, one deliberate hold", () => {
+      expect(block(1)).toContain("  L01:base - archive, wide: Show the real site in 1976.\n    type: archive\n    detail views: none (base only)\n    adjacent repeat: one deliberate hold (2 adjacent slots at most, 10s combined at most)\n    motion eligible: no (motionPriority must be 0)");
     });
 
     test("a graphic base is marked base only, no details, no motion", () => {
@@ -510,10 +512,11 @@ describe("presentation library: legal presentations are derived locally", () => 
       expect(block(0)).toContain("  L00:detail-right - crop on UN engineers\n    type: reconstruction detail\n    source asset: L00\n    adjacent repeat: FORBIDDEN\n    motion eligible: no (motionPriority must be 0)");
     });
 
-    test("every presentation says adjacent repeat forbidden and exposes motion eligibility", () => {
+    test("every presentation except the base-only archive says adjacent repeat forbidden and exposes motion eligibility", () => {
       const text = assets.map((_, i) => block(i)).join("\n");
       expect(text.match(/^ {2}L\d\d:[a-z-]+ - /gm)!.length).toBe(pres.length);
-      expect(text.match(/^ {4}adjacent repeat: FORBIDDEN$/gm)!.length).toBe(pres.length);
+      expect(text.match(/^ {4}adjacent repeat: FORBIDDEN$/gm)!.length).toBe(pres.length - 1);
+      expect(text.match(/^ {4}adjacent repeat: one deliberate hold /gm)!.length).toBe(1);
       expect(text.match(/^ {4}motion eligible: (yes|no) /gm)!.length).toBe(pres.length);
     });
   });
@@ -1091,6 +1094,161 @@ describe("pipeline: two planning calls, timing only from the slots", () => {
 });
 
 // ---------------------------------------------------------------------------
+describe("coverage repair: one bounded call for either/or mustShow candidates only", () => {
+  const orShip: AssetSpec = { truth: "archive", purpose: "Show the Swedish ships at the grounding site.", archiveQuery: "U 137 Swedish ships 1981", motionCapable: false, useMaster: false, baseFraming: "medium", mustNotShow: ["modern ships"], prompt: "Swedish Navy or Coast Guard vessel near the submarine", mustShow: [{ description: "Swedish Navy or Coast Guard vessel", region: "left" }, { description: "grounded submarine", region: "right" }] };
+  const orTow: AssetSpec = { purpose: "Show the submarine being towed out.", mustShow: [{ description: "towing/escorting vessel", region: "center" }] };
+  const noQuery: AssetSpec = { truth: "archive", archiveQuery: "", purpose: "An archive candidate with no query." };
+  type Fix = Record<string, Record<string, Record<string, unknown>>>;
+  function repairer(answer: Fix) {
+    const calls: CoverageRepairInput[] = [];
+    const repair = async (input: CoverageRepairInput) => (calls.push(input), answer as never);
+    return { calls, repair };
+  }
+  const fixShip = { mustShow: [{ description: "Swedish vessel", region: "left" }, { description: "grounded submarine", region: "right" }], prompt: "a Swedish vessel near the submarine" };
+  const fixTow = { mustShow: [{ description: "towing vessel", region: "center" }], prompt: "a towing vessel pulls the submarine out" };
+  const run = async (long: AssetSpec[], short: AssetSpec[], fix: ReturnType<typeof repairer>) =>
+    planVisuals(story, paulBunyanResearch, paulBunyanScripts, await narration(), { coverage: coverage(long, short), coverageRepair: fix.repair, editor: editor() });
+
+  test("only either/or rejections are sent, Long and Short together in ONE call; valid and other rejected candidates never are", async () => {
+    const fix = repairer({ long: { 1: fixShip }, short: { 0: fixTow } });
+    const plans = await run([{}, orShip, noQuery, graphicAsset], [orTow, {}], fix);
+    expect(fix.calls).toHaveLength(1);
+    expect(fix.calls[0].targets.map((t) => [t.film, t.index])).toEqual([["long", 1], ["short", 0]]);
+    expect(fix.calls[0].targets[0].reason).toMatch(/^mustShow\[0\] "Swedish Navy or Coast Guard vessel" is an either\/or element/);
+    expect(fix.calls[0].targets[0].candidate).toEqual(asset(orShip)); // the original candidate, as returned
+    // The non-either/or rejection is final and was never sent.
+    expect(plans.coverageRejected).toEqual([{ film: "long", index: 2, reason: "is archive but has no archiveQuery" }]);
+    expect(plans.coverageRepaired).toEqual([
+      { film: "long", index: 1, reason: expect.stringMatching(/either\/or/), recovered: true, id: "L01" },
+      { film: "short", index: 0, reason: expect.stringMatching(/either\/or/), recovered: true, id: "S00" },
+    ]);
+    // Nothing to repair: no call at all.
+    const none = repairer({});
+    expect((await run([{}, noQuery], [{}], none)).coverageRejected).toHaveLength(1);
+    expect(none.calls).toHaveLength(0);
+  });
+
+  test("only mustShow and prompt can change: every other field is the original's, and the raw answer is not mutated", async () => {
+    const raw = { longAssets: [asset(), asset(orShip)], shortAssets: [asset()] };
+    const before = structuredClone(raw);
+    let input: EditorInput | undefined;
+    const meddling = { ...fixShip, truth: "reconstruction", purpose: "A different asset.", mustNotShow: [], archiveQuery: "", useMaster: true, baseFraming: "wide", motionCapable: true, extra: 1 };
+    const fix = repairer({ long: { 1: meddling } });
+    const narr = await narration();
+    await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, { coverage: async () => raw, coverageRepair: fix.repair, editor: async (i) => ((input = i), editor()(i)) });
+    expect(raw).toEqual(before);
+    const { id, ...repaired } = input!.library.long[1];
+    expect(id).toBe("L01");
+    expect(repaired).toEqual({ ...asset(orShip), mustShow: fixShip.mustShow, prompt: fixShip.prompt });
+    // The same through applyCoverageRepair directly: a copy, with only the two fields patched.
+    const target = { film: "long" as const, index: 1, reason: "x", candidate: raw.longAssets[1] };
+    const out = applyCoverageRepair([target], { long: { 1: meddling } });
+    expect(out.long.get(1)).toEqual({ ...raw.longAssets[1], mustShow: fixShip.mustShow, prompt: fixShip.prompt });
+    expect(out.long.get(1)).not.toBe(raw.longAssets[1]);
+    expect(raw).toEqual(before);
+  });
+
+  test("the model cannot return unknown candidates: the schema names only the targets, and anything else is ignored", () => {
+    const targets = [
+      { film: "long" as const, index: 4, reason: "r", candidate: asset(orShip) },
+      { film: "long" as const, index: 11, reason: "r", candidate: asset(orShip) },
+    ];
+    const schema = coverageRepairSchema(targets) as any;
+    expect(schema).toMatchObject({ additionalProperties: false, required: ["long"] });
+    expect(Object.keys(schema.properties)).toEqual(["long"]);
+    expect(schema.properties.long).toMatchObject({ additionalProperties: false, required: ["4", "11"] });
+    const patch = schema.properties.long.properties["4"];
+    expect(patch).toMatchObject({ additionalProperties: false, required: ["mustShow", "prompt"] });
+    expect(Object.keys(patch.properties)).toEqual(["mustShow", "prompt"]);
+    expect(patch.properties.mustShow).toMatchObject({ minItems: 1, maxItems: MAX_MUST_SHOW });
+    expect(patch.properties.mustShow.items).toMatchObject({ additionalProperties: false, required: ["description", "region"] });
+    expect(patch.properties.mustShow.items.properties.region.enum).toEqual(["left", "center", "right", "whole"]);
+    const out = applyCoverageRepair(targets, { long: { 4: fixShip, 5: fixShip }, short: { 0: fixShip } });
+    expect([...out.long.keys()]).toEqual([4]); // 5 and the Short are not targets; 11 got no patch
+    expect(out.short.size).toBe(0);
+  });
+
+  test("the either/or defect cannot come back: the schema refuses '/' and blanks, and the normal re-screen refuses 'or' / 'either'", async () => {
+    const description = new RegExp(REPAIR_DESCRIPTION_PATTERN);
+    for (const ok of ["Swedish vessel", "towing vessel", "grounded submarine"]) expect(description.test(ok)).toBe(true);
+    for (const bad of ["towing/escorting vessel", "", "   ", "/"]) expect(description.test(bad)).toBe(false);
+    expect(COVERAGE_REPAIR_INSTRUCTIONS).toMatch(/No element may contain the word "or", the word "either" or "\/"/);
+    expect(COVERAGE_REPAIR_INSTRUCTIONS).toMatch(/Never invent a more specific type/);
+    expect(COVERAGE_REPAIR_INSTRUCTIONS).toMatch(/for "Swedish Navy or Coast Guard vessel", "Swedish vessel"/);
+    // A patch that still offers alternatives is re-screened normally and stays rejected.
+    const again = { mustShow: [{ description: "Navy or Coast Guard ship", region: "left" }], prompt: "p" };
+    const either = { mustShow: [{ description: "either tug", region: "center" }], prompt: "p" };
+    const fix = repairer({ long: { 1: again }, short: { 0: either } });
+    const plans = await run([{}, orShip], [orTow, {}], fix);
+    expect(plans.coverageRejected).toEqual([
+      { film: "long", index: 1, reason: 'mustShow[0] "Navy or Coast Guard ship" is an either/or element; each element must be one concrete visible thing' },
+      { film: "short", index: 0, reason: 'mustShow[0] "either tug" is an either/or element; each element must be one concrete visible thing' },
+    ]);
+    expect(plans.coverageRepaired.map((r) => r.recovered)).toEqual([false, false]);
+  });
+
+  test("a repaired candidate must pass the whole normal screen; a failed repair is never retried and Coverage is never re-asked", async () => {
+    let coverageCalls = 0;
+    const counted = async (i: CoverageInput) => (coverageCalls++, coverage([{}, orShip, orTow, graphicAsset], [{}])(i));
+    // #1 gets a patch that breaks another rule (region), #2 gets no patch at all.
+    const fix = repairer({ long: { 1: { mustShow: [{ description: "Swedish vessel", region: "top" }], prompt: "p" } } });
+    const log: string[] = [];
+    const hooks = { before: () => log.push("before"), after: () => log.push("after") };
+    const narr = await narration();
+    let input: EditorInput | undefined;
+    const plans = await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, { coverage: counted, coverageRepair: fix.repair, editor: async (i) => ((input = i), editor()(i)) }, hooks);
+    expect([coverageCalls, fix.calls.length]).toEqual([1, 1]);
+    expect(log).toEqual(["before", "after", "before", "after", "before", "after"]); // Coverage, Coverage repair, Editor
+    expect(plans.coverageRejected).toEqual([
+      { film: "long", index: 1, reason: 'mustShow[0] "Swedish vessel" has region "top", not left, center, right or whole' },
+      { film: "long", index: 2, reason: 'mustShow[0] "towing/escorting vessel" is an either/or element; each element must be one concrete visible thing' },
+    ]);
+    expect(plans.coverageRepaired).toEqual([{ film: "long", index: 1, reason: expect.stringMatching(/either\/or/), recovered: false }]);
+    expect(input!.library.long.map((a) => [a.id, a.truth])).toEqual([["L00", "reconstruction"], ["L01", "graphic"]]);
+  });
+
+  test("recovered ids follow the raw order, and repair can rescue a film whose only candidates were either/or", async () => {
+    let input: EditorInput | undefined;
+    const fix = repairer({ long: { 0: fixTow }, short: { 0: fixTow } });
+    const narr = await narration();
+    await planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, { coverage: coverage([orTow, graphicAsset], [orTow]), coverageRepair: fix.repair, editor: async (i) => ((input = i), editor()(i)) });
+    expect(input!.library.long.map((a) => [a.id, a.mustShow[0].description])).toEqual([["L00", "towing vessel"], ["L01", "the tree"]]);
+    expect(input!.library.short.map((a) => a.id)).toEqual(["S00"]);
+    // A failed rescue ends exactly as before: no valid candidates.
+    const failed = planVisuals(story, paulBunyanResearch, paulBunyanScripts, narr, { coverage: coverage([{}], [orTow]), coverageRepair: repairer({}).repair, editor: editor() });
+    await expect(failed).rejects.toThrow(/^Invalid coverage plan: short has no valid candidates \(1 proposed, all rejected: #0 mustShow\[0\] "towing\/escorting vessel" is an either\/or element/);
+  });
+
+  test("no asset minimum: a small library never triggers repair, and repair adds only what Coverage proposed", async () => {
+    const fix = repairer({ long: { 1: fixShip } });
+    const small = await run([{}], [{}], fix);
+    expect(fix.calls).toHaveLength(0);
+    expect(new Set(small.long.map((s) => s.assetId))).toEqual(new Set(["L00"]));
+    expect(validateCoverage("long", [asset()])).toHaveLength(1);
+    // Without a repair director (mock mode), either/or candidates simply stay rejected.
+    const plain = await plan(directors(coverage([{}, orShip])));
+    expect(plain.coverageRejected.map((r) => r.index)).toEqual([1]);
+    expect(plain.coverageRepaired).toEqual([]);
+  });
+
+  test("the repair payload holds the verified facts, the rejection and the original candidate; not the scripts or the slots", async () => {
+    const targets = [{ film: "long" as const, index: 3, reason: 'mustShow[0] "Swedish Navy or Coast Guard vessel" is an either/or element; x', candidate: asset(orShip) }];
+    const payload = coverageRepairPayload({ story, research: paulBunyanResearch, targets });
+    expect(payload).toContain("TARGET long candidate #3");
+    expect(payload).toContain('rejected: mustShow[0] "Swedish Navy or Coast Guard vessel"');
+    expect(payload).toContain(JSON.stringify(asset(orShip), null, 2));
+    expect(payload).toContain("VERIFIED FACTS");
+    for (const f of paulBunyanResearch.facts ?? []) expect(payload).toContain(f.fact);
+    expect(payload).not.toContain(paulBunyanScripts.long.slice(0, 60));
+    expect(payload).not.toMatch(/SLOT #/);
+    const seen: any[] = [];
+    await openAiCoverageRepair({ story, research: paulBunyanResearch, targets }, async (o: any) => (seen.push(o), { long: { 3: fixShip } }) as never);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ schemaName: "coverage_repair", instructions: COVERAGE_REPAIR_INSTRUCTIONS, input: payload, schema: coverageRepairSchema(targets) });
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe("render: the slot grid owns cuts, stills are full-bleed", () => {
   const still = (over: Partial<PlannedShot>): PlannedShot => ({
     index: 0, edit: "new", assetId: "L00", presentation: "base", framing: "wide", startSec: 0, endSec: 1, truth: "reconstruction", motion: "hold", wantsMotion: false,
@@ -1274,11 +1432,30 @@ describe("instructions: coverage director and editor", () => {
     expect(COVERAGE_INSTRUCTIONS).not.toMatch(/\d+\s*(-\s*\d+\s*)?(unique |different |distinct )?assets (per|for (a|the|each)) (Long|sustained|section)/i);
   });
 
+  test("Coverage: Long depth scales with duration; 18-24 is guidance, not a quota, and never a validator minimum", () => {
+    const long = COVERAGE_INSTRUCTIONS.slice(COVERAGE_INSTRUCTIONS.indexOf("THE LONG NEEDS DEEPER COVERAGE"), COVERAGE_INSTRUCTIONS.indexOf("INDEPENDENCE - "));
+    const short = COVERAGE_INSTRUCTIONS.slice(COVERAGE_INSTRUCTIONS.indexOf("THE SHORT IS A COVERAGE KIT"));
+    expect(long).toMatch(/Scale this depth to the Long's duration/);
+    expect(long).toMatch(/as guidance, not a quota, a roughly 4-minute Long will often need around 18-24 genuinely distinct assets, depending on the story/);
+    expect(long).toMatch(/a sustained 20-40 second section should normally have several materially different visual families when the verified facts support them/);
+    expect(long).toMatch(/Never add near-duplicates to reach a number/);
+    expect(long).toMatch(/This is depth, not a quota: there is no fixed asset count/);
+    // Base + detail crops remain one family.
+    expect(COVERAGE_INSTRUCTIONS).toMatch(/an asset's base view and its detail crops are ONE visual family/);
+    // The Long rule stays out of the Short guidance, which keeps its own compact kit.
+    expect(COVERAGE_INSTRUCTIONS.match(/18-24/g)).toHaveLength(1);
+    expect(short).not.toMatch(/18-24|20-40 second|duration/);
+    expect(short).toMatch(/roughly 7-10 useful unique assets for a ~50 second Short/);
+    // No asset minimum in validation: a one-asset Long library still validates.
+    expect(validateCoverage("long", [asset()]).map((a) => a.id)).toEqual(["L00"]);
+    expect(validateCoverage("long", Array.from({ length: 5 }, () => asset()))).toHaveLength(5);
+  });
+
   test("Editor: sequences, reuse, same-subject variety, archive alignment, callbacks, no hidden holds", () => {
     expect(EDITOR_INSTRUCTIONS).toMatch(/establishing base -> supported detail -> different subject or evidence -> archive -> callback, rather than new asset -> new asset -> new asset -> new asset/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/Reuse is desirable when it creates coverage, continuity, a callback or a scale change, but do not overuse one asset just because it has many presentations/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/EVERY SLOT IS AN ACTUAL CUT - the exact same presentationId may NEVER appear in two adjacent slots[^.]*the whole plan is rejected\./);
-    expect(EDITOR_INSTRUCTIONS).toMatch(/This applies equally to reconstruction, archive, graphic and detail presentations\./);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/This applies equally to reconstruction, archive, graphic and detail presentations, with ONE exception: a presentation marked "adjacent repeat: one deliberate hold" \(the base of a base-only archive\) may fill TWO adjacent slots [^.]* 10s or less together; it plays as one continuous held image, and a third adjacent slot is still rejected\./);
     expect(EDITOR_INSTRUCTIONS).toMatch(/cut away to another supported presentation and return to it later; do NOT fake a hold by repeating it/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/BAD: slot 20 -> L07:base, slot 21 -> L07:base, slot 22 -> L07:base\. GOOD: slot 20 -> L07:base, slot 21 -> L04:detail-center, slot 22 -> L07:base/);
     expect(EDITOR_INSTRUCTIONS).toMatch(/Before returning JSON, explicitly check every adjacent pair: assignment\[n\]\.presentationId must not equal assignment\[n - 1\]\.presentationId/);
@@ -1299,7 +1476,7 @@ describe("instructions: coverage director and editor", () => {
     expect(EDITOR_INSTRUCTIONS).toMatch(/Every slot lists "motion allowed": if it says no, motionPriority MUST be 0; a priority there can never take effect\./);
     expect(EDITOR_INSTRUCTIONS).not.toMatch(/on that slot rejects the whole plan/);
     expect(EDITOR_INSTRUCTIONS).not.toMatch(/simply wasted/);
-    expect(EDITOR_INSTRUCTIONS).toMatch(/FINAL CHECK - before returning, verify for each film: every slot appears exactly once; no two adjacent slots share the same presentationId; and every motionPriority above 0 is on a "motion eligible: yes" presentation AND on a slot marked "motion allowed: yes"\.\n\nReturn, for both/);
+    expect(EDITOR_INSTRUCTIONS).toMatch(/FINAL CHECK - before returning, verify for each film: every slot appears exactly once; no two adjacent slots share the same presentationId \(except one allowed two-slot archive hold\); and every motionPriority above 0 is on a "motion eligible: yes" presentation AND on a slot marked "motion allowed: yes"\.\n\nReturn, for both/);
     expect(MOTION_BUDGET).toEqual({ long: 5, short: 3 });
     expect(SLOT_MAX_SEC).toEqual({ long: 7, short: 6 });
     expect(MOTION_CLIP_SECONDS).toBe(5);
@@ -1311,5 +1488,163 @@ describe("instructions: coverage director and editor", () => {
       expect(text).not.toMatch(/U 137|U137/); // generic guidance, no story special case
       expect(text).not.toMatch(/[‒-―]/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("archive hold: one bounded, deliberate hold of a base-only archive", () => {
+  const a = (slotId: number, presentationId = "L00:base", motionPriority = 0) => ({ slotId, presentationId, motionPriority });
+  // L00 reconstruction (base + 2 details), L01 archive (base only), L02 graphic (base only).
+  const pres = buildPresentations(validateCoverage("long", [asset(), asset(archiveAsset), asset(graphicAsset)]));
+  const four = slotsOf("long", [4, 4, 4, 4]);
+
+  test("two adjacent slots may hold the same base-only archive within the duration cap", () => {
+    const hold = [a(0), a(1, "L01:base"), a(2, "L01:base"), a(3)];
+    expect(ARCHIVE_HOLD_MAX_SEC).toBe(10);
+    expect(validateEdit("long", four, hold, pres)).toEqual(hold);
+    expect([...archiveHolds(four, hold.map((x) => x.presentationId), pres)]).toEqual([2]);
+    // Exactly at the cap is still allowed.
+    const atCap = slotsOf("long", [4, 5, 5, 4]);
+    expect(validateEdit("long", atCap, hold, pres)).toEqual(hold);
+  });
+
+  test("a third identical archive slot is still invalid", () => {
+    const three = [a(0, "L01:base"), a(1, "L01:base"), a(2, "L01:base"), a(3)];
+    expect(() => validateEdit("long", four, three, pres)).toThrow(/^Invalid edit plan: long slot 2 \(beats 2-2, 4\.00s\): presentationId "L01:base" repeats slot 1; adjacent slots must not show the identical presentation\.$/);
+    expect([...archiveHolds(four, three.map((x) => x.presentationId), pres)]).toEqual([1]);
+  });
+
+  test("an archive pair over 10 seconds is still invalid", () => {
+    const long = slotsOf("long", [4, 6, 4.5, 4]);
+    expect(() => validateEdit("long", long, [a(0), a(1, "L01:base"), a(2, "L01:base"), a(3)], pres)).toThrow(/slot 2 .*"L01:base" repeats slot 1;/);
+  });
+
+  test("reconstruction, graphic and detail duplicates remain invalid", () => {
+    for (const id of ["L00:base", "L02:base", "L00:detail-center", "L00:detail-right"]) {
+      const other = id === "L02:base" ? "L00:base" : "L02:base";
+      const dup = [a(0, other), a(1, id), a(2, id), a(3, other)];
+      expect(() => validateEdit("long", four, dup, pres)).toThrow(new RegExp(`slot 2 .*"${id}" repeats slot 1;`));
+      expect(archiveHolds(four, dup.map((x) => x.presentationId), pres).size).toBe(0);
+    }
+  });
+
+  test("an archive that had another legal presentation would not qualify", () => {
+    // Defensive: archive is base only today; if it ever gained a detail, its base could not hold.
+    const withDetail: Presentation[] = [...pres, { ...pres.find((p) => p.id === "L01:base")!, id: "L01:detail-center", kind: "detail-center", framing: "detail-center" }];
+    expect(archiveHolds(four, ["L00:base", "L01:base", "L01:base", "L00:base"], withDetail).size).toBe(0);
+  });
+
+  test("repair targets skip an allowed hold but still catch a third slot and every other repeat", () => {
+    const e = (...ids: string[]) => ids.map((presentationId, slotId) => ({ slotId, presentationId, motionPriority: 0 }));
+    const six = slotsOf("long", [4, 4, 4, 4, 4, 4]);
+    const targets = (...ids: string[]) => adjacentRepeatTargets(e(...ids), archiveHolds(six, ids, pres));
+    expect(targets("L00:base", "L01:base", "L01:base", "L00:base", "L02:base", "L00:base")).toEqual([]);
+    expect(targets("L01:base", "L01:base", "L01:base", "L00:base", "L02:base", "L00:base")).toEqual([2]);
+    expect(targets("L01:base", "L01:base", "L01:base", "L01:base", "L02:base", "L00:base")).toEqual([2]);
+    expect(targets("L01:base", "L01:base", "L00:base", "L00:base", "L02:base", "L02:base")).toEqual([3, 5]);
+    // Without holds the old behaviour is unchanged.
+    expect(adjacentRepeatTargets(e("L01:base", "L01:base", "L00:base"))).toEqual([1]);
+  });
+
+  test("planVisuals: an allowed hold is not sent to repair, a genuine repeat still is, and the library is unchanged", async () => {
+    const calls: EditRepairInput[] = [];
+    const repair = async (input: EditRepairInput) => (calls.push(input), { long: { 6: { presentationId: "L00:detail-center", motionPriority: 0 } } });
+    const cov = coverage([{}, archiveAsset, graphicAsset]);
+    // Slots 1-2 hold the archive; slots 5-6 (6.02s + 4.91s) repeat the graphic.
+    const out = await plan({ coverage: cov, editor: editor({ 1: ["L01:base"], 2: ["L01:base"], 5: ["L02:base"], 6: ["L02:base"] }), repair });
+    const dur = (i: number) => out.long[i].endSec - out.long[i].startSec;
+    expect(dur(1) + dur(2)).toBeLessThanOrEqual(10);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].targets).toEqual({ long: [6], short: [] });
+    expect([out.long[1].assetId, out.long[2].assetId]).toEqual(["L01", "L01"]);
+    expect(out.long[2]).toMatchObject({ presentation: "base", edit: "reuse", assetShot: 1, truth: "archive" });
+    expect(out.long[6].presentation).toBe("detail-center");
+    // Asset depth: the library is exactly what Coverage proposed, no minimum, no extra asset.
+    expect(calls[0].library.long.map((x) => x.id)).toEqual(["L00", "L01", "L02"]);
+    // With only the allowed hold, no repair call happens at all.
+    calls.length = 0;
+    const clean = await plan({ coverage: cov, editor: editor({ 1: ["L01:base"], 2: ["L01:base"] }), repair });
+    expect(calls).toHaveLength(0);
+    expect([clean.long[1].presentation, clean.long[2].presentation, clean.long[2].assetId]).toEqual(["base", "base", "L01"]);
+  });
+
+  test("render: an accepted archive hold is one continuous shot; narration and subtitles are untouched", () => {
+    const still = (over: Partial<PlannedShot>): PlannedShot => ({
+      index: 0, edit: "new", assetId: "L00", presentation: "base", framing: "wide", startSec: 0, endSec: 1, truth: "reconstruction", motion: "hold", wantsMotion: false,
+      prompt: "p", purpose: "x", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 1, path: "images/long-00.png", mediaType: "image", ...over,
+    });
+    const narr = { audioRel: "audio/long.mp3", audioMediaRel: "", durationSec: 20, words: [{ word: "one", start: 0, end: 3 }, { word: "two", start: 4, end: 8 }, { word: "three", start: 9, end: 19 }] } as Narration;
+    const arc = { assetId: "L01", truth: "archive" as const, path: "images/long-01.png", source: "Archive" };
+    const held = [
+      still({ endSec: 3 }),
+      still({ index: 1, ...arc, startSec: 3, endSec: 7 }),
+      still({ index: 2, ...arc, edit: "reuse", assetShot: 1, startSec: 7, endSec: 11 }),
+      still({ index: 3, edit: "reuse", assetShot: 0, startSec: 11, endSec: 20.5 }),
+    ];
+    const plan = buildRenderPlan("long", story, held, narr, "#d9a066");
+    expect(plan.shots.map((s) => [s.id, s.startFrame, s.endFrame])).toEqual([
+      ["long-00", 0, 3 * FPS],
+      ["long-01", 3 * FPS, 11 * FPS], // slots 1 and 2: one shot, so no cut flash and no restarted breath at 7s
+      ["long-03", 11 * FPS, plan.durationInFrames],
+    ]);
+    expect(plan.shots[1]).toMatchObject({ path: "images/long-01.png", truth: "archive", source: "Archive" });
+    // The plan keeps both slots; timing and subtitles match the same plan with a real cut there.
+    expect(held.map((s) => s.index)).toEqual([0, 1, 2, 3]);
+    const cut = buildRenderPlan("long", story, held.map((s) => (s.index === 2 ? { ...s, assetId: "L00", assetShot: 0, presentation: "detail-center" as const, framing: "detail-center" as const, truth: "reconstruction" as const, path: "images/long-00.png", source: undefined } : s)), narr, "#d9a066");
+    expect(cut.shots).toHaveLength(4);
+    expect(plan.subtitles).toEqual(cut.subtitles);
+    expect([plan.durationInFrames, plan.audioEndFrame, plan.audio]).toEqual([cut.durationInFrames, cut.audioEndFrame, cut.audio]);
+    // A later callback of the same archive, after another slot, is still a real cut.
+    const callback = buildRenderPlan("long", story, [held[0], held[1], still({ index: 2, edit: "reuse", assetShot: 0, startSec: 7, endSec: 11 }), still({ index: 3, ...arc, edit: "reuse", assetShot: 1, startSec: 11, endSec: 20.5 })], narr, "#d9a066");
+    expect(callback.shots).toHaveLength(4);
+  });
+
+  test("the Editor is told exactly which presentations may hold, and the cap", () => {
+    const lib = validateCoverage("long", [asset(), asset(archiveAsset)]);
+    const own = buildPresentations(lib);
+    expect(libraryBlock(lib[1], own)).toContain("adjacent repeat: one deliberate hold (2 adjacent slots at most, 10s combined at most)");
+    expect(libraryBlock(lib[0], own)).not.toContain("one deliberate hold");
+    expect(EDITOR_INSTRUCTIONS).toMatch(/a third adjacent slot is still rejected/);
+  });
+});
+
+describe("coverage repair: no or -> and dodge", () => {
+  test("the instructions allow only choosing one supported option or the narrowest common generalization", () => {
+    const t = COVERAGE_REPAIR_INSTRUCTIONS;
+    expect(t).toMatch(/\(1\) choose ONE of the alternatives, only when the verified facts support that choice; or \(2\) otherwise generalize to the narrowest concrete common description the verified facts support/);
+    expect(t).toMatch(/Never replace "X or Y" with "X and Y" \(or "X with Y", "X plus Y", "both X and Y"\) merely to pass validation/);
+    expect(t).toMatch(/Never add both alternatives when the original uncertainty did not establish both/);
+    expect(t).toMatch(/including any wording that still offers the alternatives the corrected mustShow resolved/);
+    expect(t).not.toMatch(/[‒-―]/);
+  });
+});
+
+describe("coverage repair: coherent prompt rewrite", () => {
+  const t = COVERAGE_REPAIR_INSTRUCTIONS;
+  const prompt = t.slice(t.indexOf("PROMPT - "), t.indexOf("Return exactly one repair"));
+
+  test("a changed prompt is rewritten naturally, not by mechanical substitution", () => {
+    expect(prompt).toMatch(/return the original prompt unchanged, unless it names the same alternatives or would contradict the corrected mustShow/);
+    expect(prompt).toMatch(/rewrite the complete scene prompt as natural, fluent prose/);
+    expect(prompt).toMatch(/do not splice the corrected mustShow wording into the old sentence by mechanical word substitution/);
+    expect(prompt).toMatch(/"Swedish vessel ship" are wrong/);
+  });
+
+  test("the prompt must agree with mustShow and keep no unresolved alternatives", () => {
+    expect(prompt).toMatch(/must agree with the corrected mustShow/);
+    expect(prompt).toMatch(/no leftover "or", "either", "\/", "and\/or" or other alternative wording about the ambiguity the repair resolved/);
+    expect(prompt).toMatch(/"statements or files"/);
+    expect(prompt).toMatch(/one supported option, or the narrowest common description; never both alternatives/);
+  });
+
+  test("no new facts, and the asset keeps its purpose and scene identity", () => {
+    expect(prompt).toMatch(/Do not add new facts, people, objects, actions or specificity/);
+    expect(prompt).toMatch(/keep the same subject, setting, framing, lighting, period and composition, so the asset keeps its original purpose and scene identity/);
+  });
+
+  test("repair scope is unchanged: only mustShow and prompt, fixed fields stay fixed, one repair per target", () => {
+    expect(t).toMatch(/For each target return only its corrected mustShow and its prompt\. Its truth, purpose, mustNotShow, archiveQuery, useMaster, baseFraming and motionCapable are fixed/);
+    expect(t).toMatch(/Return exactly one repair per target candidate, nothing else\.$/);
+    expect(t).not.toMatch(/[‒-―]/);
   });
 });

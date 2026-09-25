@@ -21,6 +21,7 @@ import {
   accentFor,
   type PlannedShot,
   type RejectedCandidate,
+  type RepairedCandidate,
 } from "./visuals.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import type { Scripts } from "./scripts.ts";
@@ -36,6 +37,7 @@ interface Scratch {
   longShots?: PlannedShot[];
   shortShots?: PlannedShot[];
   coverageRejected?: RejectedCandidate[]; // Coverage candidates discarded by validation (film, raw index, reason)
+  coverageRepaired?: RepairedCandidate[]; // either/or candidates sent to the one Coverage repair, and whether each was recovered
   spent?: number;
 }
 
@@ -150,7 +152,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
 
     // 4. Plan shots - TWO planning calls cover both films: the Coverage Director
     //    (media library), then the Editor (one presentation per fixed slot). Each
-    //    call (and the Editor's one optional targeted repair call) is preflighted
+    //    call (and the optional Coverage repair and Editor repair calls) is preflighted
     //    and charged once it returns, even if its answer then
     //    fails validation (which stops the job before any acquisition). Reused on
     //    resume: once both plans are in scratch this block is skipped.
@@ -163,6 +165,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
       scratch.longShots = plans.long;
       scratch.shortShots = plans.short;
       scratch.coverageRejected = plans.coverageRejected;
+      scratch.coverageRepaired = plans.coverageRepaired;
       updateJob(jobId, { scratch });
     }
     // A plan stored by an older planner (e.g. a v1 shot list) is never reinterpreted.

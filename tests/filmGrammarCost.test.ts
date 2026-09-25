@@ -28,9 +28,10 @@ const h = vi.hoisted(() => ({
   archiveCalls: 0,
   motionCalls: 0,
   coverageCalls: 0,
+  coverageRepairCalls: 0,
   editorCalls: 0,
   editorInput: "" as string,
-  failure: "" as "" | "candidateRejected" | "shortAllInvalid" | "missingSlot" | "duplicateSlot" | "unknownSlot" | "unknownPresentation" | "v2dAnswer",
+  failure: "" as "" | "candidateRejected" | "candidateRepaired" | "shortAllInvalid" | "missingSlot" | "duplicateSlot" | "unknownSlot" | "unknownPresentation" | "v2dAnswer",
   // Deterministic word timings from the text itself (about 0.3s a word).
   timed: (text: string) => {
     let t = 0.2;
@@ -73,7 +74,10 @@ vi.mock("../src/production/narration.ts", () => ({
 // discarded before the Editor, so the ids above are unchanged. "shortAllInvalid"
 // makes every Short candidate invalid. The Long has six single-beat slots:
 // L00 base, L00 detail-left, L01, L02, L00 detail-right, L00 base again. The Short
-// has four: S00 base, detail-center, detail-left, base again.
+// has four: S00 base, detail-center, detail-left, base again. The rejected
+// candidates are either/or, so they get the one Coverage repair call: by default it
+// returns the same defect again (they stay rejected); "candidateRepaired" returns a
+// valid patch, so they re-enter the libraries (the Short one as S00, with regions).
 vi.mock("../src/providers/openai.ts", async () => {
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const nodePath = await import("node:path");
@@ -83,6 +87,17 @@ vi.mock("../src/providers/openai.ts", async () => {
   const rejected = (n: number) => minimalAsset({ purpose: `Rejected candidate ${n}.`, mustShow: [{ description: "naval or coast guard vessel", region: "right" }], motionCapable: true });
   return {
     respondJson: vi.fn(async (opts: { schemaName?: string; input?: string }) => {
+      if (opts.schemaName === "coverage_repair") {
+        h.coverageRepairCalls++;
+        const out: Record<string, Record<string, unknown>> = {};
+        for (const [, film, i] of String(opts.input).matchAll(/TARGET (long|short) candidate #(\d+)/g)) {
+          (out[film] ??= {})[i] =
+            h.failure === "candidateRepaired"
+              ? { mustShow: [regions[0], regions[1], { description: "Swedish vessel", region: "right" }], prompt: "A Swedish vessel beside the grounded submarine." }
+              : { mustShow: [{ description: "naval or coast guard vessel", region: "right" }], prompt: "p" };
+        }
+        return out;
+      }
       if (opts.schemaName === "coverage_plan") {
         h.coverageCalls++;
         return {
@@ -91,12 +106,12 @@ vi.mock("../src/providers/openai.ts", async () => {
             minimalAsset({ truth: "graphic", purpose: "Show the bay and the grounding site." }),
             minimalAsset({ truth: "archive", archiveQuery: "U 137 aground 1981" }),
             minimalAsset({ purpose: "An asset the Editor never uses." }),
-            ...(h.failure === "candidateRejected" ? [rejected(1)] : []),
+            ...(h.failure === "candidateRejected" || h.failure === "candidateRepaired" ? [rejected(1)] : []),
           ],
           shortAssets:
             h.failure === "shortAllInvalid"
               ? [rejected(2), rejected(3)]
-              : [...(h.failure === "candidateRejected" ? [rejected(2)] : []), minimalAsset({ mustShow: regions }), minimalAsset({ purpose: "Unused in the Short." })],
+              : [...(h.failure === "candidateRejected" || h.failure === "candidateRepaired" ? [rejected(2)] : []), minimalAsset({ mustShow: regions }), minimalAsset({ purpose: "Unused in the Short." })],
         };
       }
       h.editorCalls++;
@@ -158,6 +173,7 @@ beforeEach(() => {
   h.archiveCalls = 0;
   h.motionCalls = 0;
   h.coverageCalls = 0;
+  h.coverageRepairCalls = 0;
   h.editorCalls = 0;
   h.editorInput = "";
   h.failure = "";
@@ -195,7 +211,7 @@ describe("Film Grammar v2E spend", () => {
     expect(h.motionCalls).toBe(0);
   });
 
-  test("rejected Coverage candidates are recorded and never reach the Editor, acquisition, motion or spend", async () => {
+  test("rejected Coverage candidates whose one repair fails are recorded and never reach the Editor, acquisition or motion", async () => {
     h.failure = "candidateRejected";
     const story = makeStory();
     const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
@@ -203,10 +219,11 @@ describe("Film Grammar v2E spend", () => {
 
     const done = getJob(job.id)!;
     expect(done.state).toBe("awaiting_preview");
-    expect([h.coverageCalls, h.editorCalls]).toEqual([1, 1]);
+    expect([h.coverageCalls, h.coverageRepairCalls, h.editorCalls]).toEqual([1, 1, 1]); // one shared repair call, never retried
     const s = done.scratch as any;
     const reason = 'mustShow[0] "naval or coast guard vessel" is an either/or element; each element must be one concrete visible thing';
     expect(s.coverageRejected).toEqual([{ film: "long", index: 4, reason }, { film: "short", index: 0, reason }]);
+    expect(s.coverageRepaired).toEqual([{ film: "long", index: 4, reason, recovered: false }, { film: "short", index: 0, reason, recovered: false }]);
     expect(h.editorInput).not.toMatch(/Rejected candidate|coast guard/);
     expect(h.editorInput).toMatch(/LONG MEDIA LIBRARY \(4 assets/);
     expect(h.editorInput).toMatch(/SHORT MEDIA LIBRARY \(2 assets/);
@@ -214,14 +231,37 @@ describe("Film Grammar v2E spend", () => {
     expect(all.some((e: any) => /Rejected candidate/.test(e.purpose))).toBe(false);
     // Short ids were assigned after filtering: S00 is the valid reconstruction with regions, so its details exist.
     expect(s.shortShots[1]).toMatchObject({ assetId: "S00", presentation: "detail-center", focus: "grounded submarine" });
-    // Exactly the spend, images and motion of the same job without the rejected candidates.
+    // The images and motion of the same job without the rejected candidates; the repair call is the only extra spend.
     expect(all.filter((e: any) => e.edit === "new").map((e: any) => e.assetId)).toEqual(["L00", "L01", "L02", "S00"]);
     expect(h.imageCalls.length).toBe(5);
     expect(h.motionCalls).toBe(0);
-    expect(done.spent).toBe(round(TEXT() + 2 * PRICING.openai.visualPlan + 5 * PRICING.openai.image));
+    expect(done.spent).toBe(round(TEXT() + 3 * PRICING.openai.visualPlan + 5 * PRICING.openai.image));
   });
 
-  test("a Coverage answer with zero valid Short candidates stops before the Editor; only the Coverage call is charged", async () => {
+  test("either/or candidates recovered by the one Coverage repair join the library and are charged like any asset", async () => {
+    h.failure = "candidateRepaired";
+    const story = makeStory();
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
+    await runJob(job.id, { autoApproveText: true });
+
+    const done = getJob(job.id)!;
+    expect(done.state).toBe("awaiting_preview");
+    expect([h.coverageCalls, h.coverageRepairCalls, h.editorCalls]).toEqual([1, 1, 1]);
+    const s = done.scratch as any;
+    expect(s.coverageRejected).toEqual([]);
+    expect(s.coverageRepaired.map((r: any) => [r.film, r.index, r.recovered, r.id])).toEqual([["long", 4, true, "L04"], ["short", 0, true, "S00"]]);
+    expect(h.editorInput).toMatch(/LONG MEDIA LIBRARY \(5 assets/);
+    expect(h.editorInput).toMatch(/SHORT MEDIA LIBRARY \(3 assets/);
+    expect(h.editorInput).not.toMatch(/coast guard/);
+    // The recovered Short candidate kept its identity (purpose) and is used; the unused recovered L04 is never acquired.
+    expect(s.shortShots[0]).toMatchObject({ assetId: "S00", edit: "new", purpose: "Rejected candidate 2." });
+    expect(s.shortShots[1]).toMatchObject({ assetId: "S00", presentation: "detail-center", focus: "grounded submarine" });
+    expect(s.longShots.some((e: any) => e.assetId === "L04")).toBe(false);
+    expect(h.imageCalls.length).toBe(5);
+    expect(done.spent).toBe(round(TEXT() + 3 * PRICING.openai.visualPlan + 5 * PRICING.openai.image));
+  });
+
+  test("a Coverage answer with zero valid Short candidates, even after its one repair, stops before the Editor", async () => {
     h.failure = "shortAllInvalid";
     const story = makeStory();
     const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
@@ -229,9 +269,9 @@ describe("Film Grammar v2E spend", () => {
 
     const after = getJob(job.id)!;
     expect(after.state).toBe("failed");
-    expect([h.coverageCalls, h.editorCalls]).toEqual([1, 0]);
+    expect([h.coverageCalls, h.coverageRepairCalls, h.editorCalls]).toEqual([1, 1, 0]);
     expect(h.imageCalls.length + h.archiveCalls + h.motionCalls).toBe(0); // not even the master
-    expect(after.spent).toBe(round(TEXT() + PRICING.openai.visualPlan));
+    expect(after.spent).toBe(round(TEXT() + 2 * PRICING.openai.visualPlan)); // Coverage + its one repair
     expect((after.scratch as any).longShots).toBeUndefined(); // nothing invalid is stored
   });
 
