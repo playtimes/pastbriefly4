@@ -1720,7 +1720,7 @@ export function eventIdentifiers(story: Story): string[] {
   const text = [story.title, story.hook, ...story.moments.map((m) => `${m.title} ${m.detail}`)].join(" ");
   const placeTokens = new Set(wordsOf(story.place));
   const proper = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
-  const idents = text.match(/\b[A-Za-z]{1,4}[-\s]?\d{1,4}\b/g) ?? [];
+  const idents = (text.match(/\b[A-Za-z]{1,4}[-\s]?\d{1,4}\b/g) ?? []).filter((m) => identifierPrefix(m.match(/^[A-Za-z]+/)![0]));
   const seen = new Set<string>();
   const out: string[] = [];
   for (const raw of [...idents, ...proper]) {
@@ -1742,6 +1742,15 @@ export function relevanceTerms(story: Story): string[] {
   const year = story.year?.trim();
   if (year && /\d/.test(year) && !terms.includes(year)) terms.push(year);
   return terms;
+}
+
+// A letters-then-number match is an identifier ("U 137", "K-19", "B 52") only when
+// its letters are not prose: a lowercase word ("of 28", "at 10") or a capitalised
+// connector or month at a sentence start ("In 1981", "On 27", "May 4") is a date
+// or count fragment, never the name of anything.
+const NUMBER_PROSE = new Set(["in", "on", "of", "at", "by", "for", "to", "from", "since", "until", "till", "and", "or", "the", "an", "as", "is", "was", "per", "via", "near", "over", "under", "after", "about", "jan", "feb", "mar", "apr", "may", "jun", "june", "jul", "july", "aug", "sep", "sept", "oct", "nov", "dec"]);
+function identifierPrefix(letters: string): boolean {
+  return /[A-Z]/.test(letters) && !NUMBER_PROSE.has(letters.toLowerCase());
 }
 
 const STOPWORDS = new Set(["the", "and", "that", "with", "from", "into", "were", "when", "then", "their", "them", "this", "which", "would", "could", "after", "before", "about", "over", "between", "against"]);
@@ -1955,6 +1964,7 @@ export function buildPreview(story: Story, longShots: PlannedShot[], shortShots:
       .filter((s) => s.path)
       .map((s) => ({
         kind,
+        slot: s.index,
         path: mediaRel(story.slug, s.path!),
         truth: s.truth,
         motion: s.wantsMotion,

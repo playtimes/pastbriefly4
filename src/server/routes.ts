@@ -24,7 +24,7 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, jobProgress } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, jobProgress, regenerateStill, isRegeneratingStill } from "../production/generate.ts";
 
 // The editorial review data for the text gate, read straight from the job's
 // private scratch. Only the useful fields are exposed - never the whole scratch.
@@ -232,6 +232,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const job = getJob(id);
     if (!job) return reply.code(404).send({ error: "Job not found" });
     if (job.state !== "awaiting_preview") return { job: toPublic(job) };
+    if (isRegeneratingStill(id)) return reply.code(409).send({ error: "A still is being regenerated. Wait for it to finish." });
     approvePreview(id);
     enqueueJob(id);
     return { job: toPublic(getJob(id)!) };
@@ -245,9 +246,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const job = getJob(id);
     if (!job) return reply.code(404).send({ error: "Job not found" });
     if (job.state !== "awaiting_preview") return { job: toPublic(job) };
+    if (isRegeneratingStill(id)) return reply.code(409).send({ error: "A still is being regenerated. Wait for it to finish." });
     clearVisualsForRebuild(id);
     enqueueJob(id);
     return { job: toPublic(getJob(id)!) };
+  });
+
+  // Regenerate ONE generated owner still at the visual preview gate from its exact
+  // stored plan. The job stays awaiting_preview and unapproved; nothing is requeued.
+  const regenBody = z.object({ kind: z.enum(["long", "short"]), slot: z.number().int().min(0) }).strict();
+  app.post("/api/jobs/:id/regenerate-still", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    const parsed = regenBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "kind ('long' or 'short') and slot (an integer) are required." });
+    if (job.state !== "awaiting_preview") return reply.code(409).send({ error: "A still can only be regenerated at the visual preview." });
+    try {
+      return { job: toPublic(await regenerateStill(id, parsed.data.kind, parsed.data.slot)) };
+    } catch (e: any) {
+      return reply.code(400).send({ error: e?.message || "Could not regenerate the still." });
+    }
   });
 
   // Retry a failed job in place: reuse the same job id so completed (and paid)

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { rmSync } from "node:fs";
+import { renameSync, rmSync } from "node:fs";
 import { config } from "../server/config.ts";
 import { PRICING, round, ttsUsd } from "../server/pricing.ts";
 import { getJob, getStory, updateJob, addVideo, setScripts, type JobRecord } from "../server/store.ts";
@@ -347,6 +347,63 @@ export function approveTextForJob(jobId: string): JobRecord {
   const scratch = { ...(job.scratch as Scratch), textApproved: true };
   updateJob(jobId, { scratch, state: "queued", step: "queued", message: "Queued", error: null });
   return getJob(jobId)!;
+}
+
+// Jobs with a still regeneration in flight. The job stays awaiting_preview while
+// it runs, so Continue / Rebuild visuals must wait for it (see the routes).
+const regenerating = new Set<string>();
+export function isRegeneratingStill(jobId: string): boolean {
+  return regenerating.has(jobId);
+}
+
+// At the visual preview gate, regenerate ONE generated owner still from its exact
+// stored PlannedShot (prompt, purpose, framing, master rule unchanged): no
+// re-planning, no motion, no render, no new job. Only an owning ("new") slot of a
+// reconstruction or graphic qualifies - never a reuse slot or a genuine archive
+// still. The old still is set aside and restored if generation fails, so a failure
+// leaves the preview exactly as it was and charges nothing. On success the one
+// image is charged, every reuse of the asset points at the new still, and the
+// preview is rebuilt; the job stays awaiting_preview and unapproved.
+export async function regenerateStill(jobId: string, kind: "long" | "short", index: number): Promise<JobRecord> {
+  const job = getJob(jobId);
+  if (!job) throw new Error("Job not found.");
+  if (job.state !== "awaiting_preview") throw new Error("A still can only be regenerated at the visual preview.");
+  const story = getStory(job.storyId);
+  if (!story) throw new Error("Story not found.");
+  const scratch: Scratch = { ...(job.scratch as Scratch) };
+  const shots = kind === "long" ? scratch.longShots : scratch.shortShots;
+  const shot = shots?.find((s) => s.index === index);
+  if (!shots || !shot) throw new Error(`No ${kind} slot ${index}.`);
+  if (shot.edit !== "new") throw new Error(`${kind} slot ${index} reuses asset ${shot.assetId}; regenerate its owner slot ${shot.assetShot} instead.`);
+  if (shot.truth !== "reconstruction" && shot.truth !== "graphic") throw new Error(`${kind} slot ${index} is an archive still and is never regenerated.`);
+  if (!shot.path || !shot.path.startsWith("images/")) throw new Error(`${kind} slot ${index} has no generated still.`);
+  if (regenerating.has(jobId)) throw new Error("A still is already being regenerated for this job.");
+
+  regenerating.add(jobId);
+  const oldRel = shot.path;
+  const abs = inStory(story.slug, oldRel);
+  const backup = `${abs}.prev`;
+  try {
+    budget(job, PRICING.openai.image, scratch);
+    renameSync(abs, backup);
+    delete shot.path;
+    let result: Awaited<ReturnType<typeof acquireStill>>;
+    try {
+      result = await acquireStill(story, kind, shot, scratch.masterRef ?? null);
+    } catch (e) {
+      rmSync(abs, { force: true });
+      renameSync(backup, abs); // restore; the stored scratch was never changed
+      throw e;
+    }
+    rmSync(backup, { force: true });
+    resolveReuse(story, kind, shots);
+    if (result === "generated") record(jobId, PRICING.openai.image, scratch);
+    const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
+    updateJob(jobId, { scratch, spent: scratch.spent ?? 0, preview, state: "awaiting_preview", previewApproved: false, error: null });
+    return getJob(jobId)!;
+  } finally {
+    regenerating.delete(jobId);
+  }
 }
 
 // Reject only the visual work of an awaiting_preview job and rebuild it under the

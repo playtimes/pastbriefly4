@@ -3,7 +3,7 @@ import { api } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
 import { PreviewFrames } from "../previewFrames.tsx";
-import { STEP_ORDER, STEP_LABELS, type Job } from "../../types.ts";
+import { STEP_ORDER, STEP_LABELS, type Job, type PreviewFrame } from "../../types.ts";
 
 export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [job, setJob] = useState<Job | null>(null);
@@ -12,6 +12,9 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [approvingText, setApprovingText] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [regenerating, setRegenerating] = useState<string | null>(null);
+  const [imageVersion, setImageVersion] = useState(0);
+  const [regenError, setRegenError] = useState("");
   const [maxSpend, setMaxSpend] = useState(0);
   const jobId = useRef<string | null>(null);
 
@@ -84,6 +87,23 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
       setError(e.message);
     } finally {
       setRebuilding(false);
+    }
+  }
+
+  // Regenerate one owner still in place. The job stays at the preview gate; the
+  // returned preview replaces the old one and the version bump reloads the images.
+  async function regenerate(f: PreviewFrame): Promise<void> {
+    if (!jobId.current || typeof f.slot !== "number") return;
+    setRegenerating(`${f.kind}-${f.slot}`);
+    setRegenError("");
+    try {
+      const { job } = await api.regenerateStill(jobId.current, f.kind, f.slot);
+      setJob(job);
+      setImageVersion(Date.now());
+    } catch (e: any) {
+      setRegenError(e.message); // the preview is unchanged; the old still stays
+    } finally {
+      setRegenerating(null);
     }
   }
 
@@ -190,12 +210,13 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
             {p.remainingMotionCost > 0 ? ` · est. remaining motion $${p.remainingMotionCost.toFixed(2)}` : ""}
           </p>
         </div>
-        <PreviewFrames frames={p.frames} />
+        {regenError && <p className="text-sm text-red-700">Could not regenerate the still: {regenError}</p>}
+        <PreviewFrames frames={p.frames} onRegenerate={regenerate} regenerating={regenerating} version={imageVersion} />
         <div className="flex items-center gap-3">
-          <button onClick={cont} disabled={continuing || rebuilding} className="btn btn-primary text-lg">
+          <button onClick={cont} disabled={continuing || rebuilding || regenerating !== null} className="btn btn-primary text-lg">
             {continuing ? "Continuing…" : "Continue"}
           </button>
-          <button onClick={rebuild} disabled={continuing || rebuilding} className="btn btn-ghost text-lg">
+          <button onClick={rebuild} disabled={continuing || rebuilding || regenerating !== null} className="btn btn-ghost text-lg">
             {rebuilding ? "Rebuilding…" : "Rebuild visuals"}
           </button>
         </div>

@@ -9,7 +9,7 @@ process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
-const { archiveQueries, relevanceTerms } = await import("../src/production/visuals.ts");
+const { archiveQueries, relevanceTerms, eventIdentifiers } = await import("../src/production/visuals.ts");
 const { fetchArchive } = await import("../src/production/wikimedia.ts");
 
 // A submarine-grounding story (used only as sample data, not hardcoded in src):
@@ -52,6 +52,60 @@ describe("archive query building", () => {
     // Specific-to-broad: identifiers lead, place+year is the broadest kept.
     expect(queries[0].toLowerCase()).toContain("u 137");
     expect(queries[queries.length - 1]).toBe(`${story.place} ${story.year}`);
+  });
+});
+
+// A story written the way research returns it: dates and counts follow ordinary
+// connector words ("In 1981", "On 27 October", "of 28") around the one real
+// identifier. Those fragments once formed the garbage first query
+// "In 1981 On 27 U 137 of 28".
+function proseStory(): Story {
+  return {
+    ...makeStory(),
+    title: "A Soviet Submarine Got Stuck in Sweden",
+    hook: "In 1981, a Soviet submarine ran aground near a Swedish naval base, triggering a military response.",
+    place: "Sweden (Blekinge Archipelago)",
+    moments: [
+      { title: "Submarine Runs Aground", detail: "On 27 October 1981, the Soviet submarine U 137 ran aground near the Karlskrona naval base." },
+      { title: "Fisherman Spots the Submarine", detail: "On the morning of 28 October 1981, a fisherman reported it; one of 28 boats in the bay." },
+      { title: "Escort", detail: "At 10 knots, escorted by 3 vessels for 20 miles to 5 miles out, on 6 November U 137 departed." },
+    ],
+  };
+}
+
+describe("event identifiers", () => {
+  const garbage = ["In 1981", "On 27", "of 28", "at 10", "At 10", "by 3", "for 20", "to 5", "On 6"];
+
+  test("a U-137-like story keeps U 137 and drops the prose fragments", () => {
+    const ids = eventIdentifiers(proseStory());
+    expect(ids).toContain("U 137");
+    for (const g of garbage) expect(ids).not.toContain(g);
+    expect(ids.filter((t) => /\d/.test(t))).toEqual(["U 137"]);
+  });
+
+  test("real compact identifiers survive", () => {
+    const story = { ...makeStory(), hook: "The K-19 and an A-12 flew past, with a B 52 and U 137 nearby.", moments: [] };
+    expect(eventIdentifiers(story).slice(0, 4)).toEqual(["K-19", "A-12", "B 52", "U 137"]);
+  });
+
+  test("lowercase and capitalised connector fragments are rejected generically", () => {
+    const story = { ...makeStory(), title: "X", hook: "In 1981 On 27 of 28 at 10 by 3 for 20 to 5 May 4 From 12.", moments: [] };
+    expect(eventIdentifiers(story).filter((t) => /\d/.test(t))).toEqual([]);
+  });
+
+  test("the story year still reaches the relevance terms separately", () => {
+    const terms = relevanceTerms(proseStory());
+    expect(terms).toContain("U 137");
+    expect(terms).toContain("1981");
+    expect(terms).not.toContain("In 1981");
+  });
+
+  test("archive queries lead with the identifier and keep the specific-to-broad order", () => {
+    const story = proseStory();
+    const queries = archiveQueries(story, "Soviet submarine aground Karlskrona 1981");
+    expect(queries[0].startsWith("U 137")).toBe(true);
+    for (const g of garbage) expect(queries[0]).not.toContain(g);
+    expect(queries.slice(1)).toEqual(["Soviet submarine aground Karlskrona 1981", `${story.title} ${story.year}`, `${story.place} ${story.year}`]);
   });
 });
 

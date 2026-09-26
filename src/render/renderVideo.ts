@@ -5,6 +5,7 @@ import { bundle } from "@remotion/bundler";
 import { selectComposition, renderMedia, ensureBrowser } from "@remotion/renderer";
 import type { RenderPlan } from "./types.ts";
 import { config } from "../server/config.ts";
+import { masterAudio } from "./master.ts";
 
 const ENTRY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 
@@ -14,7 +15,8 @@ export interface FilmJob {
   outPath: string;
 }
 
-// Render one or more films that share a story's asset folder. Bundles once.
+// Render one or more films that share a story's asset folder. Bundles once. Each
+// film's audio is then mastered in place to upload loudness (video copied).
 export async function renderFilms(publicDir: string, jobs: FilmJob[]): Promise<void> {
   await ensureBrowser();
   const serveUrl = await bundle({ entryPoint: ENTRY, publicDir });
@@ -28,6 +30,7 @@ export async function renderFilms(publicDir: string, jobs: FilmJob[]): Promise<v
       outputLocation: job.outPath,
       inputProps: job.plan,
     });
+    masterAudio(job.outPath);
   }
 }
 

@@ -78,6 +78,7 @@ export const api = {
   approveText: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-text`),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
   rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),
+  regenerateStill: (jobId: string, kind: "long" | "short", slot: number) => post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, { kind, slot }),
   retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
   approveSpend: (jobId: string, approvedMax: number) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-spend`, { approvedMax }),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),

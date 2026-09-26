@@ -145,6 +145,7 @@ export interface VisualPreview {
 
 export interface PreviewFrame {
   kind: "long" | "short";
+  slot?: number; // the edit slot id within its film
   path: string; // media-relative
   truth: "archive" | "reconstruction" | "graphic";
   motion: boolean;
