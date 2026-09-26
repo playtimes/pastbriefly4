@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { config, ROOT } from "../server/config.ts";
 import type { Story, Category, VisualPreview, PreviewFrame } from "../types.ts";
-import type { RenderPlan, Shot, Truth, Motion, Caption, Framing } from "../render/types.ts";
+import type { RenderPlan, Shot, Truth, Motion, Caption, Framing, Clarity } from "../render/types.ts";
 import type { StoryWorld, ResearchPackage } from "./pipelineTypes.ts";
 import type { Narration } from "./narration.ts";
 import { PRICING, MOTION_CLIP_SECONDS, round } from "../server/pricing.ts";
@@ -2075,6 +2075,22 @@ export function buildPreview(story: Story, longShots: PlannedShot[], shortShots:
 // renders as ONE continuous shot across both slots, so the picture never restarts
 // (no cut flash, no reset of its slow breath) at the internal boundary. The plan
 // keeps both slots; subtitles and narration timing are untouched.
+// The explanatory treatment for one slot, from what the plan already states:
+//  - a detail presentation with a real focus -> "focus" (its crop is pinned to
+//    the mustShow region the reconstruction prompt placed there);
+//  - a base graphic whose purpose / mustShow is clearly a map or route, and not
+//    a timeline or diagram -> "map-focus" toward the framing origin (no location
+//    is invented: graphics are not prompted into regions);
+//  - everything else (archive, plain reconstructions, ambiguous graphics) -> none.
+const MAP_WORDS = /\b(maps?|route|routes|voyage|sailed|sailing|course|coastline|journey|distance|geograph\w*|location of|positions? of)\b/i;
+const CHART_WORDS = /\b(timeline|chronolog\w*|diagram|chart|comparison|cutaway|cross-section)\b/i;
+export function clarityFor(s: Pick<PlannedShot, "truth" | "presentation" | "focus" | "purpose" | "mustShow">): Clarity | undefined {
+  if (s.presentation !== "base") return s.focus?.trim() ? "focus" : undefined;
+  if (s.truth !== "graphic") return undefined;
+  const text = [s.purpose, ...(s.mustShow ?? [])].join(" ");
+  return MAP_WORDS.test(text) && !CHART_WORDS.test(text) ? "map-focus" : undefined;
+}
+
 export function buildRenderPlan(kind: "long" | "short", story: Story, shots: PlannedShot[], narration: Narration, accent: string): RenderPlan {
   assertFilmGrammarPlan(kind, shots);
   const width = kind === "short" ? 1080 : 1920;
@@ -2090,6 +2106,7 @@ export function buildRenderPlan(kind: "long" | "short", story: Story, shots: Pla
     const end = i === ordered.length - 1 ? durationInFrames : frameAt(ordered[i + 1].startSec);
     // A reuse always shows the owner's STILL, never its motion clip.
     const video = s.edit === "new" && !!s.motionPath;
+    const clarity = video ? undefined : clarityFor(s);
     const shot: Shot = {
       id: `${kind}-${String(s.index).padStart(2, "0")}`,
       startFrame: start,
@@ -2099,6 +2116,7 @@ export function buildRenderPlan(kind: "long" | "short", story: Story, shots: Pla
       truth: s.truth,
       motion: s.motion,
       framing: s.framing,
+      ...(clarity ? { clarity } : {}),
       caption: s.caption,
       source: s.source,
     };

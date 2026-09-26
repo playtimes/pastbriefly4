@@ -23,6 +23,7 @@ const h = vi.hoisted(() => ({
   narrationLong: [] as string[], // script text handed to long narration
   narrationShort: [] as string[],
   failNarrationLong: false,
+  dashedAudit: false, // the audit returns typographic dashes
 }));
 
 vi.mock("../src/production/research.ts", () => ({
@@ -46,6 +47,7 @@ vi.mock("../src/production/scripts.ts", () => ({
   auditScripts: vi.fn(async () => {
     h.auditCalls++;
     if (h.failAuditOnce && h.auditAttempts++ === 0) throw new Error("script audit failed");
+    if (h.dashedAudit) return { long: "Sweden – Norway. Java — Australia. A―B and K-19.", short: "Java — Australia, then K-19." };
     return { long: "Audited long narration. Two short sentences here.", short: "Audited short narration." };
   }),
 }));
@@ -109,6 +111,7 @@ beforeEach(() => {
   h.narrationLong.length = 0;
   h.narrationShort.length = 0;
   h.failNarrationLong = false;
+  h.dashedAudit = false;
 });
 
 describe("runJob wires the script fidelity audit into the scripts step", () => {
@@ -142,6 +145,21 @@ describe("runJob wires the script fidelity audit into the scripts step", () => {
     const stored = getScripts(story.id)!;
     expect(stored.long).toBe("Audited long narration. Two short sentences here.");
     expect(stored.short).toBe("Audited short narration.");
+  });
+
+  test("the finalized scripts are stored and narrated with plain hyphens", async () => {
+    h.dashedAudit = true;
+    const story = makeStory();
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 15 });
+
+    await runJob(job.id, { autoApproveText: true });
+
+    const long = "Sweden - Norway. Java - Australia. A-B and K-19.";
+    const short = "Java - Australia, then K-19.";
+    expect(getScripts(story.id)).toMatchObject({ long, short });
+    expect((getJob(job.id)!.scratch as { scripts?: unknown }).scripts).toEqual({ long, short });
+    expect(h.narrationLong[0]).toBe(long);
+    expect(h.narrationShort[0]).toBe(short);
   });
 
   test("an audit failure fails the job but preserves both drafts", async () => {

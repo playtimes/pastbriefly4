@@ -9,6 +9,7 @@ import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } fro
 import { researchStory } from "./research.ts";
 import { writeScript, auditScripts } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
+import { plainDashes } from "./text.ts";
 import {
   planVisuals,
   acquireStill,
@@ -118,7 +119,9 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
       // stories - the same gate writeScripts uses - so mock and Paul Bunyan keep
       // their deterministic drafts. On a later resume scratch.scripts already
       // exists, so this whole block is skipped and the audit is never re-charged.
-      scratch.scripts = story.slug !== "paul-bunyan" && config.mode === "live" ? await runScriptAudit(job, story, research, drafts, scratch) : drafts;
+      const final = story.slug !== "paul-bunyan" && config.mode === "live" ? await runScriptAudit(job, story, research, drafts, scratch) : drafts;
+      // The finalized scripts are stored and narrated with plain hyphens only.
+      scratch.scripts = { long: plainDashes(final.long), short: plainDashes(final.short) };
       setScripts(story.id, scratch.scripts);
       updateJob(jobId, { scratch });
     }

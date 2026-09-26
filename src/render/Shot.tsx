@@ -19,6 +19,7 @@ export const Shot: React.FC<{ shot: ShotType; durationInFrames: number; format: 
   return (
     <AbsoluteFill style={{ backgroundColor: theme.bg }}>
       <Media shot={shot} frame={frame} duration={durationInFrames} format={format} />
+      {shot.clarity === "focus" && shot.mediaType === "image" && <AbsoluteFill style={spotlightStyle(shot, frame)} />}
 
       {shot.truth === "reconstruction" && <TruthLabel />}
       {shot.caption && <CaptionBlock caption={shot.caption} short={short} frame={frame} accent={accent} />}
@@ -53,7 +54,22 @@ const Media: React.FC<{ shot: ShotType; frame: number; duration: number; format:
 export function stillStyle(shot: ShotType, frame: number, duration: number, format: "long" | "short"): React.CSSProperties {
   const f = framingTransform(shot.framing);
   const t = duration > 1 ? frame / (duration - 1) : 0;
-  const { scale, x } = format === "long" ? { scale: 1 + t * 0.03, x: 0 } : motionTransform(shot.motion ?? "hold", frame, duration);
+  if (shot.clarity === "map-focus") {
+    // Orient, then focus: the whole map, a gentle push toward the framing origin,
+    // then a settled hold. Starts at scale 1 so the viewer first sees the region.
+    return {
+      width: "100%",
+      height: "100%",
+      objectFit: "cover",
+      filter: ART_FILTER,
+      transform: `scale(${round3(mapFocusScale(t, f.scale))})`,
+      transformOrigin: `${f.originX}% ${f.originY}%`,
+    };
+  }
+  // A focus detail pushes a little further toward its region than the usual breath.
+  const push = shot.clarity === "focus" ? FOCUS_PUSH : format === "long" ? 0.03 : 0;
+  const base = format === "long" ? { scale: 1, x: 0 } : motionTransform(shot.motion ?? "hold", frame, duration);
+  const { scale, x } = { scale: base.scale + t * push, x: base.x };
   return {
     width: "100%",
     height: "100%",
@@ -61,6 +77,30 @@ export function stillStyle(shot: ShotType, frame: number, duration: number, form
     filter: ART_FILTER,
     transform: `scale(${round3(f.scale * scale)})${x ? ` translateX(${round3(x)}%)` : ""}`,
     transformOrigin: `${f.originX}% ${f.originY}%`,
+  };
+}
+
+// Clarity timing: hold the whole map for the first 15% of the slot, ease the push
+// in over the middle, and settle for the last 30%. The end crop stays modest so a
+// route's ends remain on screen.
+export const MAP_FOCUS_END_SCALE = 1.12;
+const FOCUS_PUSH = 0.05;
+export function mapFocusScale(t: number, framingScale: number): number {
+  const end = Math.max(1, framingScale) * MAP_FOCUS_END_SCALE;
+  const p = Math.min(1, Math.max(0, (t - 0.15) / 0.55));
+  const eased = p * p * (3 - 2 * p); // smoothstep: no jolt at either end
+  return 1 + (end - 1) * eased;
+}
+
+// One restrained guide for a focus detail: a soft spotlight that gently darkens
+// the frame away from the framing origin, faded in just after the cut. It never
+// covers the region itself and carries no text, arrow or bounce.
+export function spotlightStyle(shot: ShotType, frame: number): React.CSSProperties {
+  const f = framingTransform(shot.framing);
+  return {
+    pointerEvents: "none",
+    background: `radial-gradient(ellipse 46% 58% at ${f.originX}% ${f.originY}%, transparent 55%, rgba(8,6,4,0.34) 100%)`,
+    opacity: interpolate(frame, [6, 24], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }),
   };
 }
 

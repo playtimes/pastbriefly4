@@ -2,7 +2,7 @@ import { config } from "../server/config.ts";
 import { narrate as elevenNarrate, type WordTiming } from "../providers/elevenlabs.ts";
 import { inStory, mediaRel } from "./paths.ts";
 import { writeSilentWav } from "./mockAssets.ts";
-import { words as splitWords } from "./text.ts";
+import { plainDashes, words as splitWords } from "./text.ts";
 
 export interface Narration {
   audioRel: string; // story-folder-relative (for staticFile)
@@ -11,7 +11,10 @@ export interface Narration {
   words: WordTiming[];
 }
 
-export async function recordNarration(slug: string, kind: "long" | "short", text: string): Promise<Narration> {
+// The text is dash-normalised again here so a script stored before that rule
+// (a resumed job) still reaches the voice with plain hyphens only.
+export async function recordNarration(slug: string, kind: "long" | "short", script: string): Promise<Narration> {
+  const text = plainDashes(script);
   if (config.mode === "live") {
     const rel = `audio/${kind}.mp3`;
     const timings = await elevenNarrate(text, inStory(slug, rel));

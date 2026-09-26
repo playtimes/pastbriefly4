@@ -3,6 +3,7 @@ import { respondJson } from "../providers/openai.ts";
 import type { Story } from "../types.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import { paulBunyanScripts } from "./fixtures/paulBunyan.ts";
+import { plainDashes } from "./text.ts";
 
 export interface Scripts {
   long: string;
@@ -10,14 +11,15 @@ export interface Scripts {
 }
 
 // One format's narration. Long and Short are separate paid writes so a resume
-// never repeats a format that already succeeded.
+// never repeats a format that already succeeded. Every script leaves here with
+// plain hyphens, so storage, narration and subtitles all see the same text.
 export async function writeScript(story: Story, research: ResearchPackage, kind: "long" | "short"): Promise<string> {
-  if (story.slug === "paul-bunyan") return paulBunyanScripts[kind];
-  if (config.mode !== "live") return mockScripts(story, research)[kind];
+  if (story.slug === "paul-bunyan") return plainDashes(paulBunyanScripts[kind]);
+  if (config.mode !== "live") return plainDashes(mockScripts(story, research)[kind]);
 
   const instructions = kind === "long" ? LONG_INSTRUCTIONS : SHORT_INSTRUCTIONS;
   const r = await respondJson<{ script: string }>({ instructions, input: input(story, research), schemaName: "script", schema: SCRIPT_SCHEMA });
-  return r.script.trim();
+  return plainDashes(r.script.trim());
 }
 
 export async function writeScripts(story: Story, research: ResearchPackage): Promise<Scripts> {
@@ -41,7 +43,7 @@ export async function auditScripts(story: Story, research: ResearchPackage, draf
     schemaName: "script_audit",
     schema: SCRIPTS_AUDIT_SCHEMA,
   });
-  return { long: r.long.trim(), short: r.short.trim() };
+  return { long: plainDashes(r.long.trim()), short: plainDashes(r.short.trim()) };
 }
 
 // The fact sheet is the factual spine handed to every write and to the audit:

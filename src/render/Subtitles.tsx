@@ -9,6 +9,29 @@ import { theme } from "./theme.ts";
 // (a gap between cues), so continuous speech reads as one steady band.
 const EDGE_FADE = 3;
 
+// Long phrases sit in a bounded box, so a short cue stays one centred line and a
+// longer one wraps into two balanced lines (text-wrap: balance) instead of one
+// very wide band. The box (~42 characters a line at 32px) and the cue cap in
+// production/subtitles.ts keep every Long cue to at most two lines. The font size
+// is fixed, never fitted per cue. Short is unchanged.
+export const LONG_SUBTITLE_MAX_WIDTH = 680;
+
+export function subtitleTextStyle(format: "long" | "short"): React.CSSProperties {
+  const short = format === "short";
+  return {
+    fontFamily: theme.sans,
+    fontSize: short ? 43 : 32,
+    fontWeight: 800,
+    lineHeight: 1.17,
+    letterSpacing: "-0.006em",
+    color: theme.captionInk,
+    textAlign: "center",
+    textShadow:
+      "1px 0 0 rgba(11,9,7,0.82), -1px 0 0 rgba(11,9,7,0.82), 0 1px 0 rgba(11,9,7,0.82), 0 -1px 0 rgba(11,9,7,0.82), 0 3px 14px rgba(6,4,3,0.8)",
+    ...(short ? {} : { maxWidth: LONG_SUBTITLE_MAX_WIDTH, textWrap: "balance" }),
+  } as React.CSSProperties;
+}
+
 export const Subtitles: React.FC<{ cues: SubtitleCue[]; format: "long" | "short"; duration: number; accent: string }> = ({
   cues,
   format,
@@ -49,21 +72,7 @@ export const Subtitles: React.FC<{ cues: SubtitleCue[]; format: "long" | "short"
           }}
         />
         <span style={{ width: 40, height: 3, background: accent, opacity: 0.9 }} />
-        <span
-          style={{
-            fontFamily: theme.sans,
-            fontSize: short ? 43 : 32,
-            fontWeight: 800,
-            lineHeight: 1.17,
-            letterSpacing: "-0.006em",
-            color: theme.captionInk,
-            textAlign: "center",
-            textShadow:
-              "1px 0 0 rgba(11,9,7,0.82), -1px 0 0 rgba(11,9,7,0.82), 0 1px 0 rgba(11,9,7,0.82), 0 -1px 0 rgba(11,9,7,0.82), 0 3px 14px rgba(6,4,3,0.8)",
-          }}
-        >
-          {cue.text}
-        </span>
+        <span style={subtitleTextStyle(format)}>{cue.text}</span>
       </div>
     </div>
   );

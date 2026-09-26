@@ -1,5 +1,13 @@
 // Small text helpers shared by narration, scripts and subtitle building.
 
+// Spoken narration and subtitles use the plain hyphen only. Every typographic dash
+// variant (hyphen, non-breaking hyphen, figure dash, en dash, em dash, horizontal
+// bar, minus sign) becomes "-"; spacing is kept, so word counts never change.
+const TYPOGRAPHIC_DASH = /[‐‑‒–—―−]/g;
+export function plainDashes(text: string): string {
+  return text.replace(TYPOGRAPHIC_DASH, "-");
+}
+
 export function splitSentences(text: string): string[] {
   return text
     .replace(/\s+/g, " ")

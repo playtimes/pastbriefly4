@@ -8,6 +8,15 @@ export type Motion = "hold" | "push" | "pan-left" | "pan-right";
 // push (medium), or a stronger crop toward one region of the image (detail-*).
 export type Framing = "wide" | "medium" | "detail-left" | "detail-center" | "detail-right";
 
+// An optional explanatory treatment that answers "what am I meant to notice?",
+// derived locally from the stored plan (see clarityFor), never asked of a model:
+//  - "focus": a detail presentation with a real focus gets a slight push toward
+//    its framing origin and one soft spotlight on that region.
+//  - "map-focus": a map / route graphic opens on the whole map, pushes gently
+//    toward its framing origin, then settles.
+// Absent means the normal restrained hold. It never changes timing or the asset.
+export type Clarity = "focus" | "map-focus";
+
 export interface Caption {
   kicker?: string;
   text: string;
@@ -26,6 +35,7 @@ export interface Shot {
   truth: Truth;
   motion?: Motion;
   framing?: Framing;
+  clarity?: Clarity;
   caption?: Caption;
   source?: string;
 }
