@@ -99,8 +99,9 @@ export interface Job {
   preview: VisualPreview | null; // present once the visual direction is ready
   review?: StoryReview | null; // present only while awaiting the text review gate
   // Real per-unit progress for the current step, when it has a meaningful count
-  // (scripts/narration/archive/stills/build). Absent for research/finishing.
-  progress?: { current: number; total: number };
+  // (scripts/narration/archive/stills/build), or a plain percentage while rendering
+  // (percent: true, current of 100). Absent for research/finishing.
+  progress?: { current: number; total: number; percent?: boolean };
   createdAt: string;
   updatedAt: string;
 }

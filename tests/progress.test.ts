@@ -77,9 +77,15 @@ describe("rendering step", () => {
     expect(STEP_LABELS.finishing).toBe("Finishing");
   });
 
-  test("build reports motion progress only; rendering keeps the plain spinner", () => {
+  test("build reports motion progress only; rendering keeps the plain spinner until it reports", () => {
     const scratch = { longShots: [shot({ wantsMotion: true, motionPath: "m.mp4" }), shot({ wantsMotion: true })], shortShots: [] };
     expect(at("build", scratch)).toEqual({ current: 1, total: 2 });
     expect(at("rendering", scratch)).toBeNull();
+  });
+
+  test("rendering reports a plain percentage once the renderer reports progress", () => {
+    expect(at("rendering", { renderPercent: 0 })).toEqual({ current: 0, total: 100, percent: true });
+    expect(at("rendering", { renderPercent: 42 })).toEqual({ current: 42, total: 100, percent: true });
+    expect(at("finishing", { renderPercent: 42 })).toBeNull();
   });
 });

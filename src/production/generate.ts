@@ -12,6 +12,7 @@ import { recordNarration, type Narration } from "./narration.ts";
 import {
   planVisuals,
   acquireStill,
+  seedArchiveLedger,
   ensureMaster,
   acquireMotion,
   buildPreview,
@@ -39,6 +40,7 @@ interface Scratch {
   coverageRejected?: RejectedCandidate[]; // Coverage candidates discarded by validation (film, raw index, reason)
   coverageRepaired?: RepairedCandidate[]; // either/or candidates sent to the one Coverage repair, and whether each was recovered
   spent?: number;
+  renderPercent?: number; // whole-percent render progress across both films, only while rendering
 }
 
 // Preflight only: refuse to START a paid provider call that would push tracked
@@ -188,6 +190,9 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
     const master = scratch.masterRef;
 
+    // Archive files already bound to owner assets (a resume) seed the duplicate
+    // check, so no two distinct assets can end up with the same archive bytes.
+    const ledger = seedArchiveLedger(story, films(scratch));
     step(jobId, "archive", "Finding historical material", scratch);
     for (const [kind, shots] of films(scratch)) {
       for (const shot of shots) {
@@ -195,7 +200,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
           // Preflight the possible reconstruction fallback so a failed archive
           // search can never push spend past the cap; charge only if it generated.
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master);
+          const result = await acquireStill(story, kind, shot, master, ledger);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -208,7 +213,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
         // Only the owning ("new") slot acquires an asset; its reuses share that still below.
         if (shot.edit === "new" && !shot.path) {
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master);
+          const result = await acquireStill(story, kind, shot, master, ledger);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -243,13 +248,21 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
 
     // 7. Render both films
+    scratch.renderPercent = 0;
     step(jobId, "rendering", "Rendering the films", scratch);
     const longPlan = buildRenderPlan("long", story, scratch.longShots!, narration.long, accent);
     const shortPlan = buildRenderPlan("short", story, scratch.shortShots!, narration.short, accent);
     await renderFilms(storyDir(story.slug), [
       { plan: longPlan, compositionId: "LongVideo", outPath: inStory(story.slug, "renders/long.mp4") },
       { plan: shortPlan, compositionId: "ShortVideo", outPath: inStory(story.slug, "renders/short.mp4") },
-    ]);
+    ], (fraction) => {
+      // Persist only whole-percent changes, so the poll sees progress without a write per frame.
+      const pct = Math.min(100, Math.floor(fraction * 100));
+      if (pct === scratch.renderPercent) return;
+      scratch.renderPercent = pct;
+      updateJob(jobId, { scratch });
+    });
+    delete scratch.renderPercent;
 
     // 8. Finish: probe + register
     step(jobId, "finishing", "Finishing", scratch);
@@ -294,7 +307,7 @@ export function newJobId(): string {
 // scratch. Returns null for steps without a meaningful count (research, finishing)
 // so the UI keeps the plain spinner. The pipeline persists scratch after each unit,
 // so the existing poll reflects this without any extra writes.
-export function jobProgress(job: { step: JobStep; scratch: Record<string, any> }): { current: number; total: number } | null {
+export function jobProgress(job: { step: JobStep; scratch: Record<string, any> }): { current: number; total: number; percent?: boolean } | null {
   const s = (job.scratch ?? {}) as Scratch;
   // Progress counts the assets being made: a reuse shares its owner's still.
   const shots = [...(s.longShots ?? []), ...(s.shortShots ?? [])].filter((sh) => sh.edit !== "reuse");
@@ -313,6 +326,9 @@ export function jobProgress(job: { step: JobStep; scratch: Record<string, any> }
     }
     case "stills": {
       return shots.length ? { current: shots.filter((sh) => sh.path).length, total: shots.length } : null;
+    }
+    case "rendering": {
+      return typeof s.renderPercent === "number" ? { current: s.renderPercent, total: 100, percent: true } : null;
     }
     case "build": {
       const motion = shots.filter((sh) => sh.wantsMotion);

@@ -17,11 +17,17 @@ export interface FilmJob {
 
 // Render one or more films that share a story's asset folder. Bundles once. Each
 // film's audio is then mastered in place to upload loudness (video copied).
-export async function renderFilms(publicDir: string, jobs: FilmJob[]): Promise<void> {
+// onProgress reports 0-1 across ALL films, weighted by each film's frame count,
+// so a four-minute long film counts for more than a one-minute Short.
+export async function renderFilms(publicDir: string, jobs: FilmJob[], onProgress?: (fraction: number) => void): Promise<void> {
   await ensureBrowser();
   const serveUrl = await bundle({ entryPoint: ENTRY, publicDir });
-  for (const job of jobs) {
-    const composition = await selectComposition({ serveUrl, id: job.compositionId, inputProps: job.plan });
+  const compositions = [];
+  for (const job of jobs) compositions.push(await selectComposition({ serveUrl, id: job.compositionId, inputProps: job.plan }));
+  const total = compositions.reduce((n, c) => n + c.durationInFrames, 0) || 1;
+  let before = 0;
+  for (const [i, job] of jobs.entries()) {
+    const composition = compositions[i];
     await renderMedia({
       composition,
       serveUrl,
@@ -29,8 +35,10 @@ export async function renderFilms(publicDir: string, jobs: FilmJob[]): Promise<v
       audioCodec: "aac",
       outputLocation: job.outPath,
       inputProps: job.plan,
+      onProgress: ({ progress }) => onProgress?.((before + progress * composition.durationInFrames) / total),
     });
     masterAudio(job.outPath);
+    before += composition.durationInFrames;
   }
 }
 

@@ -198,8 +198,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const story = getStory(id);
     if (!story) return reply.code(404).send({ error: "Story not found" });
 
+    // A story with a production is durable work: Generate always saves it to the
+    // Stories library, whether it starts a job or returns the active one.
     const existing = activeJobForStory(story.id);
-    if (existing) return { job: toPublic(existing), duplicate: true }; // one job per story
+    if (existing) {
+      setStorySaved(story.id, true);
+      return { job: toPublic(existing), duplicate: true }; // one job per story
+    }
 
     const parsed = generate.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "approvedMax (a positive number) is required." });
@@ -210,6 +215,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (approvedMax + 1e-9 < estimate.total) return reply.code(400).send({ error: `Approved max $${approvedMax} is below the estimate $${estimate.total}.` });
 
     const job = createJob({ id: newJobId(), storyId: story.id, mock: config.mode === "mock", estimatedCost: estimate.total, approvedMax });
+    setStorySaved(story.id, true);
     enqueueJob(job.id);
     return { job: toPublic(job), duplicate: false };
   });

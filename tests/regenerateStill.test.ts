@@ -239,19 +239,26 @@ describe("Regenerate still button", () => {
   test("appears only on generated owner frames, and only with a handler", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { PreviewFrames } = await import("../src/app/previewFrames.tsx");
+    const { SlotInspector } = await import("../src/app/visualReview/Inspector.tsx");
+    const { buildFilm } = await import("../src/app/visualReview/model.ts");
     const { buildPreview } = await import("../src/production/visuals.ts");
     const { job } = seed();
     const s = getJob(job.id)!.scratch;
-    const { frames } = buildPreview({ slug: "x" } as Story, s.longShots, s.shortShots);
+    const preview = buildPreview({ slug: "x" } as Story, s.longShots, s.shortShots);
+    const idle = { running: null, failed: null, done: null };
+    const inspect = (film: "long" | "short", index: number, regen: any = idle, onRegenerate: any = () => {}) =>
+      renderToStaticMarkup(React.createElement(SlotInspector, { fr: buildFilm(preview, film), index, dispatch: () => {}, onRegenerate, regen }));
+    const offered = (film: "long" | "short") => buildFilm(preview, film).frames.map((_, i) => inspect(film, i).includes("Regenerate still"));
 
-    const count = (html: string, text: string) => html.split(text).length - 1;
-    const withButton = renderToStaticMarkup(React.createElement(PreviewFrames, { frames, onRegenerate: () => {} }));
     // Long owners 0 (reconstruction) and 3 (graphic), Short owner 0; not archive 1 or reuses 2 and 4.
-    expect(count(withButton, "Regenerate still")).toBe(3);
-    const busy = renderToStaticMarkup(React.createElement(PreviewFrames, { frames, onRegenerate: () => {}, regenerating: "long-3" }));
-    expect(count(busy, "Regenerating…")).toBe(1);
-    expect(count(busy, "disabled")).toBe(3);
-    expect(renderToStaticMarkup(React.createElement(PreviewFrames, { frames }))).not.toContain("Regenerate still");
+    expect(offered("long")).toEqual([true, false, false, true, false]);
+    expect(offered("short")).toEqual([true]);
+    expect(inspect("long", 2)).toContain("View original asset");
+    expect(inspect("long", 1)).toContain("not regenerated");
+    const busy = inspect("long", 3, { ...idle, running: "long-3" });
+    expect(busy).toContain("Regenerating…");
+    expect(busy).toMatch(/<button[^>]*disabled[^>]*>.*Regenerating…/);
+    expect(inspect("long", 0, { ...idle, running: "long-3" })).toMatch(/<button[^>]*disabled[^>]*>.*Regenerate still/);
+    expect(inspect("long", 0, idle, null)).not.toContain("Regenerate still");
   });
 });

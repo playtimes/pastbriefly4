@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
-import { PreviewFrames } from "../previewFrames.tsx";
+import { VisualReview } from "../visualReview/VisualReview.tsx";
+import { regenKey } from "../visualReview/model.ts";
 import { STEP_ORDER, STEP_LABELS, type Job, type PreviewFrame } from "../../types.ts";
 
 export function Creating({ slug }: { slug: string }): React.ReactElement {
@@ -14,7 +15,9 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [retrying, setRetrying] = useState(false);
   const [regenerating, setRegenerating] = useState<string | null>(null);
   const [imageVersion, setImageVersion] = useState(0);
-  const [regenError, setRegenError] = useState("");
+  const [regenFailed, setRegenFailed] = useState<{ key: string; message: string } | null>(null);
+  const [regenDone, setRegenDone] = useState<string | null>(null);
+  const [storyTitle, setStoryTitle] = useState("");
   const [maxSpend, setMaxSpend] = useState(0);
   const jobId = useRef<string | null>(null);
 
@@ -28,6 +31,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
       try {
         if (!jobId.current) {
           const detail = await api.story(slug);
+          setStoryTitle(detail.story.title);
           if (detail.activeJob) jobId.current = detail.activeJob.id;
           else if (detail.videos.length >= 2) return navigate(`/story/${slug}/watch`);
           else return navigate(`/story/${slug}`);
@@ -92,16 +96,20 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
 
   // Regenerate one owner still in place. The job stays at the preview gate; the
   // returned preview replaces the old one and the version bump reloads the images.
+  // The review keeps its film, mode and slot: only the job and the images change.
   async function regenerate(f: PreviewFrame): Promise<void> {
     if (!jobId.current || typeof f.slot !== "number") return;
-    setRegenerating(`${f.kind}-${f.slot}`);
-    setRegenError("");
+    const key = regenKey(f);
+    setRegenerating(key);
+    setRegenFailed(null);
+    setRegenDone(null);
     try {
       const { job } = await api.regenerateStill(jobId.current, f.kind, f.slot);
       setJob(job);
       setImageVersion(Date.now());
+      setRegenDone(key);
     } catch (e: any) {
-      setRegenError(e.message); // the preview is unchanged; the old still stays
+      setRegenFailed({ key, message: e.message }); // the preview is unchanged; the old still stays
     } finally {
       setRegenerating(null);
     }
@@ -197,30 +205,19 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   }
 
   if (job.state === "awaiting_preview" && job.preview) {
-    const p = job.preview;
     return (
-      <div className="flex flex-col gap-6">
-        <div>
-          <p className="kicker mb-1">One quick look</p>
-          <h1 className="text-3xl">Visual direction</h1>
-          <p className="text-muted mt-2">
-            {p.moments} slots
-            {p.uniqueAssets !== undefined ? ` · ${p.uniqueAssets} unique assets · ${p.reusedPresentations ?? 0} reused presentations` : ""} · {p.archive} archive ·{" "}
-            {p.reconstruction} reconstruction · {p.graphic} graphic · {p.motionSelected} selected for motion
-            {p.remainingMotionCost > 0 ? ` · est. remaining motion $${p.remainingMotionCost.toFixed(2)}` : ""}
-          </p>
-        </div>
-        {regenError && <p className="text-sm text-red-700">Could not regenerate the still: {regenError}</p>}
-        <PreviewFrames frames={p.frames} onRegenerate={regenerate} regenerating={regenerating} version={imageVersion} />
-        <div className="flex items-center gap-3">
-          <button onClick={cont} disabled={continuing || rebuilding || regenerating !== null} className="btn btn-primary text-lg">
-            {continuing ? "Continuing…" : "Continue"}
-          </button>
-          <button onClick={rebuild} disabled={continuing || rebuilding || regenerating !== null} className="btn btn-ghost text-lg">
-            {rebuilding ? "Rebuilding…" : "Rebuild visuals"}
-          </button>
-        </div>
-      </div>
+      <VisualReview
+        preview={job.preview}
+        storyTitle={storyTitle}
+        version={imageVersion}
+        onBack={() => navigate(`/story/${slug}`)}
+        onContinue={cont}
+        onRebuild={rebuild}
+        continuing={continuing}
+        rebuilding={rebuilding}
+        onRegenerate={regenerate}
+        regen={{ running: regenerating, failed: regenFailed, done: regenDone }}
+      />
     );
   }
 
@@ -248,7 +245,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
                 {active && !prog && <Spinner />}
                 {prog && (
                   <span className="ml-auto text-[13px] tabular-nums text-muted">
-                    {prog.current} / {prog.total} · {pct}%
+                    {prog.percent ? `${pct}%` : `${prog.current} / ${prog.total} · ${pct}%`}
                   </span>
                 )}
               </div>

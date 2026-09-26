@@ -935,10 +935,10 @@ describe("reuse: each used asset is acquired once", () => {
     expect(p).toMatchObject({ moments: plans.long.length + plans.short.length, uniqueAssets: 3, reusedPresentations: plans.long.length + plans.short.length - 3 });
     expect(p).toMatchObject({ reconstruction: 2, graphic: 1, archive: 0, motionSelected: 1, remainingMotionCost: 0 });
     expect(p.motionCandidates).toBeGreaterThanOrEqual(1);
-    const ui = readFileSync(path.join(__dirname, "..", "src", "app", "previewFrames.tsx"), "utf8");
-    expect(ui).toMatch(/asset: \{f\.asset\}/);
-    expect(ui).toMatch(/presentation: \{f\.presentation\}/);
-    expect(ui).toMatch(/motion selected/);
+    const ui = readFileSync(path.join(__dirname, "..", "src", "app", "visualReview", "Inspector.tsx"), "utf8");
+    expect(ui).toMatch(/REUSE OF \{asset\.id\}/);
+    expect(ui).toMatch(/framingLabel\(f\)/);
+    expect(ui).toMatch(/Selected · animated after approval/);
     expect(ui).not.toMatch(/reframe of slot|reframeOf/);
   });
 });

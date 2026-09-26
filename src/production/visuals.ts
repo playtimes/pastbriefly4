@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { config, ROOT } from "../server/config.ts";
 import type { Story, Category, VisualPreview, PreviewFrame } from "../types.ts";
@@ -1755,6 +1756,69 @@ function identifierPrefix(letters: string): boolean {
 
 const STOPWORDS = new Set(["the", "and", "that", "with", "from", "into", "were", "when", "then", "their", "them", "this", "which", "would", "could", "after", "before", "about", "over", "between", "against"]);
 
+// Words that name an era, a nationality or a kind of thing rather than THE thing a
+// shot is about. They can appear in an anchor-less query but never anchor one: a
+// 1942 occupation banknote mentions "Japanese", "Dutch East Indies" and "1942" just
+// as readily as a photo of the ship does.
+const GENERIC_ANCHOR = new Set([
+  "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+  "wwi", "wwii", "ww1", "ww2", "world", "war", "wars", "ship", "ships", "vessel", "vessels", "boat", "naval", "navy", "port", "harbor", "harbour",
+  "museum", "historical", "history", "historic", "photo", "photograph", "photographs", "image", "picture",
+  "dutch", "japanese", "east", "west", "north", "south", "indies", "island", "islands",
+  "american", "british", "german", "soviet", "russian", "french", "italian", "chinese", "swedish", "australian",
+  "hms", "uss", "hnlms", "sms",
+  "den", "der", "van", "von", "del", "della", "les", "las", "los",
+  ...NUMBER_PROSE, ...STOPWORDS,
+]);
+
+// Strong, deterministic anchors for one archive shot, taken from its own
+// archiveQuery: compact identifiers ("U 137", "K-19") and capitalised proper
+// nouns ("Crijnssen", "Surabaya", "Helder"), minus generic era / nationality /
+// category words. An empty list means nothing distinctive could be derived, and
+// the story-level relevance check alone applies (the previous behaviour).
+export function archiveAnchors(query: string | undefined): string[] {
+  const q = query ?? "";
+  const idents = (q.match(/\b[A-Za-z]{1,4}[-\s]?\d{1,4}\b/g) ?? []).filter((m) => {
+    const letters = m.match(/^[A-Za-z]+/)![0];
+    return identifierPrefix(letters) && !GENERIC_ANCHOR.has(letters.toLowerCase());
+  });
+  const proper = q.match(/\b[A-Z][A-Za-z]{2,}\b/g) ?? [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of [...idents, ...proper]) {
+    const key = norm(raw);
+    if (key.length < 3 || seen.has(key) || GENERIC_ANCHOR.has(raw.toLowerCase())) continue;
+    seen.add(key);
+    out.push(raw.trim());
+  }
+  return out;
+}
+
+// Archive bytes already accepted, by sha256, mapped to the asset that owns them
+// ("long:L05"). Two distinct assets may never share the same archive file; the
+// reuse slots of one asset never acquire, so they cannot collide with it.
+export type ArchiveLedger = Map<string, string>;
+
+export function archiveOwner(kind: "long" | "short", shot: PlannedShot): string {
+  return `${kind}:${shot.assetId ?? shot.index}`;
+}
+
+// Seed the ledger from archive files already bound to owner assets in the stored
+// plans, so a resumed acquisition still refuses a byte-identical duplicate.
+export function seedArchiveLedger(story: Story, films: Array<["long" | "short", PlannedShot[]]>): ArchiveLedger {
+  const ledger: ArchiveLedger = new Map();
+  for (const [kind, shots] of films) {
+    for (const shot of shots) {
+      if (shot.edit !== "new" || shot.truth !== "archive" || !shot.path?.startsWith("archive/")) continue;
+      const abs = inStory(story.slug, shot.path);
+      if (!existsSync(abs)) continue;
+      const hash = createHash("sha256").update(readFileSync(abs)).digest("hex");
+      if (!ledger.has(hash)) ledger.set(hash, archiveOwner(kind, shot));
+    }
+  }
+  return ledger;
+}
+
 // Resolve one shot's still. Live: OpenAI image (archive tried first for archive
 // shots). Mock: a labelled placeholder. Falls back to reconstruction if archive
 // is unavailable so a reconstruction never masquerades as archive.
@@ -1765,7 +1829,7 @@ const STOPWORDS = new Set(["the", "and", "that", "with", "from", "into", "were",
 // reused a file already on disk, and "mock" wrote a local placeholder.
 export type StillResult = "generated" | "archive" | "existing" | "mock";
 
-export async function acquireStill(story: Story, kind: "long" | "short", shot: PlannedShot, masterRef: string | null): Promise<StillResult> {
+export async function acquireStill(story: Story, kind: "long" | "short", shot: PlannedShot, masterRef: string | null, ledger: ArchiveLedger = new Map()): Promise<StillResult> {
   // A reuse shows its asset owner's still (resolveReuse); it never acquires media.
   if (shot.edit === "reuse") throw new Error(`${kind} slot ${shot.index} reuses asset ${shot.assetId} and never acquires its own still.`);
   const rel = `images/${kind}-${String(shot.index).padStart(2, "0")}.png`;
@@ -1779,16 +1843,24 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
       // Try the moment-specific query first, then progressively broader ones. A
       // single narrow query (place + year + subject words) often returns nothing,
       // which is why every archive shot was falling back to reconstruction.
+      // Every candidate, whichever query found it, must also match this shot's own
+      // anchors and must not be bytes another asset already owns.
       const relevance = relevanceTerms(story);
+      const owner = archiveOwner(kind, shot);
+      const opts = {
+        anchors: archiveAnchors(shot.archiveQuery),
+        isDuplicate: (hash: string) => ledger.has(hash) && ledger.get(hash) !== owner,
+      };
       let got = null;
       for (const q of archiveQueries(story, shot.archiveQuery)) {
-        got = await fetchArchive(q, dest, relevance).catch((e: any) => {
+        got = await fetchArchive(q, dest, relevance, opts).catch((e: any) => {
           console.warn(`[archive] query "${q}" errored: ${e?.message || e}`);
           return null;
         });
         if (got) break;
       }
       if (got) {
+        if (got.sha256) ledger.set(got.sha256, owner);
         shot.path = archiveRel;
         shot.mediaType = "image";
         shot.source = got.credit;
@@ -1798,6 +1870,7 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
       console.warn(`[archive] no usable material for ${kind} shot ${shot.index}; using reconstruction`);
     }
     shot.truth = "reconstruction"; // no usable archive - do not fake it
+    delete shot.source; // and never carry an earlier archive credit onto it
   }
 
   if (existsSync(abs)) {

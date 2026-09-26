@@ -11,14 +11,21 @@ process.env.PROVIDER_MODE = "mock";
 process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
-const h = vi.hoisted(() => ({ jobId: "", stepAtRender: [] as string[], messageAtRender: [] as string[] }));
+const h = vi.hoisted(() => ({ jobId: "", stepAtRender: [] as string[], messageAtRender: [] as string[], progressSeen: [] as unknown[] }));
 
 vi.mock("../src/render/renderVideo.ts", () => ({
-  renderFilms: vi.fn(async () => {
+  renderFilms: vi.fn(async (_dir: string, _films: unknown[], onProgress?: (fraction: number) => void) => {
     const { getJob } = await import("../src/server/store.ts");
+    const { jobProgress } = await import("../src/production/generate.ts");
     const job = getJob(h.jobId)!;
     h.stepAtRender.push(job.step);
     h.messageAtRender.push(job.message);
+    h.progressSeen.push(jobProgress(getJob(h.jobId)!));
+    // Renderer ticks: fractions across both films; only whole-percent changes matter.
+    for (const f of [0.004, 0.25, 0.251, 0.8, 1]) {
+      onProgress?.(f);
+      h.progressSeen.push(jobProgress(getJob(h.jobId)!));
+    }
   }),
   probeVideo: vi.fn(() => ({ width: 1920, height: 1080, durationSec: 1, fps: 30, hasAudio: true })),
 }));
@@ -54,5 +61,8 @@ describe("runJob rendering step", () => {
     const done = getJob(job.id)!;
     expect(done.state).toBe("done");
     expect(done.step).toBe("finishing");
+    // Render progress is a plain percentage while rendering, then cleared.
+    expect(h.progressSeen).toEqual([0, 0, 25, 25, 80, 100].map((current) => ({ current, total: 100, percent: true })));
+    expect((done.scratch as any).renderPercent).toBeUndefined();
   });
 });

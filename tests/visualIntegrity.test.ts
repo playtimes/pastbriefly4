@@ -50,7 +50,8 @@ const { createJob, getJob, updateJob, upsertStory } = await import("../src/serve
 const { inStory, ensureStoryDirs } = await import("../src/production/paths.ts");
 const { buildPreview } = await import("../src/production/visuals.ts");
 const { PRICING, round } = await import("../src/server/pricing.ts");
-const { PreviewFrames } = await import("../src/app/previewFrames.tsx");
+const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
+const { buildFilm, initialReview, reviewReducer } = await import("../src/app/visualReview/model.ts");
 
 let n = 0;
 function makeStory(): Story {
@@ -240,17 +241,21 @@ describe("visual preview shows both films", () => {
 
   test("renders a landscape Long section and a portrait Short section", () => {
     const p = buildPreview(story, longShots, shortShots);
-    const html = renderToStaticMarkup(React.createElement(PreviewFrames, { frames: p.frames }));
-    const longSec = html.slice(html.indexOf('data-film="long"'), html.indexOf('data-film="short"'));
-    const shortSec = html.slice(html.indexOf('data-film="short"'));
-    expect(html.indexOf('data-film="long"')).toBeGreaterThanOrEqual(0);
-    expect(html.indexOf('data-film="short"')).toBeGreaterThan(html.indexOf('data-film="long"'));
-    expect(longSec).toContain(">Long<");
-    expect(longSec.match(/aspect-video/g)?.length).toBe(2);
-    expect(longSec).toContain('title="motion"');
-    expect(shortSec).toContain(">Short<");
-    expect(shortSec).toContain("aspect-[9/16]");
-    expect(shortSec).not.toContain("aspect-video");
-    expect(shortSec).toContain("graphic");
+    const props = { preview: p, version: 0, onBack() {}, onContinue() {}, onRebuild() {}, continuing: false, rebuilding: false, regen: { running: null, failed: null, done: null } };
+    const films = { long: buildFilm(p, "long"), short: buildFilm(p, "short") };
+    const longHtml = renderToStaticMarkup(React.createElement(VisualReview, props));
+    const shortState = reviewReducer(initialReview(p), { type: "film", film: "short" });
+    const shortHtml = renderToStaticMarkup(React.createElement(ReviewView, { ...props, films, state: shortState, dispatch() {} }));
+    // One film at a time: Long by default as a 16:9 stage, Short as a 9:16 stage.
+    expect(longHtml).toContain('data-review-film="long"');
+    expect(longHtml).toContain('data-stage="long"');
+    expect(longHtml).toMatch(/data-stage="long"[^>]*aspect-video/);
+    expect(longHtml.match(/data-strip="/g)?.length).toBe(2); // the Long slots only
+    expect(longHtml).toContain("data-motion-dot");
+    expect(shortHtml).toContain('data-review-film="short"');
+    expect(shortHtml).toMatch(/data-stage="short"[^>]*aspect-\[9\/16\]/);
+    expect(shortHtml).not.toContain('data-stage="long"');
+    expect(shortHtml.match(/data-strip="/g)?.length).toBe(1);
+    expect(shortHtml).toContain("Graphic");
   });
 });
