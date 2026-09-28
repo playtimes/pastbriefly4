@@ -81,6 +81,7 @@ import {
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import type { Scripts } from "./scripts.ts";
 import { renderFilms, probeVideo } from "../render/renderVideo.ts";
+import { validateFinalVideo } from "../render/finalCheck.ts";
 
 interface Scratch {
   research?: ResearchPackage;
@@ -337,11 +338,16 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     });
     delete scratch.renderPercent;
 
-    // 8. Finish: probe + register
+    // 8. Finish: probe both films and check each against the output contract, and
+    // only when BOTH pass register them. A broken file fails the job with nothing
+    // registered; the renders stay on disk for diagnosis.
     step(jobId, "finishing", "Finishing", scratch);
-    for (const kind of ["long", "short"] as const) {
+    const finals = ([["long", longPlan], ["short", shortPlan]] as const).map(([kind, plan]) => {
       const rel = `renders/${kind}.mp4`;
-      const p = probeVideo(inStory(story.slug, rel));
+      return { kind, plan, rel, p: probeVideo(inStory(story.slug, rel)) };
+    });
+    for (const f of finals) validateFinalVideo(f.plan, f.p);
+    for (const { kind, rel, p } of finals) {
       const video: Video = {
         id: `${job.id}-${kind}`,
         storyId: story.id,

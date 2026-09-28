@@ -10,6 +10,7 @@ process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
 const { renderFilms, probeVideo } = await import("../src/render/renderVideo.ts");
+const { validateFinalVideo } = await import("../src/render/finalCheck.ts");
 const { writeSilentWav, writePlaceholderStill } = await import("../src/production/mockAssets.ts");
 const { config } = await import("../src/server/config.ts");
 import type { RenderPlan } from "../src/render/types.ts";
@@ -82,6 +83,7 @@ describe("Remotion renderer", () => {
     expect([p.width, p.height]).toEqual([1920, 1080]);
     expect(p.hasAudio).toBe(true);
     expect(p.durationSec).toBeGreaterThan(0.5);
+    validateFinalVideo(plan("long"), p); // the real file meets the final output contract
   });
 
   test("Short renders 1080x1920 with audio and decodes", () => {
@@ -89,6 +91,7 @@ describe("Remotion renderer", () => {
     expect([p.width, p.height]).toEqual([1080, 1920]);
     expect(p.hasAudio).toBe(true);
     expect(p.durationSec).toBeGreaterThan(0.5);
+    validateFinalVideo(plan("short"), p); // the real file meets the final output contract
   });
 
   test("safety net: a clip shorter than its shot never loops, jumps back or goes black", () => {

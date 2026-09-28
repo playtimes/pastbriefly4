@@ -72,13 +72,10 @@ quality across multiple fresh stories.
     12.5. **Autopilot UI simplification** - DONE / CLOSED. The product UI exposes
     human decisions rather than QA machinery.
 
-    12.6. **Pre-Film #4 hardening** - IN PROGRESS.
-    - Done: obsolete acceptance and repo artifacts removed.
-    - Still before Film #4:
-      - add a realistic Autopilot QA budget reserve to the cost approval
-      - a deterministic final-file sanity contract before Ready
-
-    Do not expand this into another engineering phase.
+    12.6. **Pre-Film #4 hardening** - DONE.
+    - repo hygiene / durable roadmap
+    - realistic Autopilot QA budget reserve
+    - deterministic final-file sanity contract
 
 ### Next
 

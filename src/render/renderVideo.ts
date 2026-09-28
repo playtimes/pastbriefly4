@@ -57,15 +57,23 @@ export function probeVideo(file: string): Probe {
     ["-v", "error", "-show_entries", "stream=codec_type,width,height,r_frame_rate,duration", "-show_entries", "format=duration", "-of", "json", file],
     { encoding: "utf8" }
   );
-  const data = JSON.parse(out);
+  return readProbe(out);
+}
+
+// ffprobe's JSON as a Probe. A frame rate ffprobe cannot state (no video stream,
+// a missing or malformed r_frame_rate, a zero denominator, a non-positive result)
+// is NaN, never an assumed 30, so the final file check rejects it.
+export function readProbe(json: string): Probe {
+  const data = JSON.parse(json);
   const video = (data.streams || []).find((s: any) => s.codec_type === "video");
   const hasAudio = (data.streams || []).some((s: any) => s.codec_type === "audio");
-  const [n, d] = String(video?.r_frame_rate || "30/1").split("/").map(Number);
+  const rate = /^\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*$/.exec(String(video?.r_frame_rate ?? ""));
+  const fps = rate ? Number(rate[1]) / Number(rate[2]) : NaN;
   return {
     width: video?.width ?? 0,
     height: video?.height ?? 0,
     durationSec: Number(data.format?.duration ?? video?.duration ?? 0),
-    fps: d ? n / d : 30,
+    fps: Number.isFinite(fps) && fps > 0 ? fps : NaN,
     hasAudio,
   };
 }
