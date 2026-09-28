@@ -69,14 +69,6 @@ describe("jobProgress derivation", () => {
 });
 
 describe("rendering step", () => {
-  test("rendering sits between motion and finishing in the Creating steps", async () => {
-    const { STEP_ORDER, STEP_LABELS } = await import("../src/types.ts");
-    expect(STEP_ORDER).toEqual(["research", "scripts", "narration", "archive", "stills", "build", "rendering", "finishing"]);
-    expect(STEP_LABELS.build).toBe("Adding motion");
-    expect(STEP_LABELS.rendering).toBe("Rendering the films");
-    expect(STEP_LABELS.finishing).toBe("Finishing");
-  });
-
   test("build reports motion progress only; rendering keeps the plain spinner until it reports", () => {
     const scratch = { longShots: [shot({ wantsMotion: true, motionPath: "m.mp4" }), shot({ wantsMotion: true })], shortShots: [] };
     expect(at("build", scratch)).toEqual({ current: 1, total: 2 });

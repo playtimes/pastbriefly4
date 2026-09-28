@@ -19,31 +19,6 @@ export function Still({ frame, version, whole = false, className = "" }: { frame
   );
 }
 
-export const TRUTH_LABEL: Record<PreviewFrame["truth"], string> = { archive: "Archive", reconstruction: "Reconstruction", graphic: "Graphic" };
-export const TRUTH_LETTER: Record<PreviewFrame["truth"], string> = { archive: "A", reconstruction: "R", graphic: "G" };
-
-const FRAMING_LABEL: Record<string, string> = {
-  wide: "Wide",
-  medium: "Medium",
-  "detail-left": "Detail left",
-  "detail-center": "Detail center",
-  "detail-right": "Detail right",
-};
-
-export function framingLabel(f: PreviewFrame): string {
-  const framing = FRAMING_LABEL[f.framing ?? "wide"] ?? f.framing ?? "Wide";
-  return f.presentation && f.presentation !== "base" ? framing : `${framing} · base view`;
-}
-
-export function LinkIcon({ size = 11, color = "currentColor" }: { size?: number; color?: string }): React.ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
-      <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
-    </svg>
-  );
-}
-
 export function RefreshIcon({ size = 15 }: { size?: number }): React.ReactElement {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

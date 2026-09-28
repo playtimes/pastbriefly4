@@ -185,7 +185,7 @@ describe("Visual Autopilot: the clean path", () => {
     expect(vi.mocked(enqueueJob).mock.calls).toEqual([[auto.job.id], [manual.job.id]]);
   });
 
-  test("the page shows the passed line while production continues", async () => {
+  test("the page shows Checking films done while production continues", async () => {
     const { job } = await atGate();
     await g.autoVisualQaForJob(job.id, enqueueJob);
     updateJob(job.id, { state: "running", step: "build" }); // the worker picked it up
@@ -193,8 +193,10 @@ describe("Visual Autopilot: the clean path", () => {
     expect(pub.visualAutopilot).toEqual({ status: "passed" });
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { CreatingProgress } = await import("../src/app/screens/Creating.tsx");
-    expect(renderToStaticMarkup(React.createElement(CreatingProgress, { job: pub }))).toContain("Visual QA passed. Continuing production…");
+    const { ProductionProgress } = await import("../src/app/screens/Production.tsx");
+    const html = renderToStaticMarkup(React.createElement(ProductionProgress, { job: pub }));
+    expect(html).toMatch(/✓<\/span>Checking films<\/li>/);
+    expect(html).toContain("Rendering…</h1>");
   });
 
   test("mock mode runs the whole chain with no provider or media call, and approves", async () => {
@@ -243,22 +245,6 @@ describe("Director QA clean describes the final saved film", () => {
     expect(result({ verify: { summary: "", humanReview: [], patterns: [], error: "OpenAI responses 500" } }).clean).toBe(false);
     expect(result({ verify: null }).clean).toBe(false);
   });
-  test("the panel still says no repair was needed only when nothing changed", async () => {
-    const React = (await import("react")).default;
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    const { DirectorBoardView } = await import("../src/app/visualReview/DirectorBoard.tsx");
-    const { buildDirectorBoard } = await import("../src/app/visualReview/board.ts");
-    const { buildFilm } = await import("../src/app/visualReview/model.ts");
-    const preview = v.buildPreview({ slug: "x" } as any, structuredClone(planned.plans.long), []);
-    const html = (run: any) =>
-      renderToStaticMarkup(React.createElement(DirectorBoardView, { board: buildDirectorBoard(buildFilm(preview, "long")), storyTitle: "T", version: 0, dispatch: vi.fn(), filter: "all", onFilter: vi.fn(), copy: { kind: "idle" }, onCopy: vi.fn(), qa: { run: { status: "complete", ...run }, onRun: vi.fn(), onSlot: vi.fn() } } as any)).replace(/<!-- -->/g, "");
-    const repaired = html(result({ repair: { changed: [4, 5], unresolved: [] } }));
-    expect(repaired).toContain("Automatic Director changes: 2");
-    expect(repaired).toContain("Needs human review: 0");
-    expect(repaired).not.toContain("No automatic sequence repair was needed.");
-    expect(html(result({}))).toContain("No automatic sequence repair was needed.");
-  });
-
   test("8. a failed Director repair, cleanup or coordinated repair: not clean", () => {
     const repairs = [{ slotId: 2, reason: "r", instruction: "i" }];
     expect(dq.directorQaResult({ status: "repairFailed", error: "Invalid edit plan", qa: review({ repairs }), cleanup: cleanNone, coordinated: null, verify: verified } as any).clean).toBe(false);
@@ -441,35 +427,38 @@ describe("Visual Autopilot: safety", () => {
     expect(getJob(job.id)!.spent).toBe(1);
   });
 
-  test("while the Autopilot is reviewing, the page shows its phase instead of the review", async () => {
+  test("while the Autopilot is reviewing, the page shows Checking films instead of the review", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { CreatingProgress } = await import("../src/app/screens/Creating.tsx");
+    const { ProductionProgress } = await import("../src/app/screens/Production.tsx");
     const base = { state: "awaiting_preview", step: "preview", visualAutopilot: { status: "running" } } as any;
-    const long = renderToStaticMarkup(React.createElement(CreatingProgress, { job: { ...base, directorQa: { long: { status: "running", phase: "reviewing" } } } })).replace(/<!-- -->/g, "");
-    expect(long).toContain("Reviewing Long sequence…");
-    expect(long).toContain('aria-label="Visual QA"');
-    const short = renderToStaticMarkup(React.createElement(CreatingProgress, { job: { ...base, directorQa: { long: { status: "complete" }, short: { status: "running", phase: "verifying" } } } })).replace(/<!-- -->/g, "");
-    expect(short).toContain("Reviewing Short sequence…");
-    const assets = renderToStaticMarkup(React.createElement(CreatingProgress, { job: { ...base, assetQa: { status: "running", phase: "review" } } })).replace(/<!-- -->/g, "");
-    expect(assets).toContain("Inspecting visual assets…");
+    const render = (job: any) => renderToStaticMarkup(React.createElement(ProductionProgress, { job })).replace(/<!-- -->/g, "");
+    const long = render({ ...base, directorQa: { long: { status: "running", phase: "reviewing" } } });
+    const short = render({ ...base, directorQa: { long: { status: "complete" }, short: { status: "running", phase: "verifying" } } });
+    const assets = render({ ...base, assetQa: { status: "running", phase: "review" } });
+    for (const html of [long, short, assets]) {
+      expect(html).toContain("Checking films…</h1>");
+      const primary = html.slice(0, html.indexOf("<details"));
+      for (const s of ["Reviewing Long sequence", "Reviewing Short sequence", "Inspecting visual assets", "Director QA", "Approve", "Continue"]) expect(primary).not.toContain(s);
+    }
+    // Which of PB4's own checks is running is never shown, details included.
+    for (const html of [long, short, assets]) expect(html).not.toMatch(/Director QA|Asset QA|reviewing|verifying/);
   });
 
-  test("Visual Review names each film's Director QA state beside the Asset QA result", async () => {
-    const React = (await import("react")).default;
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    const { VisualQaSummary } = await import("../src/app/visualReview/AssetQaNotice.tsx");
-    const html = renderToStaticMarkup(
-      React.createElement(VisualQaSummary, {
-        runs: { long: { status: "complete", humanReview: [{ slotId: 3, reason: "x" }, { slotId: 5, reason: "y" }], clean: false } as any, short: { status: "failed", error: "e" } },
-        dispatch: vi.fn(),
-      }),
-    ).replace(/<!-- -->/g, "");
-    expect(html).toContain("Long Director QA</span> Needs human review: 2");
-    expect(html).toContain("Short Director QA</span> Failed");
-    expect(html.match(/Open board/g)).toHaveLength(2);
-    const failed = renderToStaticMarkup(React.createElement(VisualQaSummary, { pilot: { status: "failed", error: "database is locked" }, dispatch: vi.fn() }));
-    expect(failed).toContain("the automatic approval could not continue: database is locked Continue remains available.");
-    expect(renderToStaticMarkup(React.createElement(VisualQaSummary, { dispatch: vi.fn() }))).toBe("");
+  test("each film's Director QA state and an Autopilot failure become the user's issue rows", async () => {
+    const { visualIssues } = await import("../src/app/visualReview/visualIssues.ts");
+    const { buildFilm } = await import("../src/app/visualReview/model.ts");
+    const empty = { moments: 0, archive: 0, reconstruction: 0, graphic: 0, motionSelected: 0, remainingMotionCost: 0, frames: [] } as any;
+    const films = { long: buildFilm(empty, "long"), short: buildFilm(empty, "short") };
+    const out = visualIssues(
+      {
+        directorQa: { long: { status: "complete", verified: true, humanReview: [{ slotId: 3, reason: "x" }, { slotId: 5, reason: "y" }], unresolvedRepairs: [], requestedRepairs: [], clean: false } as any, short: { status: "failed", error: "e" } },
+        visualAutopilot: { status: "failed", error: "database is locked" },
+      },
+      films,
+    );
+    expect(out.map((i) => i.key)).toEqual(["slot-long-3", "slot-long-5", "check-short", "autopilot"]);
+    expect(JSON.stringify(out)).not.toContain("database is locked"); // the raw error is not product copy
+    expect(out.every((i) => !i.fix || i.fix === "change")).toBe(true); // no action that runs PB4's own checks
   });
 });

@@ -83,9 +83,6 @@ export const api = {
     post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, directorFeedback ? { kind, slot, directorFeedback } : { kind, slot }),
   reviseSequence: (jobId: string, kind: "long" | "short", directorFeedback: string) =>
     post<{ job: Job; revision: SequenceRevisionReport }>(`/api/jobs/${jobId}/revise-sequence`, { kind, directorFeedback }),
-  // Starts Run Director QA for one film on the server; the job's directorQa
-  // then shows its phase and, when it ends, its result.
-  runDirectorQa: (jobId: string, kind: "long" | "short") => post<{ job: Job }>(`/api/jobs/${jobId}/director-qa/${kind}/run`),
   retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
   approveSpend: (jobId: string, approvedMax: number) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-spend`, { approvedMax }),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),

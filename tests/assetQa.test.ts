@@ -507,45 +507,50 @@ describe("Asset QA answers are read strictly", () => {
 
 describe("Asset QA in the page", () => {
   afterEach(() => vi.restoreAllMocks());
-  test("Visual Review lists only unresolved assets with a jump to the asset view; a pass is one quiet line", async () => {
+  test("the unresolved assets reach the user as issue rows, each with its own fix; a pass adds none", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { VisualReview } = await import("../src/app/visualReview/VisualReview.tsx");
+    const { visualIssuesForJob } = await import("../src/app/visualReview/visualIssues.ts");
+    const { VisualException } = await import("../src/app/screens/Production.tsx");
     const { job } = seed();
     const preview = getJob(job.id)!.preview!;
-    const idle = { running: null, failed: null, done: null };
-    const props = (assetQa: any) => ({ preview, version: 0, onBack: vi.fn(), onContinue: vi.fn(), onRebuild: vi.fn(), continuing: false, rebuilding: false, onRegenerate: vi.fn(), regen: idle, assetQa }) as any;
     const issues = [
       { kind: "long", assetId: "L03", truth: "graphic", stage: "verify", reason: "The labels are still unreadable." },
       { kind: "long", assetId: "L01", truth: "archive", stage: "review", reason: "A modern logo is visible." },
     ];
-    const html = plain(renderToStaticMarkup(React.createElement(VisualReview, props({ status: "done", reviewed: 6, regenerated: 1, incomplete: 0, message: "Asset QA needs you for 2 assets.", issues }))));
-    expect(html).toContain("Asset QA needs you");
-    expect(html).toContain("Asset QA needs you for 2 assets.");
-    expect(html).toContain('data-asset-qa="long-L03"');
-    expect(html).toMatch(/L03<\/span><span[^>]*> · Long · Graphic/);
+    const needs = { status: "done", reviewed: 6, regenerated: 1, incomplete: 0, message: "Asset QA needs you for 2 assets.", issues, clean: false } as any;
+    const listed = visualIssuesForJob({ preview, assetQa: needs });
+    expect(listed.map((i) => [i.key, i.fix ?? null])).toEqual([
+      ["asset-long-L03", "regenerate"], // the generated graphic
+      ["asset-long-L01", null], // never the archive still
+    ]);
+    expect(listed[1].note).toBe("This is an archive photograph, used as found. It cannot be regenerated.");
+    const html = plain(
+      renderToStaticMarkup(React.createElement(VisualException, { job: { ...job, state: "awaiting_preview", preview, assetQa: needs }, storyTitle: "T", issues: listed, version: 0, onReview: vi.fn(), onContinue: vi.fn(), continuing: false, busy: false, more: null } as any)),
+    );
+    expect(html).toContain("2 things need your attention");
+    expect(html).toContain('data-visual-issue="asset-long-L03"');
+    expect(html).toMatch(/Long · Slot [0-9]{2}/);
+    expect(html).not.toMatch(/Asset L0|Asset QA|Reconstruction|Graphic/); // no engine vocabulary
     expect(html).toContain("The labels are still unreadable.");
-    expect(html.match(/View asset/g)).toHaveLength(2);
-    expect(html.match(/Regenerate still is available in the asset view/g)).toHaveLength(1); // the graphic, never the archive still
-    expect(html).toContain("Continue"); // the existing tabs and actions stay
-    expect(html).toContain("Director");
-    const passed = plain(renderToStaticMarkup(React.createElement(VisualReview, props({ status: "done", reviewed: 6, regenerated: 1, incomplete: 0, message: "Asset QA passed.", issues: [] }))));
-    expect(passed).toContain("Asset QA passed. 1 still was regenerated and verified.");
-    expect(passed).not.toContain("Asset QA needs you");
-    expect(plain(renderToStaticMarkup(React.createElement(VisualReview, props(undefined))))).not.toContain("Asset QA");
+    expect(html.match(/>Review<\/button>/g)).toHaveLength(2);
+    expect(visualIssuesForJob({ preview, assetQa: { status: "done", reviewed: 6, regenerated: 1, incomplete: 0, message: "Asset QA passed.", issues: [], clean: true } })).toEqual([]);
   });
 
-  test("while it runs the progress screen shows its phases under the finished stills", async () => {
+  test("while it runs the progress screen reads Checking films, with no check phase anywhere", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { CreatingProgress } = await import("../src/app/screens/Creating.tsx");
-    const job = { state: "awaiting_preview", step: "preview", assetQa: { status: "running", phase: "repair", current: 2, total: 3 } } as any;
-    const html = plain(renderToStaticMarkup(React.createElement(CreatingProgress, { job })));
-    expect(html).toContain("Repairing visual asset 2 of 3…");
-    expect(html).toContain('aria-label="Asset QA"');
-    expect(html).toContain("Inspecting visual assets");
-    expect(html).not.toContain("Verifying repaired visuals");
-    const verifying = plain(renderToStaticMarkup(React.createElement(CreatingProgress, { job: { ...job, assetQa: { status: "running", phase: "verify" } } })));
-    expect(verifying).toContain("Verifying repaired visuals…");
+    const { ProductionProgress } = await import("../src/app/screens/Production.tsx");
+    // The finished Stills count is still on the job at the visual gate.
+    const job = { state: "awaiting_preview", step: "stills", progress: { current: 12, total: 12 }, assetQa: { status: "running", phase: "repair", current: 2, total: 3 } } as any;
+    const html = plain(renderToStaticMarkup(React.createElement(ProductionProgress, { job })));
+    expect(html).toContain("Checking films…</h1>");
+    expect(html).toContain('aria-current="step" data-stage-current="checking"');
+    const primary = html.slice(0, html.indexOf("<details"));
+    for (const s of ["Repairing", "Inspecting", "2 of 3", "12 / 12", "%", "Asset QA"]) expect(primary).not.toContain(s);
+    expect(html).not.toMatch(/Asset QA|repair|2 of 3/); // details included
+    expect(html.slice(html.indexOf('aria-label="Production details"'))).toContain("Checking films");
+    const verifying = plain(renderToStaticMarkup(React.createElement(ProductionProgress, { job: { ...job, assetQa: { status: "running", phase: "verify" } } })));
+    expect(verifying).toContain("Checking films…</h1>");
   });
 });

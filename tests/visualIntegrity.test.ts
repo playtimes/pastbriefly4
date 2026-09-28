@@ -251,11 +251,10 @@ describe("visual preview shows both films", () => {
     expect(longHtml).toContain('data-stage="long"');
     expect(longHtml).toMatch(/data-stage="long"[^>]*aspect-video/);
     expect(longHtml.match(/data-strip="/g)?.length).toBe(2); // the Long slots only
-    expect(longHtml).toContain("data-motion-dot");
     expect(shortHtml).toContain('data-review-film="short"');
     expect(shortHtml).toMatch(/data-stage="short"[^>]*aspect-\[9\/16\]/);
     expect(shortHtml).not.toContain('data-stage="long"');
     expect(shortHtml.match(/data-strip="/g)?.length).toBe(1);
-    expect(shortHtml).toContain("Graphic");
+    expect(shortHtml).toContain("Generated graphic");
   });
 });

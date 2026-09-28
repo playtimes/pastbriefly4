@@ -3,12 +3,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PreviewFrame, VisualPreview } from "../src/types.ts";
 
-// The visual-review workspace. Pure view-model and reducer tests, plus static
-// renders; interactions are exercised by calling the rendered buttons' handlers.
+// The film view: look through a film slot by slot and make the two creative
+// changes (Regenerate image, Change visual). Pure view-model and reducer tests,
+// plus static renders; interactions call the rendered buttons' own handlers.
 // No server, no provider, no DOM.
-const { buildFilm, initialReview, reviewReducer, stepAction, matchingSlots, canRegenerate, regenKey } = await import("../src/app/visualReview/model.ts");
-const { VisualReview, ReviewView, ReviewHeader } = await import("../src/app/visualReview/VisualReview.tsx");
-const { SlotInspector, AssetInspector } = await import("../src/app/visualReview/Inspector.tsx");
+const { buildFilm, initialReview, reviewReducer, stepAction, canRegenerate, regenKey } = await import("../src/app/visualReview/model.ts");
+const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
+const { ShotPanel } = await import("../src/app/visualReview/Inspector.tsx");
 
 const img = (kind: string, n: number) => `stories/demo/images/${kind}-${n}.png`;
 function frame(kind: "long" | "short", slot: number, over: Partial<PreviewFrame> = {}): PreviewFrame {
@@ -72,7 +73,7 @@ function buttons(tree: any, label: string): any[] {
 }
 
 describe("view model from the real preview frames", () => {
-  test("owners, reuses and metrics are derived per film", () => {
+  test("owners and reuses are derived per film", () => {
     const long = buildFilm(preview(), "long");
     expect(long.frames.map((f) => f.slot)).toEqual([3, 4, 5, 6, 7, 8, 9]);
     expect(long.assets.map((a) => [a.id, a.owner, a.uses, a.truth, a.motion])).toEqual([
@@ -81,8 +82,7 @@ describe("view model from the real preview frames", () => {
       ["L03", 3, [3], "graphic", false],
       ["L04", 6, [6], "reconstruction", true],
     ]);
-    expect(long.metrics).toEqual({ assets: 4, reuses: 3, archive: 1, motion: 2 });
-    expect(buildFilm(preview(), "short").metrics).toEqual({ assets: 2, reuses: 1, archive: 0, motion: 0 });
+    expect(buildFilm(preview(), "short").assets.map((a) => a.id)).toEqual(["S01", "S02"]);
   });
 
   test("the slot that acquired an asset owns it even when a reuse is listed first", () => {
@@ -99,283 +99,171 @@ describe("view model from the real preview frames", () => {
   });
 });
 
-describe("Long / Short", () => {
-  test("defaults to Long and never mixes the films", () => {
+describe("the film view", () => {
+  test("opens on Long and never mixes the films", () => {
     const html = renderToStaticMarkup(React.createElement(VisualReview, props()));
     expect(html).toContain('data-review-film="long"');
     expect(html).toMatch(/data-stage="long"[^>]*aspect-video/);
     expect(html.match(/data-strip="/g)).toHaveLength(7);
     expect(html).not.toContain("short-0.png");
-    expect(html).toContain("Long documentary<span");
-    expect(html).toContain(" · 7</span>");
-    expect(html).toContain(" · 3</span>");
+    expect(html).toContain(">Long documentary</button>");
+    expect(html).toContain("1 / 7");
   });
 
-  test("switching film swaps frames, metrics, strip, aspect and resets the filter", () => {
-    const s = run({ type: "filter", filter: "motion" }, { type: "slot", index: 6 }, { type: "film", film: "short" });
-    expect([s.film, s.filter, s.index.long, s.index.short]).toEqual(["short", "all", 6, 0]);
-    const { html } = view(s);
+  test("opens on the slot it was sent to", () => {
+    const html = renderToStaticMarkup(React.createElement(VisualReview, props({ target: { film: "short", index: 2 } })));
+    expect(html).toContain('data-review-film="short"');
     expect(html).toMatch(/data-stage="short"[^>]*aspect-\[9\/16\]/);
-    expect(html).not.toContain('data-stage="long"');
+    expect(html).toContain("3 / 3");
     expect(html.match(/data-strip="/g)).toHaveLength(3);
-    expect(html).toContain("width:46px");
-    expect(html).not.toContain("long-3.png");
-    expect(html).toMatch(/>2<\/span>assets/);
-    // Back to Long: the Long position is kept.
+  });
+
+  test("switching film keeps each film's own position; Previous/Next step one slot", () => {
+    const s = run({ type: "slot", index: 6 }, { type: "film", film: "short" });
+    expect([s.film, s.index.long, s.index.short]).toEqual(["short", 6, 0]);
     expect(reviewReducer(s, { type: "film", film: "long" }).index.long).toBe(6);
-  });
-});
-
-describe("Sequence / Assets", () => {
-  test("Sequence is the default; Assets shows each owner once", () => {
-    expect(initialReview(preview()).mode).toBe("sequence");
-    const { html } = view(run({ type: "mode", mode: "assets" }));
-    expect(html).toContain('data-asset-grid="long"');
-    expect(html.match(/data-asset-card="/g)).toHaveLength(4);
-    expect(html).toContain("4 unique Long assets");
-    expect(html).toContain("Used in 3 slots");
-    expect(html).toContain("Used in 1 slot<");
-    expect(html).not.toContain('data-stage="long"'); // grid, no stage until an asset is opened
-    expect(html).not.toContain("data-filter="); // filters belong to Sequence
-  });
-
-  test("opening an asset shows it in the inspector with its owner and uses", () => {
-    const s = run({ type: "asset", key: "L01" });
-    const { html } = view(s);
-    expect(html).toContain('data-inspector="asset"');
-    expect(html).toContain("All 4 assets");
-    expect(html).toContain("MOTION SELECTED");
-    expect(html).toContain("1 / 4");
-    expect(stepAction(s, buildFilm(preview(), "long"), 1)).toEqual({ type: "asset", key: "L02" });
     const fr = buildFilm(preview(), "long");
-    const tree = React.createElement(AssetInspector, { fr, asset: fr.assets[0], dispatch: vi.fn(), regen: idle, onRegenerate: vi.fn() });
-    const dispatch = vi.fn();
-    const inspector = React.createElement(AssetInspector, { fr, asset: fr.assets[0], dispatch, regen: idle });
-    buttons(inspector, "Slot 03")[0].props.onClick(); // the owner
-    buttons(inspector, "07")[0].props.onClick(); // a use
-    expect(dispatch.mock.calls).toEqual([[{ type: "slot", index: 0 }], [{ type: "slot", index: 4 }]]);
-    expect(renderToStaticMarkup(tree)).toContain("Regenerate still");
-    const archive = React.createElement(AssetInspector, { fr, asset: fr.assets[1], dispatch, regen: idle, onRegenerate: vi.fn() });
-    expect(renderToStaticMarkup(archive)).not.toContain("Regenerate still");
-    expect(renderToStaticMarkup(archive)).toContain("not regenerated");
-  });
-});
-
-describe("owner and reuse", () => {
-  const fr = buildFilm(preview(), "long");
-  const inspect = (index: number, over: Record<string, unknown> = {}) => ({ fr, index, dispatch: vi.fn(), regen: idle, onRegenerate: vi.fn(), ...over }) as any;
-
-  test("an owner reads ORIGINAL ASSET and lists where it is reused", () => {
-    const html = renderToStaticMarkup(React.createElement(SlotInspector, inspect(0)));
-    expect(html).toContain("ORIGINAL ASSET");
-    expect(html).toContain("Reused in");
-    expect(html).toContain("Slot 03");
-    expect(html).toContain("Regenerate still");
-    expect(html).toContain("Replaces L01 in all 3 slots that use it.");
-  });
-
-  test("a reuse names its asset and View original asset jumps to the real owning slot", () => {
-    const p = inspect(2);
-    const html = renderToStaticMarkup(React.createElement(SlotInspector, p));
-    expect(html).toContain("REUSE OF L01");
-    expect(html).toContain("View original asset · slot 03");
-    expect(html).toContain("Detail left");
-    expect(html).toContain("the bow");
-    expect(html).not.toContain("Regenerate still");
-    buttons(React.createElement(SlotInspector, p), "View original asset")[0].props.onClick();
-    expect(p.dispatch).toHaveBeenCalledWith({ type: "slot", index: 0 });
-    expect(reviewReducer(run({ type: "slot", index: 2 }), { type: "slot", index: 0 }).index.long).toBe(0);
-  });
-
-  test("archive owners and reuses never offer regeneration", () => {
-    expect(renderToStaticMarkup(React.createElement(SlotInspector, inspect(1)))).not.toContain("Regenerate still");
-    expect(renderToStaticMarkup(React.createElement(SlotInspector, inspect(5)))).not.toContain("Regenerate still");
-    expect(renderToStaticMarkup(React.createElement(SlotInspector, inspect(4)))).not.toContain("Regenerate still");
-  });
-});
-
-describe("filters and navigation", () => {
-  const fr = buildFilm(preview(), "long");
-
-  test("counts and Previous/Next step through the matching set only", () => {
-    expect(["all", "owners", "motion", "archive", "graphics"].map((f: any) => matchingSlots(fr, f).length)).toEqual([7, 4, 2, 2, 1]);
-    const s = run({ type: "filter", filter: "motion" });
-    expect(stepAction(s, fr, 1)).toEqual({ type: "slot", index: 6 });
-    expect(stepAction(reviewReducer(s, { type: "slot", index: 6 }), fr, 1)).toBeNull();
-    const owners = run({ type: "filter", filter: "owners" }, { type: "slot", index: 1 });
-    expect(stepAction(owners, fr, 1)).toEqual({ type: "slot", index: 3 });
-    expect(stepAction(owners, fr, -1)).toEqual({ type: "slot", index: 0 });
-    const html = view(reviewReducer(s, { type: "slot", index: 6 })).html;
-    expect(html).toContain("Motion: 2 of 2");
-  });
-
-  test("a filter with no matches says so and offers Show all", () => {
-    const p = preview();
-    p.frames = p.frames.filter((f) => f.truth !== "graphic");
-    const s = run({ type: "filter", filter: "graphics" });
-    const films = { long: buildFilm(p, "long"), short: buildFilm(p, "short") };
-    const html = renderToStaticMarkup(React.createElement(ReviewView, { ...props({ preview: p }), films, state: s, dispatch: () => {} }));
-    expect(html).toContain("No graphics slots in this film.");
-    expect(html).toContain("Show all");
-    expect(stepAction(s, films.long, 1)).toBeNull();
-    expect(reviewReducer(s, { type: "filter", filter: "all" }).filter).toBe("all");
-  });
-
-  test("navigation and filtering only change local state", () => {
-    const p = preview();
-    const before = JSON.stringify(p);
-    const s = run({ type: "filter", filter: "archive" }, { type: "slot", index: 5 }, { type: "film", film: "short" }, { type: "mode", mode: "assets" }, { type: "asset", key: "S02" });
-    renderToStaticMarkup(React.createElement(ReviewView, { ...props({ preview: p }), films: { long: buildFilm(p, "long"), short: buildFilm(p, "short") }, state: s, dispatch: () => {} }));
-    expect(JSON.stringify(p)).toBe(before);
-  });
-
-  test("the current thumbnail carries the red active ring and every slot shows its truth letter", () => {
+    expect(stepAction(run(), fr, 1)).toEqual({ type: "slot", index: 1 });
+    expect(stepAction(run(), fr, -1)).toBeNull();
+    expect(stepAction(run({ type: "slot", index: 6 }), fr, 1)).toBeNull();
     const { html } = view(run({ type: "slot", index: 2 }));
     expect(html).toMatch(/data-strip="2" aria-current="true"[\s\S]*?box-shadow:0 0 0 2px #e50914/);
-    expect(html.match(/data-reuse-icon/g)).toHaveLength(3);
-    expect(html).toContain(">A</span>");
-    expect(html).toContain(">G</span>");
     expect(html).toContain("3 / 7");
     expect(html).toContain("Slot 05 · 00:20");
   });
 
-  test("visited slots count as reviewed, locally", () => {
-    const s = run({ type: "slot", index: 2 }, { type: "slot", index: 4 }, { type: "slot", index: 2 });
-    expect(s.visited.long).toEqual([0, 2, 4]);
-    expect(view(s).html).toContain("3 / 7</span>");
-    expect(reviewReducer(s, { type: "markAll", count: 7 }).visited.long).toHaveLength(7);
-    expect(reviewReducer(s, { type: "film", film: "short" }).visited.short).toEqual([0]);
-    // Switching film inside Assets, then back to Sequence, still counts the slot on screen.
-    const back = run({ type: "mode", mode: "assets" }, { type: "film", film: "short" }, { type: "mode", mode: "sequence" });
-    expect(back.visited.short).toEqual([0]);
+  test("no engine vocabulary: no modes, filters, board, metrics, owner or reuse labels, truth letters or motion markers", () => {
+    const { html } = view(run({ type: "slot", index: 2 }), { onReviseSequence: vi.fn() });
+    for (const s of ["Sequence", "Assets", "Director", "data-mode-tab", "data-filter", "Owners", "Archive <", "Graphics", "Motion", "MOTION", "Attention", "Flagged", "ORIGINAL ASSET", "REUSE OF", "base view", "data-reuse-icon", ">A</span>", ">G</span>", "Rebuild", "Continue", "Run Director QA", "Copy Director Board", "Reviewed", "Mark all"]) {
+      expect(html).not.toContain(s);
+    }
+  });
+
+  test("the slot panel speaks plainly: when, what kind of image, where else it appears, what is on screen", () => {
+    const fr = buildFilm(preview(), "long");
+    const owner = renderToStaticMarkup(React.createElement(ShotPanel, { fr, index: 0, regen: idle, onRegenerate: vi.fn() }));
+    expect(owner).toContain("Slot 03");
+    expect(owner).toContain("Generated image");
+    expect(owner).toContain("The same image appears in slots 05, 07.");
+    const archive = renderToStaticMarkup(React.createElement(ShotPanel, { fr, index: 5, regen: idle, onRegenerate: vi.fn() }));
+    expect(archive).toContain("Archive photograph");
+    expect(archive).toContain("An archive photograph is used as found. It is not regenerated.");
+    expect(archive).not.toContain("Regenerate image");
+    const p = preview();
+    p.frames[3] = { ...p.frames[3], caption: "The harbour, 1859" };
+    expect(renderToStaticMarkup(React.createElement(ShotPanel, { fr: buildFilm(p, "long"), index: 3, regen: idle }))).toContain("The harbour, 1859");
+  });
+
+  test("Change visual appears only when wired, started from the current slot", () => {
+    expect(view(run({ type: "slot", index: 2 }), { onReviseSequence: vi.fn() }).html).toContain('data-action="change-visual"');
+    expect(view(run()).html).not.toContain("Change visual");
+  });
+
+  test("navigation only changes local state", () => {
+    const p = preview();
+    const before = JSON.stringify(p);
+    const s = run({ type: "slot", index: 5 }, { type: "film", film: "short" }, { type: "slot", index: 1 });
+    renderToStaticMarkup(React.createElement(ReviewView, { ...props({ preview: p }), films: { long: buildFilm(p, "long"), short: buildFilm(p, "short") }, state: s, dispatch: () => {} }));
+    expect(JSON.stringify(p)).toBe(before);
   });
 });
 
-describe("regenerate and the existing actions", () => {
-  test("the Regenerate button calls the existing handler with the owner frame", () => {
-    const fr = buildFilm(preview(), "long");
-    const onRegenerate = vi.fn();
-    buttons(React.createElement(SlotInspector, { fr, index: 3, dispatch: vi.fn(), regen: idle, onRegenerate }), "Regenerate still")[0].props.onClick();
-    expect(onRegenerate).toHaveBeenCalledWith(fr.frames[3]);
-    expect(onRegenerate.mock.calls[0][0]).toMatchObject({ kind: "long", slot: 6, asset: "L03" });
+describe("Regenerate image", () => {
+  const fr = buildFilm(preview(), "long");
+  const panel = (index: number, over: Record<string, unknown> = {}) => ({ fr, index, regen: idle, onRegenerate: vi.fn(), ...over }) as any;
+
+  test("offered wherever the slot shows a generated image; a shared image is regenerated once, for every slot", () => {
+    const offered = fr.frames.map((_, i) => renderToStaticMarkup(React.createElement(ShotPanel, panel(i))).includes("Regenerate image"));
+    expect(offered).toEqual([true, false, true, true, true, false, true]); // the archive L02 slots never
+    const p = panel(2); // a reuse of L01
+    buttons(React.createElement(ShotPanel, p), "Regenerate image")[0].props.onClick();
+    expect(p.onRegenerate).toHaveBeenCalledWith(fr.frames[0]); // the owner still, through the existing handler
+    expect(renderToStaticMarkup(React.createElement(ShotPanel, p))).toContain("Replaces this image in all 3 slots that use it.");
+    expect(renderToStaticMarkup(React.createElement(ShotPanel, panel(0, { onRegenerate: undefined })))).not.toContain("Regenerate image");
   });
 
-  test("regeneration keeps the review context and refreshes the image in place", () => {
+  test("regeneration keeps the slot on screen and refreshes the image in place", () => {
     const s = run({ type: "slot", index: 2 });
     const running = view(s, { regen: { ...idle, running: "long-3" } }).html;
-    expect(running).toContain("Regenerating L01…");
-    expect(running).toMatch(/data-action="continue"[^>]*disabled/);
-    expect(running).toMatch(/data-action="rebuild"[^>]*disabled/);
-    // The job comes back with a new preview object; the same local state renders
-    // the same slot, now with the cache-busted still.
+    expect(running).toContain("Regenerating… the current image stays until the new one is ready");
+    expect(running).toMatch(/<button[^>]*disabled=""[^>]*>.*Regenerating…/);
     const after = view(s, { version: 1234, regen: { ...idle, done: "long-3" } }).html;
     expect(after).toContain("3 / 7");
-    expect(after).toContain("REUSE OF L01");
     expect(after).toContain(`src="/media/${img("long", 3)}?v=1234"`);
+    expect(after).toContain("New image in place");
   });
 
-  test("a failed regeneration keeps the current still and offers Retry", () => {
-    const fr = buildFilm(preview(), "long");
+  test("a failed regeneration keeps the current image and offers Retry", () => {
     const onRegenerate = vi.fn();
-    const p = { fr, index: 0, dispatch: vi.fn(), regen: { ...idle, failed: { key: "long-3", message: "OpenAI image generation failed (500)" } }, onRegenerate };
-    const html = renderToStaticMarkup(React.createElement(SlotInspector, p));
-    expect(html).toContain("Could not regenerate this still. The current one is kept.");
-    expect(html).toContain("OpenAI image generation failed (500)");
-    buttons(React.createElement(SlotInspector, p), "Retry")[0].props.onClick();
+    const p = panel(0, { regen: { ...idle, failed: { key: "long-3", message: "OpenAI image generation failed (500)" } }, onRegenerate });
+    const html = renderToStaticMarkup(React.createElement(ShotPanel, p));
+    expect(html).toContain("Could not regenerate this image. The current one is kept.");
+    expect(html).not.toContain("OpenAI image generation failed"); // the raw provider error is not product copy
+    buttons(React.createElement(ShotPanel, p), "Retry")[0].props.onClick();
     expect(onRegenerate).toHaveBeenCalledWith(fr.frames[0]);
-    expect(view(run(), { regen: p.regen }).html).toContain(`src="/media/${img("long", 3)}"`);
   });
 
-  describe("Director feedback box", () => {
+  describe("what should change (optional note)", () => {
     // Long index 0 is L01 (slot 3, key long-3), a reconstruction owner used in 3 slots.
-    const inspector = (over: Record<string, unknown> = {}) => {
-      const fr = buildFilm(preview(), "long");
-      const p = { fr, index: 0, dispatch: vi.fn(), regen: idle, onRegenerate: vi.fn(), onDraft: vi.fn(), draft: null, ...over } as any;
-      return { fr, p, el: React.createElement(SlotInspector, p), html: renderToStaticMarkup(React.createElement(SlotInspector, p)) };
+    const note = (over: Record<string, unknown> = {}) => {
+      const p = panel(0, { onDraft: vi.fn(), draft: null, ...over });
+      return { p, el: React.createElement(ShotPanel, p), html: renderToStaticMarkup(React.createElement(ShotPanel, p)) };
     };
     const lastButton = (el: any, label: string) => buttons(el, label).at(-1);
 
-    test("Regenerate still opens the box and calls nothing", () => {
-      const { p, el, html } = inspector();
+    test("Regenerate image opens the note and calls nothing", () => {
+      const { p, el, html } = note();
       expect(html).not.toContain("<textarea");
-      buttons(el, "Regenerate still")[0].props.onClick();
+      buttons(el, "Regenerate image")[0].props.onClick();
       expect(p.onDraft).toHaveBeenCalledWith({ key: "long-3", text: "" });
       expect(p.onRegenerate).not.toHaveBeenCalled();
     });
 
-    test("the open box names the asset, keeps the replace-everywhere note, and Cancel only closes", () => {
-      const { p, el, html } = inspector({ draft: { key: "long-3", text: "Fix the sign." } });
-      expect(html).toContain("Regenerate L01");
-      expect(html).toContain("Director feedback (optional)");
+    test("the open note keeps the replace-everywhere line, and Cancel only closes", () => {
+      const { p, el, html } = note({ draft: { key: "long-3", text: "Fix the sign." } });
+      expect(html).toContain("What should change? (optional)");
       expect(html).toMatch(/<textarea[^>]*>Fix the sign\.<\/textarea>/);
-      expect(html).toContain("Replaces L01 in all 3 slots that use it.");
+      expect(html).toContain("Replaces this image in all 3 slots that use it.");
       buttons(el, "Cancel")[0].props.onClick();
       expect(p.onDraft).toHaveBeenCalledWith(null);
       expect(p.onRegenerate).not.toHaveBeenCalled();
     });
 
-    test("blank feedback regenerates exactly as before; text is trimmed and sent", () => {
-      const blank = inspector({ draft: { key: "long-3", text: "  \n " } });
-      lastButton(blank.el, "Regenerate still").props.onClick();
-      expect(blank.p.onRegenerate.mock.calls).toEqual([[blank.fr.frames[0], undefined]]);
-
-      const withNote = inspector({ draft: { key: "long-3", text: "  Remove the emblem.\n" } });
-      lastButton(withNote.el, "Regenerate still").props.onClick();
-      expect(withNote.p.onRegenerate.mock.calls).toEqual([[withNote.fr.frames[0], "Remove the emblem."]]);
+    test("a blank note regenerates as planned; text is trimmed and sent", () => {
+      const blank = note({ draft: { key: "long-3", text: "  \n " } });
+      lastButton(blank.el, "Regenerate image").props.onClick();
+      expect(blank.p.onRegenerate.mock.calls).toEqual([[fr.frames[0], undefined]]);
+      const withNote = note({ draft: { key: "long-3", text: "  Remove the emblem.\n" } });
+      lastButton(withNote.el, "Regenerate image").props.onClick();
+      expect(withNote.p.onRegenerate.mock.calls).toEqual([[fr.frames[0], "Remove the emblem."]]);
     });
 
-    test("while regenerating, the box and its buttons are disabled", () => {
-      const { html } = inspector({ draft: { key: "long-3", text: "Remove the emblem." }, regen: { ...idle, running: "long-3" } });
+    test("while regenerating, the note and its buttons are disabled", () => {
+      const { html } = note({ draft: { key: "long-3", text: "Remove the emblem." }, regen: { ...idle, running: "long-3" } });
       expect(html).toMatch(/<textarea[^>]*disabled=""/);
       expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Cancel/);
       expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Regenerating…/);
     });
 
     test("over 2,000 characters says so and cannot be sent", () => {
-      const { p, el, html } = inspector({ draft: { key: "long-3", text: "x".repeat(2001) } });
+      const { p, el, html } = note({ draft: { key: "long-3", text: "x".repeat(2001) } });
       expect(html).toContain("Director feedback must be 2,000 characters or fewer.");
-      const submit = lastButton(el, "Regenerate still");
+      const submit = lastButton(el, "Regenerate image");
       expect(submit.props.disabled).toBe(true);
       submit.props.onClick();
       expect(p.onRegenerate).not.toHaveBeenCalled();
     });
 
-    test("a failure keeps the still and the feedback, and Retry resends it", () => {
-      const failed = { ...idle, failed: { key: "long-3", message: "OpenAI image 500" } };
-      const { p, el, html } = inspector({ draft: { key: "long-3", text: "Remove the emblem." }, regen: failed });
-      expect(html).toContain("Could not regenerate this still. The current one is kept.");
+    test("a failure keeps the image and the note, and Retry resends it", () => {
+      const { p, el, html } = note({ draft: { key: "long-3", text: "Remove the emblem." }, regen: { ...idle, failed: { key: "long-3", message: "OpenAI image 500" } } });
+      expect(html).toContain("Could not regenerate this image. The current one is kept.");
       expect(html).toMatch(/<textarea[^>]*>Remove the emblem\.<\/textarea>/);
       buttons(el, "Retry")[0].props.onClick();
-      expect(p.onRegenerate.mock.calls).toEqual([[p.fr.frames[0], "Remove the emblem."]]);
+      expect(p.onRegenerate.mock.calls).toEqual([[fr.frames[0], "Remove the emblem."]]);
     });
 
-    test("success closes the box and says the new still is in place for review", () => {
-      const { html } = inspector({ draft: null, regen: { ...idle, done: "long-3" } });
-      expect(html).not.toContain("<textarea");
-      expect(html).toContain("New still in place - review it now");
+    test("another image's note does not open on this one", () => {
+      expect(note({ draft: { key: "long-6", text: "x" } }).html).not.toContain("<textarea");
     });
-
-    test("another asset's box does not open on this one", () => {
-      expect(inspector({ draft: { key: "long-6", text: "x" } }).html).not.toContain("<textarea");
-    });
-  });
-
-  test("Continue and Rebuild call the existing handlers, and back returns to the story", () => {
-    const p = props();
-    const films = { long: buildFilm(p.preview, "long"), short: buildFilm(p.preview, "short") };
-    const header = React.createElement(ReviewHeader, { ...p, films, state: run(), dispatch: vi.fn(), fr: films.long });
-    const cont = buttons(header, "Continue");
-    expect(cont).toHaveLength(2); // desktop and the compact mobile header
-    cont[0].props.onClick();
-    buttons(header, "Rebuild visuals")[0].props.onClick();
-    buttons(header, "Back to story")[0].props.onClick();
-    expect(p.onContinue).toHaveBeenCalledTimes(1);
-    expect(p.onRebuild).toHaveBeenCalledTimes(1);
-    expect(p.onBack).toHaveBeenCalledTimes(1);
-    const html = renderToStaticMarkup(header);
-    expect(html).toContain("est. $1.20 remaining motion (both films)");
-    const busy = renderToStaticMarkup(React.createElement(ReviewHeader, { ...p, continuing: true, films, state: run(), dispatch: vi.fn(), fr: films.long }));
-    expect(busy).toContain("Continuing…");
-    expect(busy).toMatch(/data-action="rebuild"[^>]*disabled/);
   });
 });

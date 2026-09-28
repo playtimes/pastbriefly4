@@ -1,6 +1,8 @@
 // Pure hash-route resolution shared by the app shell (and unit-tested). Keeping
 // it free of React lets the dashboard navigation be verified without a DOM.
 
+import type { VideoKind } from "../types.ts";
+
 export type Screen =
   | { name: "create" }
   | { name: "stories" } // the saved-stories library
@@ -8,7 +10,7 @@ export type Screen =
   | { name: "settings" }
   | { name: "story"; slug: string }
   | { name: "creating"; slug: string }
-  | { name: "watch"; slug: string };
+  | { name: "watch"; slug: string; film?: VideoKind }; // film: the tab Watch opens on
 
 // The three permanent sidebar destinations. Story/Creating/Watch are drill-downs
 // and never appear as menu entries.
@@ -21,7 +23,7 @@ export function resolveRoute(route: string): Screen {
   if (parts[0] === "videos") return { name: "videos" };
   if (parts[0] === "story" && parts[1]) {
     if (parts[2] === "creating") return { name: "creating", slug: parts[1] };
-    if (parts[2] === "watch") return { name: "watch", slug: parts[1] };
+    if (parts[2] === "watch") return parts[3] === "long" || parts[3] === "short" ? { name: "watch", slug: parts[1], film: parts[3] } : { name: "watch", slug: parts[1] };
     return { name: "story", slug: parts[1] };
   }
   return { name: "create" };

@@ -2,11 +2,19 @@ import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
+import { displayStage, gateFace, latestCompletePair, productionFace, productionTarget, type CompletePair, type DisplayStage } from "../productionStage.ts";
 import { VisualReview } from "../visualReview/VisualReview.tsx";
-import { regenKey } from "../visualReview/model.ts";
+import { buildFilm, regenKey } from "../visualReview/model.ts";
+import { visualIssues, type VisualIssue } from "../visualReview/visualIssues.ts";
+import { VisualIssuePanel } from "../visualReview/IssueView.tsx";
 import type { RegenDraft } from "../visualReview/Inspector.tsx";
-import { STEP_ORDER, STEP_LABELS, directorFeedbackError, type AssetQaPhase, type AssetQaState, type Job, type JobStep, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaPhase, type TextQaSection, type TextQaState } from "../../types.ts";
+import { ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
+import { directorFeedbackError, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection } from "../../types.ts";
 
+// The Production screen for one story's current job. Its faces follow the job:
+// Running, Text needs you, Visuals need you, Failed and Ready. A gate opens on
+// its issue list, then one issue at a time. PB4 runs its own checks; the user
+// only makes the creative calls.
 export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
@@ -22,27 +30,56 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [revisingSequence, setRevisingSequence] = useState(false);
   const [storyTitle, setStoryTitle] = useState("");
   const [maxSpend, setMaxSpend] = useState(0);
+  // Where the user is inside a gate (null: the issue summary).
+  const [textView, setTextView] = useState<TextView | null>(null);
+  const [visualView, setVisualView] = useState<VisualView | null>(null);
+  // The finished Long + Short pair the done job rendered (the Ready face).
+  const [ready, setReady] = useState<CompletePair | null>(null);
   const jobId = useRef<string | null>(null);
+  const lastStage = useRef<DisplayStage | undefined>(undefined);
+  // The job and gate whose face was last handed to the user: it stays theirs
+  // until the job moves on, even if a manual edit refreshes updatedAt.
+  const handedOver = useRef<string | null>(null);
 
   useEffect(() => {
     api.config().then((c) => setMaxSpend(c.maxSpendUsd)).catch(() => {});
   }, []);
 
+  // Every job the screen shows goes through here, so a requeued job (step
+  // "queued") keeps the stage it was last seen in.
+  function show(j: Job): void {
+    lastStage.current = displayStage(j, lastStage.current);
+    setJob(j);
+  }
+
   useEffect(() => {
     let stop = false;
+    let finished = false;
     async function tick(): Promise<void> {
+      if (finished) return;
       try {
         if (!jobId.current) {
           const detail = await api.story(slug);
+          if (stop) return;
           setStoryTitle(detail.story.title);
-          if (detail.activeJob) jobId.current = detail.activeJob.id;
-          else if (detail.videos.length >= 2) return navigate(`/story/${slug}/watch`);
-          else return navigate(`/story/${slug}`);
+          // The active job, the failed latest job, or the job behind the newest
+          // complete Long + Short pair (Ready); otherwise navigate as before.
+          const target = productionTarget(detail);
+          if ("navigate" in target) return navigate(target.navigate === "watch" ? `/story/${slug}/watch` : `/story/${slug}`);
+          jobId.current = target.jobId;
         }
         const { job } = await api.job(jobId.current!);
         if (stop) return;
-        setJob(job);
-        if (job.state === "done") return navigate(`/story/${slug}/watch`);
+        if (job.state === "done") {
+          // Ready stays on this route, with no redirect: this job's own pair only.
+          const detail = await api.story(slug);
+          if (stop) return;
+          const pair = latestCompletePair(detail.videos, job.id);
+          if (!pair) return navigate(`/story/${slug}/watch`);
+          finished = true; // nothing left to poll
+          setReady(pair);
+        }
+        show(job);
       } catch (e: any) {
         if (!stop) setError(e.message);
       }
@@ -54,6 +91,12 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
       clearInterval(t);
     };
   }, [slug]);
+
+  // A new face starts on its summary, never inside a stale deep review.
+  useEffect(() => {
+    setTextView(null);
+    setVisualView(null);
+  }, [job?.state]);
 
   async function cont(): Promise<void> {
     if (!jobId.current) return;
@@ -74,7 +117,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     setApprovingText(true);
     try {
       const { job } = await api.approveText(jobId.current);
-      setJob(job);
+      show(job);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -88,7 +131,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   async function reviseText(feedback: string): Promise<void> {
     if (!jobId.current) throw new Error("The job is not loaded yet.");
     const { job } = await api.reviseText(jobId.current, feedback);
-    setJob(job);
+    show(job);
   }
 
   // Revise one film's edit from Director feedback at the visual preview. The job
@@ -99,20 +142,11 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     setRevisingSequence(true);
     try {
       const { job, revision } = await api.reviseSequence(jobId.current, kind, feedback);
-      setJob(job);
+      show(job);
       return revision;
     } finally {
       setRevisingSequence(false);
     }
-  }
-
-  // Start Run Director QA for one film. The whole chain runs on the server; the
-  // poll above then shows its phase and result from the job, so leaving the page
-  // changes nothing. Continue, Rebuild and Regenerate wait while it runs.
-  async function directorQa(kind: "long" | "short"): Promise<void> {
-    if (!jobId.current) throw new Error("The job is not loaded yet.");
-    const { job } = await api.runDirectorQa(jobId.current, kind);
-    setJob(job);
   }
 
   // Reject the previewed visuals and rebuild them under the same job. The job goes
@@ -122,7 +156,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     setRebuilding(true);
     try {
       const { job } = await api.rebuildVisuals(jobId.current);
-      setJob(job);
+      show(job);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -143,7 +177,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     setRegenDone(null);
     try {
       const { job } = await api.regenerateStill(jobId.current, f.kind, f.slot, directorFeedback);
-      setJob(job);
+      show(job);
       setImageVersion(Date.now());
       setRegenDone(key);
       setRegenDraft(null);
@@ -159,7 +193,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     setRetrying(true);
     try {
       const { job } = await api.retry(jobId.current);
-      setJob(job);
+      show(job);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -172,187 +206,133 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   async function approveMore(newApprovedMax: number): Promise<void> {
     if (!jobId.current) return;
     const { job } = await api.approveSpend(jobId.current, newApprovedMax);
-    setJob(job);
+    show(job);
   }
 
   if (error) return <Fail slug={slug} message={error} />;
-  if (job?.state === "failed")
-    return <Fail slug={slug} job={job} onRetry={retry} retrying={retrying} maxSpend={maxSpend} onApproveMore={approveMore} />;
   if (!job) return <p className="text-muted">Preparing…</p>;
+  let face = productionFace(job);
+  const gate = gateFace(job);
+  const gateKey = `${job.id}:${job.state}`;
+  if (face === "running" && gate && handedOver.current === gateKey) face = gate;
+  if (face === "text" || face === "visuals") handedOver.current = gateKey;
+  if (face === "failed") return <Fail slug={slug} job={job} onRetry={retry} retrying={retrying} maxSpend={maxSpend} onApproveMore={approveMore} />;
 
-  // While Automatic Text QA runs the draft is not up for review yet: keep the
-  // progress screen. When it stops, the Story Review opens with its reason.
-  if (job.state === "awaiting_text" && job.textQa?.status === "running") return <CreatingProgress job={job} />;
-  if (job.state === "awaiting_text" && job.review) {
+  if (face === "done") {
+    if (!ready || ready.jobId !== job.id) return <p className="text-muted">Preparing…</p>;
+    return <ReadyPanel storyTitle={storyTitle} job={job} pair={ready} onWatch={(film) => navigate(`/story/${slug}/watch/${film}`)} />;
+  }
+
+  // Text needs you: the issue list, then one issue at a time. The whole story is
+  // there to read, quietly, behind More.
+  if (face === "text") {
+    const review = job.review!;
     const qa = job.textQa?.status === "stopped" ? job.textQa : undefined;
-    return <StoryReviewPanel review={job.review} onApprove={approveText} approving={approvingText} onRevise={reviseText} qa={qa} />;
+    const issues = qa?.issues ?? [];
+    const more = (from: number | null, tab: ReviewTab) => <TextMore onWholeStory={() => setTextView({ whole: tab, from })} onApprove={approveText} approving={approvingText} />;
+    if (textView && "whole" in textView) {
+      const { from } = textView;
+      return (
+        <StoryReviewPanel
+          key={textView.whole}
+          review={review}
+          initialTab={textView.whole}
+          backLabel={from === null ? "Back to issues" : "Back to issue"}
+          onBack={() => setTextView(from === null ? null : { issue: from })}
+          onApprove={approveText}
+          approving={approvingText}
+          onRevise={reviseText}
+        />
+      );
+    }
+    const n = textView?.issue ?? -1;
+    if (issues[n]) {
+      return (
+        <TextIssuePanel
+          key={n}
+          review={review}
+          issue={issues[n]}
+          index={n}
+          total={issues.length}
+          onBack={() => setTextView(null)}
+          onNext={issues.length > 1 ? () => setTextView({ issue: (n + 1) % issues.length }) : undefined}
+          onRevise={reviseText}
+          onApprove={approveText}
+          approving={approvingText}
+          more={more(n, SECTION_TAB[issues[n].section])}
+        />
+      );
+    }
+    return <TextException storyTitle={storyTitle} qa={qa} onReview={(i) => setTextView({ issue: i })} onOpenReview={() => setTextView({ whole: "story", from: null })} more={more(null, "story")} />;
   }
 
-  // While Pixel Asset QA inspects (and may repair) the stills, the visuals are not
-  // up for review yet: keep the progress screen, as for Text QA.
-  if (job.state === "awaiting_preview" && job.assetQa?.status === "running") return <CreatingProgress job={job} />;
-  // The same while the Visual Autopilot reviews the Long and Short sequences.
-  if (job.state === "awaiting_preview" && job.visualAutopilot?.status === "running") return <CreatingProgress job={job} />;
-  if (job.state === "awaiting_preview" && job.preview) {
-    // A manual revision in flight, or a server-side Director QA run for either film.
+  // Visuals need you: the issue list, then one issue at a time with its one
+  // creative fix. The films are there to look through, quietly, behind More.
+  if (face === "visuals") {
+    const preview = job.preview!;
+    const films = { long: buildFilm(preview, "long"), short: buildFilm(preview, "short") };
+    const issues = visualIssues(job, films);
+    // A visual change in flight, or one of PB4's own sequence checks still running.
     const sequenceBusy = revisingSequence || job.directorQa?.long?.status === "running" || job.directorQa?.short?.status === "running";
-    return (
-      <VisualReview
-        preview={job.preview}
-        storyTitle={storyTitle}
-        version={imageVersion}
-        onBack={() => navigate(`/story/${slug}`)}
-        onContinue={cont}
-        onRebuild={rebuild}
-        continuing={continuing}
-        rebuilding={rebuilding}
-        onRegenerate={regenerate}
-        regen={{ running: regenerating, failed: regenFailed, done: regenDone, blocked: sequenceBusy }}
-        draft={regenDraft}
-        onDraft={setRegenDraft}
-        onReviseSequence={reviseSequence}
-        onDirectorQa={directorQa}
-        revisingSequence={sequenceBusy}
-        directorQa={job.directorQa}
-        visualAutopilot={job.visualAutopilot}
-        assetQa={job.assetQa?.status === "done" ? job.assetQa : undefined}
-      />
+    const busy = sequenceBusy || regenerating !== null;
+    const regen = { running: regenerating, failed: regenFailed, done: regenDone, blocked: sequenceBusy };
+    const more = (from: VisualIssue | null, showContinue = true) => (
+      <VisualMore onFilms={() => setVisualView({ films: from })} onContinue={cont} onRebuild={rebuild} continuing={continuing} rebuilding={rebuilding} busy={busy} showContinue={showContinue} />
     );
+    if (visualView && "films" in visualView) {
+      const from = visualView.films;
+      return (
+        <VisualReview
+          key={from?.key ?? ""}
+          preview={preview}
+          backLabel={from ? "Back to issue" : "Back to issues"}
+          target={from?.film ? { film: from.film, index: from.target?.index } : undefined}
+          version={imageVersion}
+          onBack={() => setVisualView(from ? { issue: from } : null)}
+          onRegenerate={regenerate}
+          regen={regen}
+          draft={regenDraft}
+          onDraft={setRegenDraft}
+          onReviseSequence={reviseSequence}
+          busy={sequenceBusy}
+        />
+      );
+    }
+    if (visualView) {
+      const opened = visualView.issue;
+      const at = issues.findIndex((i) => i.key === opened.key);
+      const next = issues.length ? issues[(at + 1) % issues.length] : undefined;
+      return (
+        <VisualIssuePanel
+          key={opened.key}
+          issue={at >= 0 ? issues[at] : opened}
+          position={at >= 0 ? { index: at, total: issues.length } : null}
+          films={films}
+          version={imageVersion}
+          onBack={() => setVisualView(null)}
+          onNext={next && next.key !== opened.key ? () => setVisualView({ issue: next }) : undefined}
+          onRegenerate={regenerate}
+          regen={regen}
+          draft={regenDraft}
+          onDraft={setRegenDraft}
+          onReviseSequence={reviseSequence}
+          busy={busy}
+          more={more(at >= 0 ? issues[at] : opened)}
+        />
+      );
+    }
+    return <VisualException job={job} storyTitle={storyTitle} issues={issues} version={imageVersion} onReview={(i) => setVisualView({ issue: i })} onContinue={cont} continuing={continuing} busy={busy} more={more(null, issues.length > 0)} />;
   }
 
-  return <CreatingProgress job={job} />;
+  // PB4 at work, including Text QA and the visual checks at the gates.
+  return <ProductionProgress job={job} storyTitle={storyTitle} previous={lastStage.current} />;
 }
 
-// The Automatic Text QA phases, in the order they can run.
-const TEXT_QA_PHASES: [TextQaPhase, string][] = [
-  ["review", "Director reviewing"],
-  ["repair", "Applying text repair"],
-  ["verify", "Final text verification"],
-];
-
-// The Visual Autopilot after a clean Asset QA, in order.
-const VISUAL_AUTOPILOT_PHASES: [string, string][] = [
-  ["assets", "Inspecting visual assets"],
-  ["long", "Reviewing Long sequence"],
-  ["short", "Reviewing Short sequence"],
-];
-
-// The Pixel Asset QA phases, in the order they can run.
-function assetQaPhases(qa: Extract<AssetQaState, { status: "running" }>): [AssetQaPhase, string][] {
-  return [
-    ["review", "Inspecting visual assets"],
-    ["repair", qa.phase === "repair" && qa.current ? `Repairing visual asset ${qa.current} of ${qa.total}` : "Repairing visual assets"],
-    ["verify", "Verifying repaired visuals"],
-  ];
-}
-
-// The progress screen. While Text QA runs (the job waits at the text gate) the
-// written films are done and its phases so far show under them; once it passes,
-// one line says so while the job continues to the visuals. Pixel Asset QA shows
-// its phases the same way under the finished stills, at the visual preview.
-export function CreatingProgress({ job }: { job: Job }): React.ReactElement {
-  const qa = job.textQa;
-  const atGate = job.state === "awaiting_preview";
-  const assetQa = atGate && job.assetQa?.status === "running" ? job.assetQa : null;
-  // The Visual Autopilot after Asset QA: Director QA for Long, then for Short.
-  const pilot = atGate && job.visualAutopilot?.status === "running" && !assetQa;
-  const film = job.directorQa?.short?.status === "running" || (job.directorQa?.long && job.directorQa.long.status !== "running") ? "short" : "long";
-  const phases: [string, string][] = assetQa ? assetQaPhases(assetQa) : pilot ? VISUAL_AUTOPILOT_PHASES : TEXT_QA_PHASES;
-  const running = assetQa ? assetQa.phase : pilot ? film : job.state === "awaiting_text" && qa?.status === "running" ? qa.phase : null;
-  const under: JobStep = assetQa || pilot ? "stills" : "scripts";
-  const reached = running ? phases.slice(0, phases.findIndex(([p]) => p === running) + 1) : [];
-  const currentIndex = running ? STEP_ORDER.indexOf(under) + 1 : STEP_ORDER.indexOf(job.step as any);
-  const auditing = job.step === "scripts" && !!job.progress && job.progress.current === job.progress.total;
-  const heading = running ? phases.find(([p]) => p === running)![1] : auditing ? "Auditing scripts" : STEP_LABELS[job.step];
-  return (
-    <div className="flex flex-col gap-8 max-w-xl">
-      <div>
-        <p className="kicker mb-1">Creating your films</p>
-        <h1 className="text-3xl">{heading}…</h1>
-        {qa?.status === "passed" && job.state !== "awaiting_text" && <p className="mt-2 text-ink">Text QA passed. Continuing to visuals…</p>}
-        {job.visualAutopilot?.status === "passed" && !atGate && <p className="mt-2 text-ink">Visual QA passed. Continuing production…</p>}
-        <p className="text-muted mt-2">You can leave this page and come back - it keeps working.</p>
-      </div>
-      <ol className="flex flex-col gap-3">
-        {STEP_ORDER.map((step, i) => {
-          const done = currentIndex > i || job.state === "done";
-          const active = currentIndex === i && !running;
-          const prog = active ? job.progress : undefined;
-          const pct = prog ? Math.round((prog.current / prog.total) * 100) : 0;
-          return (
-            <li key={step} className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-3">
-                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[0.6rem] ${done ? "bg-accent text-[#f7f4ee]" : active ? "border-2 border-accent" : "border border-line"}`}>
-                  {done ? "✓" : ""}
-                </span>
-                <span className={active ? "text-ink" : done ? "text-muted" : "text-muted/60"}>{STEP_LABELS[step]}</span>
-                {active && !prog && <Spinner />}
-                {prog && (
-                  <span className="ml-auto text-[13px] tabular-nums text-muted">
-                    {prog.percent ? `${pct}%` : `${prog.current} / ${prog.total} · ${pct}%`}
-                  </span>
-                )}
-              </div>
-              {prog && (
-                <div className="ml-8 h-1.5 overflow-hidden rounded-full bg-line">
-                  <div className="h-full rounded-full bg-accent transition-[width] duration-500" style={{ width: `${pct}%` }} />
-                </div>
-              )}
-              {step === under && reached.length > 0 && (
-                <ol aria-label={assetQa ? "Asset QA" : pilot ? "Visual QA" : "Text QA"} className="ml-8 flex flex-col gap-2">
-                  {reached.map(([p, label]) => {
-                    const now = p === running;
-                    return (
-                      <li key={p} className="flex items-center gap-3 text-[14px]">
-                        <span className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[0.5rem] ${now ? "border-2 border-accent" : "bg-accent text-[#f7f4ee]"}`}>{now ? "" : "✓"}</span>
-                        <span className={now ? "text-ink" : "text-muted"}>{label}</span>
-                        {now && <Spinner />}
-                      </li>
-                    );
-                  })}
-                </ol>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </div>
-  );
-}
-
-type TextQaStop = Extract<TextQaState, { status: "stopped" }>;
-const SECTION_LABELS: Record<TextQaSection, string> = { story: "Story", hook: "Hook", spine: "Story spine", facts: "Facts & Sources", long: "Long script", short: "Short script" };
-
-// Why Automatic Text QA stopped at this Story Review. The manual tools below stay
-// exactly as they are: this only says what needs a human.
-export function TextQaNotice({ qa }: { qa: TextQaStop }): React.ReactElement {
-  return (
-    <section role="alert" aria-label="Text QA" className="flex-none max-h-[30vh] overflow-y-auto flex flex-col gap-1.5 rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
-      <strong className="kicker text-ink">Text QA needs you</strong>
-      <span className="font-medium">{qa.message}</span>
-      {qa.summary && <span className="[text-wrap:pretty]">{qa.summary}</span>}
-      {qa.issues.length > 0 && (
-        <>
-          <span className="font-medium mt-1">Issues:</span>
-          <ul className="list-disc pl-5 flex flex-col gap-1">
-            {qa.issues.map((i, n) => (
-              <li key={n}>
-                <span className="text-muted">{SECTION_LABELS[i.section]}:</span> {i.reason}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-      {qa.feedback && (
-        <details className="mt-1">
-          <summary className="cursor-pointer text-muted">Requested text repair</summary>
-          <p className="whitespace-pre-wrap mt-1">{qa.feedback}</p>
-        </details>
-      )}
-      {qa.error && <span className="text-[13px] break-words text-muted">{qa.error}</span>}
-    </section>
-  );
-}
+// Inside a gate: one issue, or the whole story / the films (and the issue they
+// were opened from).
+type TextView = { issue: number } | { whole: ReviewTab; from: number | null };
+// A visual issue is kept as opened, so fixing it does not pull the screen away.
+type VisualView = { issue: VisualIssue } | { films: VisualIssue | null };
 
 export type ReviewTab = "story" | "facts" | "long" | "short";
 const REVIEW_TABS: [ReviewTab, string][] = [
@@ -362,47 +342,24 @@ const REVIEW_TABS: [ReviewTab, string][] = [
   ["short", "Short script"],
 ];
 
-// The text-review gate as one viewport-sized workspace: header and tabs on top,
-// only the active tab scrolls, and the approval footer never scrolls away.
-// The tab is local UI state only - never persisted, routed or sent anywhere.
-export function StoryReviewPanel(props: { review: StoryReview; onApprove: () => void; approving: boolean; onRevise?: (feedback: string) => Promise<void>; qa?: TextQaStop }): React.ReactElement {
-  const { onRevise, ...rest } = props;
-  const [tab, setTab] = useState<ReviewTab>("story");
-  const [copy, setCopy] = useState<CopyState>("idle");
-  const [reviseOpen, setReviseOpen] = useState(false);
-  const [feedback, setFeedback] = useState("");
-  const [revising, setRevising] = useState(false);
-  const [notice, setNotice] = useState<ReviseNotice | null>(null);
-  useEffect(() => {
-    if (copy === "idle") return;
-    const t = setTimeout(() => setCopy("idle"), 2000);
-    return () => clearTimeout(t);
-  }, [copy]);
-  const onCopy = () => copyDirectorReview(props.review).then((ok) => setCopy(ok ? "copied" : "failed"));
-  const onSubmit = async () => {
-    if (!onRevise || revising) return;
-    setNotice(null);
-    setRevising(true);
-    const out = await submitRevision(feedback, false, onRevise);
-    setRevising(false);
-    if (out.status === "invalid") setNotice({ kind: "invalid", message: out.error });
-    if (out.status === "failed") setNotice({ kind: "failed", message: out.error });
-    if (out.status === "ok") (setReviseOpen(false), setFeedback(""), setTab("story"), setNotice({ kind: "applied" }));
-  };
-  const revise: ReviseControls | undefined = onRevise && {
-    open: reviseOpen,
-    feedback,
-    running: revising,
-    notice,
-    onOpen: () => (setReviseOpen(true), setNotice(null)),
-    onCancel: () => (setReviseOpen(false), setNotice(null)),
-    onFeedback: setFeedback,
-    onSubmit,
-  };
-  return <StoryReviewView {...rest} tab={tab} onTab={setTab} copy={copy} onCopy={onCopy} revise={revise} />;
+// The whole story: every part of the text in one viewport-sized workspace, with
+// Revise story and Continue production. Header and tabs on top, only the active
+// tab scrolls, and the footer never scrolls away. The tab is local UI state only
+// - never persisted, routed or sent anywhere.
+export function StoryReviewPanel(props: {
+  review: StoryReview;
+  onApprove: () => void;
+  approving: boolean;
+  onRevise?: (feedback: string) => Promise<void>;
+  initialTab?: ReviewTab; // opened from a Text QA issue: its tab
+  onBack?: () => void;
+  backLabel?: string;
+}): React.ReactElement {
+  const { onRevise, initialTab, ...rest } = props;
+  const [tab, setTab] = useState<ReviewTab>(initialTab ?? "story");
+  const revise = useRevise(onRevise, () => setTab("story"));
+  return <StoryReviewView {...rest} tab={tab} onTab={setTab} revise={revise} />;
 }
-
-export type CopyState = "idle" | "copied" | "failed";
 
 // The outcome of the last revision attempt in this Story Review session. Local
 // only: it does not survive a reload and is never sent anywhere.
@@ -415,10 +372,46 @@ export interface ReviseControls {
   feedback: string;
   running: boolean;
   notice?: ReviseNotice | null;
-  onOpen: () => void;
+  onOpen: (prefill?: string) => void; // prefill: a starting instruction, kept if feedback was already typed
   onCancel: () => void;
   onFeedback: (v: string) => void;
   onSubmit: () => void;
+}
+
+// The revision form's state: local, never stored. `onApplied` runs after a
+// successful revision. Undefined when revision is not wired.
+export function useRevise(onRevise: ((feedback: string) => Promise<void>) | undefined, onApplied?: () => void): ReviseControls | undefined {
+  const [open, setOpen] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [running, setRunning] = useState(false);
+  const [notice, setNotice] = useState<ReviseNotice | null>(null);
+  const onSubmit = async () => {
+    if (!onRevise || running) return;
+    setNotice(null);
+    setRunning(true);
+    const out = await submitRevision(feedback, false, onRevise);
+    setRunning(false);
+    if (out.status === "invalid") setNotice({ kind: "invalid", message: out.error });
+    if (out.status === "failed") setNotice({ kind: "failed", message: out.error });
+    if (out.status === "ok") {
+      setOpen(false);
+      setFeedback("");
+      setNotice({ kind: "applied" });
+      onApplied?.();
+    }
+  };
+  return (
+    onRevise && {
+      open,
+      feedback,
+      running,
+      notice,
+      onOpen: (prefill) => (setOpen(true), setNotice(null), setFeedback((f) => f || prefill || "")),
+      onCancel: () => (setOpen(false), setNotice(null)),
+      onFeedback: setFeedback,
+      onSubmit,
+    }
+  );
 }
 
 export type RevisionOutcome = { status: "skipped" } | { status: "invalid"; error: string } | { status: "ok" } | { status: "failed"; error: string };
@@ -440,21 +433,10 @@ export async function submitRevision(feedback: string, running: boolean, onRevis
   }
 }
 
-// Copy the director packet for the review on screen. Resolves false (never
-// throws) when the clipboard is unavailable or refuses, so the UI can say so.
-export async function copyDirectorReview(r: StoryReview, clipboard: Pick<Clipboard, "writeText"> | undefined = globalThis.navigator?.clipboard): Promise<boolean> {
-  try {
-    if (!clipboard) return false;
-    await clipboard.writeText(buildStoryReviewClipboardText(r));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// A self-contained Markdown packet for an outside editorial review of the text
-// gate. Durable PastBriefly rules plus the generated review verbatim - no
-// project state, no analytics, nothing rewritten.
+// A self-contained Markdown packet of the review text: durable PastBriefly rules
+// plus the generated review verbatim - no project state, no analytics, nothing
+// rewritten. No longer offered in the product UI; kept as the one rendering of
+// the review text that the Text QA server tests check against.
 export function buildStoryReviewClipboardText(r: StoryReview): string {
   const spine = r.moments.map((m, i) => `${i + 1}. ${m.title}\n   ${m.detail}`).join("\n\n");
   const facts = r.facts.length
@@ -531,16 +513,37 @@ Stop at the text gate.
 // Height = viewport minus the shell's vertical padding (py-12 on desktop; py-8
 // plus the sticky top nav on mobile). A small floor lets the page scroll instead
 // of crushing the panel on very short windows.
-export function StoryReviewView({ review: r, tab, onTab, onApprove, approving, copy = "idle", onCopy, revise, qa }: { review: StoryReview; tab: ReviewTab; onTab: (t: ReviewTab) => void; onApprove: () => void; approving: boolean; copy?: CopyState; onCopy?: () => void; revise?: ReviseControls; qa?: TextQaStop }): React.ReactElement {
+export function StoryReviewView({
+  review: r,
+  tab,
+  onTab,
+  onApprove,
+  approving,
+  revise,
+  onBack,
+  backLabel,
+}: {
+  review: StoryReview;
+  tab: ReviewTab;
+  onTab: (t: ReviewTab) => void;
+  onApprove: () => void;
+  approving: boolean;
+  revise?: ReviseControls;
+  onBack?: () => void;
+  backLabel?: string;
+}): React.ReactElement {
   return (
     <div className="max-w-3xl h-[calc(100dvh-8rem)] md:h-[calc(100dvh-6rem)] min-h-[22rem] flex flex-col gap-5">
       <header className="flex-none">
-        <p className="kicker mb-1">Story review</p>
+        {onBack && (
+          <button onClick={onBack} className="inline-flex items-center gap-2 mb-3 text-[13px] text-[#cabfb0] hover:text-accent">
+            <span aria-hidden="true">←</span> {backLabel || "Back"}
+          </button>
+        )}
+        <p className="kicker mb-1">The whole story</p>
         <h1 className="text-3xl">{r.title}</h1>
         {r.hook && <p className="text-muted mt-2 text-lg [text-wrap:pretty]">{r.hook}</p>}
       </header>
-
-      {qa && <TextQaNotice qa={qa} />}
 
       <div role="tablist" className="flex-none flex gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] border-b border-line">
         {REVIEW_TABS.map(([id, label]) => (
@@ -557,94 +560,27 @@ export function StoryReviewView({ review: r, tab, onTab, onApprove, approving, c
       </div>
 
       <div role="tabpanel" className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-2">
-        {tab === "story" && (
-          <ol className="list-decimal pl-5 flex flex-col gap-3.5">
-            {r.moments.map((m, i) => (
-              <li key={i} className="text-[15px] leading-relaxed pl-1">
-                <span className="font-semibold">{m.title}</span>
-                <span className="text-muted"> - {m.detail}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-        {tab === "facts" && (
-          <ul className="flex flex-col">
-            {r.facts.map((f, i) => (
-              <li key={i} className="text-[15px] leading-relaxed py-3 border-b border-line">
-                {f.fact}{" "}
-                {f.sourceUrl ? (
-                  <a href={f.sourceUrl} target="_blank" rel="noreferrer" className="text-accent underline">
-                    {f.sourceTitle || "source"}
-                  </a>
-                ) : (
-                  <span className="text-muted">({f.sourceTitle})</span>
-                )}
-              </li>
-            ))}
-            {r.facts.length === 0 && <li className="text-sm text-muted">No fact sheet was produced for this story.</li>}
-          </ul>
-        )}
-        {tab === "long" && <p className="whitespace-pre-wrap text-[15px] leading-[1.75] max-w-[68ch]">{r.longScript}</p>}
-        {tab === "short" && <p className="whitespace-pre-wrap text-[15px] leading-[1.75] max-w-[68ch]">{r.shortScript}</p>}
+        <TabContent review={r} tab={tab} />
       </div>
 
-      {revise?.open && (
-        <section aria-label="Director revision" className="flex-none flex flex-col gap-2.5 pt-4 border-t border-line">
-          <label htmlFor="director-feedback" className="kicker">Director feedback</label>
-          <textarea
-            id="director-feedback"
-            value={revise.feedback}
-            onChange={(e) => revise.onFeedback(e.target.value)}
-            disabled={revise.running}
-            rows={5}
-            placeholder="Paste the REVISE feedback from the Director..."
-            className="w-full max-h-[30vh] resize-y rounded-xl bg-field border border-line px-4 py-3 text-ink text-[14.5px] leading-relaxed placeholder:text-dim outline-none transition focus:border-accent/55"
-          />
-          {revise.notice?.kind === "invalid" && (
-            <p role="alert" className="text-[14px] font-medium text-ink">
-              {revise.notice.message}
-            </p>
-          )}
-          {revise.notice?.kind === "failed" && (
-            <div role="alert" className="flex flex-col gap-1 rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
-              <strong className="font-semibold">Revision failed</strong>
-              <span>The current draft was not changed.</span>
-              <span className="text-[13px] break-words">{revise.notice.message}</span>
-            </div>
-          )}
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <button onClick={revise.onCancel} disabled={revise.running} className="btn btn-ghost">
-              Cancel
-            </button>
-            <button onClick={revise.onSubmit} disabled={revise.running} className="btn btn-ghost">
-              {revise.running ? "Revising…" : "Revise story"}
-            </button>
-          </div>
-        </section>
-      )}
+      {revise && <ReviseBox revise={revise} />}
 
       {revise?.notice?.kind === "applied" && !revise.open && (
         <div role="status" className="flex-none flex flex-col gap-0.5 rounded-lg border border-[#a9c3a4]/60 bg-[#a9c3a4]/10 px-4 py-3 text-[14px] text-ink">
           <strong className="font-semibold">Revision applied</strong>
-          <span>Review the updated draft before approving.</span>
+          <span>Read the updated story, then continue production.</span>
         </div>
       )}
 
-      <footer className="flex-none flex flex-wrap items-center justify-between gap-x-6 gap-y-3 pt-4 border-t border-line">
-        <p className="flex-[1_1_320px] text-muted text-sm [text-wrap:pretty]">
-          PB4 has completed its research and factual checks. Review whether the story is clear and interesting before media is generated.
-        </p>
+      <footer className="flex-none flex flex-wrap items-center justify-end gap-x-6 gap-y-3 pt-4 border-t border-line">
         <div className="flex-none flex flex-wrap items-center gap-3">
-          <button onClick={onCopy} className="btn btn-ghost" aria-live="polite">
-            {copy === "copied" ? "Copied" : copy === "failed" ? "Copy failed" : "Copy Director Review"}
-          </button>
           {revise && (
-            <button onClick={revise.onOpen} disabled={revise.open || approving} aria-expanded={revise.open} className="btn btn-ghost">
+            <button onClick={() => revise.onOpen()} disabled={revise.open || approving} aria-expanded={revise.open} className="btn btn-ghost">
               Revise story
             </button>
           )}
           <button onClick={onApprove} disabled={approving || revise?.running} className="btn btn-primary">
-            {approving ? "Continuing…" : "Approve & continue"}
+            {approving ? "Continuing…" : "Continue production"}
           </button>
         </div>
       </footer>
@@ -652,14 +588,169 @@ export function StoryReviewView({ review: r, tab, onTab, onApprove, approving, c
   );
 }
 
-function Spinner(): React.ReactElement {
-  return <span className="w-3.5 h-3.5 border-2 border-accent border-t-transparent rounded-full animate-spin" />;
+// One Story Review tab's content.
+function TabContent({ review: r, tab }: { review: StoryReview; tab: ReviewTab }): React.ReactElement {
+  if (tab === "facts") {
+    return (
+      <ul className="flex flex-col">
+        {r.facts.map((f, i) => (
+          <li key={i} className="text-[15px] leading-relaxed py-3 border-b border-line">
+            {f.fact}{" "}
+            {f.sourceUrl ? (
+              <a href={f.sourceUrl} target="_blank" rel="noreferrer" className="text-accent underline">
+                {f.sourceTitle || "source"}
+              </a>
+            ) : (
+              <span className="text-muted">({f.sourceTitle})</span>
+            )}
+          </li>
+        ))}
+        {r.facts.length === 0 && <li className="text-sm text-muted">No fact sheet was produced for this story.</li>}
+      </ul>
+    );
+  }
+  if (tab === "long" || tab === "short") return <p className="whitespace-pre-wrap text-[15px] leading-[1.75] max-w-[68ch]">{tab === "long" ? r.longScript : r.shortScript}</p>;
+  return (
+    <ol className="list-decimal pl-5 flex flex-col gap-3.5">
+      {r.moments.map((m, i) => (
+        <li key={i} className="text-[15px] leading-relaxed pl-1">
+          <span className="font-semibold">{m.title}</span>
+          <span className="text-muted"> - {m.detail}</span>
+        </li>
+      ))}
+    </ol>
+  );
 }
+
+// The open Director revision form: feedback, what went wrong, Cancel and submit.
+function ReviseBox({ revise }: { revise: ReviseControls }): React.ReactElement | null {
+  if (!revise.open) return null;
+  return (
+    <section aria-label="Director revision" className="flex-none flex flex-col gap-2.5 pt-4 border-t border-line">
+      <label htmlFor="director-feedback" className="kicker">Director feedback</label>
+      <textarea
+        id="director-feedback"
+        value={revise.feedback}
+        onChange={(e) => revise.onFeedback(e.target.value)}
+        disabled={revise.running}
+        rows={5}
+        placeholder="Paste the REVISE feedback from the Director..."
+        className="w-full max-h-[30vh] resize-y rounded-xl bg-field border border-line px-4 py-3 text-ink text-[14.5px] leading-relaxed placeholder:text-dim outline-none transition focus:border-accent/55"
+      />
+      {revise.notice?.kind === "invalid" && (
+        <p role="alert" className="text-[14px] font-medium text-ink">
+          {revise.notice.message}
+        </p>
+      )}
+      {revise.notice?.kind === "failed" && (
+        <div role="alert" className="flex flex-col gap-1 rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
+          <strong className="font-semibold">Revision failed</strong>
+          <span>The current draft was not changed.</span>
+          <span className="text-[13px] break-words">{revise.notice.message}</span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <button onClick={revise.onCancel} disabled={revise.running} className="btn btn-ghost">
+          Cancel
+        </button>
+        <button onClick={revise.onSubmit} disabled={revise.running} className="btn btn-ghost">
+          {revise.running ? "Revising…" : "Revise story"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------- Text issue
+
+// The part of the story a Text QA section is about: the hook, the story spine,
+// the facts, or one script.
+export function IssueText({ review: r, section }: { review: StoryReview; section: TextQaSection }): React.ReactElement {
+  if (section === "hook" || section === "story") {
+    return (
+      <div className="flex flex-col gap-4">
+        <div>
+          <p className="font-serif text-[22px] leading-tight text-ink">{r.title}</p>
+          {r.hook && <p className="mt-1.5 text-[15.5px] text-muted [text-wrap:pretty]">{r.hook}</p>}
+        </div>
+        {section === "story" && <TabContent review={r} tab="story" />}
+      </div>
+    );
+  }
+  return <TabContent review={r} tab={SECTION_TAB[section]} />;
+}
+
+type TextIssueProps = {
+  review: StoryReview;
+  issue: TextQaIssue;
+  index: number;
+  total: number;
+  onBack: () => void;
+  onNext?: () => void;
+  onApprove: () => void;
+  approving: boolean;
+  more: React.ReactNode;
+};
+
+export function TextIssuePanel({ onRevise, ...props }: TextIssueProps & { onRevise: (feedback: string) => Promise<void> }): React.ReactElement {
+  const revise = useRevise(onRevise);
+  return <TextIssueView {...props} revise={revise} />;
+}
+
+// One text issue on its own: what is wrong, the text it is about, and the one
+// fix (Revise story). After a revision, continuing is the decision.
+export function TextIssueView({ review, issue, index, total, onBack, onNext, onApprove, approving, more, revise }: TextIssueProps & { revise?: ReviseControls }): React.ReactElement {
+  const label = SECTION_LABEL[issue.section];
+  const applied = revise?.notice?.kind === "applied" && !revise.open;
+  return (
+    <div className="flex flex-col gap-6 max-w-3xl" data-text-issue-view={issue.section}>
+      <button onClick={onBack} className="self-start inline-flex items-center gap-2 text-[13px] text-[#cabfb0] hover:text-accent">
+        <span aria-hidden="true">←</span> Back to issues
+      </button>
+      <div className="flex flex-col gap-2">
+        <p className="text-[11px] font-semibold tracking-[0.18em] uppercase text-accent">
+          Text issue · Issue {index + 1} of {total}
+        </p>
+        <h1 className="font-serif text-[30px] md:text-[36px] leading-[1.1] text-ink">{label}</h1>
+        <p className="text-[16px] leading-[1.55] text-[#c8bcad] [text-wrap:pretty] break-words">{issue.reason}</p>
+      </div>
+      <section aria-label={label} data-issue-content className="max-h-[48vh] overflow-y-auto rounded-xl border border-line bg-panel px-5 py-4">
+        <IssueText review={review} section={issue.section} />
+      </section>
+      {revise && <ReviseBox revise={revise} />}
+      {applied && (
+        <div role="status" className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-[#a9c3a4]/60 bg-[#a9c3a4]/10 px-4 py-3 text-[14px] text-ink">
+          <span className="flex-1 min-w-[220px]">
+            <strong className="font-semibold">Revision applied.</strong> Read it above. When it is right, continue production.
+          </span>
+          <button onClick={onApprove} disabled={approving} className="btn btn-primary">
+            {approving ? "Continuing…" : "Continue production"}
+          </button>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 pt-4 border-t border-line">
+        {revise && !revise.open && (
+          <button onClick={() => revise.onOpen(`Revise the ${label.toLowerCase()}: ${issue.reason}`)} disabled={approving} className={applied ? "btn btn-ghost" : "btn btn-primary"}>
+            Revise story
+          </button>
+        )}
+        {onNext && (
+          <button onClick={onNext} className="text-[14px] text-ink underline underline-offset-[3px] decoration-[rgba(245,235,222,0.3)] hover:text-accent">
+            Next issue →
+          </button>
+        )}
+        {more}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Failed
 
 function Fail({ slug, message, job, onRetry, retrying, maxSpend, onApproveMore }: { slug: string; message?: string; job?: Job; onRetry?: () => void; retrying?: boolean; maxSpend?: number; onApproveMore?: (newApprovedMax: number) => Promise<void> }): React.ReactElement {
   return (
     <div className="flex flex-col gap-4 max-w-lg">
-      <h1 className="text-2xl">Something went wrong</h1>
+      <h1 className="text-2xl">Production stopped</h1>
       {job ? <FailedJobDetails job={job} /> : <p className="text-muted">{message}</p>}
       {job && onApproveMore && maxSpend !== undefined && maxSpend > 0 && isBudgetFailure(job) && (
         <ApproveMoreResume job={job} maxSpendUsd={maxSpend} onApprove={onApproveMore} />

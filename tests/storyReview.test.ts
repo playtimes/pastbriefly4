@@ -5,7 +5,8 @@ import type { Job, StoryReview } from "../src/types.ts";
 
 // The text-review workspace. Static renders per tab, plus the tab and approve
 // handlers invoked directly. No server, no provider, no DOM.
-const { StoryReviewPanel, StoryReviewView, CreatingProgress, buildStoryReviewClipboardText, copyDirectorReview, submitRevision } = await import("../src/app/screens/Creating.tsx");
+const { StoryReviewPanel, StoryReviewView, TextIssueView, IssueText, buildStoryReviewClipboardText, submitRevision } = await import("../src/app/screens/Creating.tsx");
+const { ProductionProgress } = await import("../src/app/screens/Production.tsx");
 
 const review: StoryReview = {
   title: "Generated title T-91",
@@ -23,24 +24,27 @@ const review: StoryReview = {
   shortScript: "Short script S-9.",
 };
 
-const view = (tab: any, over: Partial<{ review: StoryReview; onTab: any; onApprove: any; approving: boolean; copy: any; onCopy: any; revise: any }> = {}) =>
+const view = (tab: any, over: Partial<{ review: StoryReview; onTab: any; onApprove: any; approving: boolean; revise: any }> = {}) =>
   React.createElement(StoryReviewView, { review, tab, onTab: vi.fn(), onApprove: vi.fn(), approving: false, ...over });
 const html = (tab: any, over = {}) => renderToStaticMarkup(view(tab, over));
 
-// Find a button in a hook-free element tree by its text.
+// Find a button in a hook-free element tree by its text (function components,
+// like the revise form and More, are expanded by calling them).
 const text = (n: any): string =>
   n == null || typeof n === "boolean" ? "" : Array.isArray(n) ? n.map(text).join("") : typeof n === "object" ? text(n.props?.children) : String(n);
-function button(tree: any, label: string): any {
-  let found: any;
+function buttons(tree: any, label: string): any[] {
+  const out: any[] = [];
   const walk = (n: any) => {
     if (Array.isArray(n)) return n.forEach(walk);
     if (!n || typeof n !== "object") return;
-    if (n.type === "button" && text(n) === label) found = n;
+    if (typeof n.type === "function") return walk(n.type(n.props));
+    if (n.type === "button" && text(n) === label) out.push(n);
     walk(n.props?.children);
   };
-  walk(StoryReviewView(tree.props));
-  return found;
+  walk(tree);
+  return out;
 }
+const button = (tree: any, label: string): any => buttons(tree, label).at(-1);
 
 describe("story review workspace", () => {
   test("renders the header, all four tabs and Story by default", () => {
@@ -53,7 +57,7 @@ describe("story review workspace", () => {
     expect(out).toContain("detail D-2");
     expect(out).not.toContain("Fact F-1");
     expect(out).not.toContain("Long script L-1");
-    expect(out).toContain("Approve &amp; continue");
+    expect(out).toContain("Continue production");
   });
 
   test("each tab shows only its own generated content", () => {
@@ -86,11 +90,11 @@ describe("story review workspace", () => {
     expect(panelTag).toContain("flex-1");
     expect(panelTag).toContain("min-h-0");
     expect(panelTag).toContain("overflow-y-auto");
-    expect(out.slice(panel, footer)).not.toContain("Approve");
-    expect(out.slice(footer)).toContain("Approve &amp; continue");
+    expect(out.slice(panel, footer)).not.toContain("Continue production");
+    expect(out.slice(footer)).toContain("Continue production");
   });
 
-  test("tab buttons select their tab; Approve calls the existing handler", () => {
+  test("tab buttons select their tab; Continue production calls the existing approval", () => {
     const onTab = vi.fn();
     const onApprove = vi.fn();
     const tree = view("story", { onTab, onApprove });
@@ -99,7 +103,7 @@ describe("story review workspace", () => {
     button(tree, "Short script").props.onClick();
     button(tree, "Story").props.onClick();
     expect(onTab.mock.calls.map((c) => c[0])).toEqual(["facts", "long", "short", "story"]);
-    button(tree, "Approve & continue").props.onClick();
+    button(tree, "Continue production").props.onClick();
     expect(onApprove).toHaveBeenCalledOnce();
   });
 
@@ -110,14 +114,7 @@ describe("story review workspace", () => {
   });
 });
 
-describe("copy director review", () => {
-  test("the footer has Copy Director Review next to Approve, outside the scroll panel", () => {
-    const out = html("long");
-    const footer = out.slice(out.indexOf("<footer"));
-    expect(footer).toContain(">Copy Director Review</button>");
-    expect(footer).toContain("Approve &amp; continue");
-    expect(out.slice(0, out.indexOf("<footer"))).not.toContain("Copy Director Review");
-  });
+describe("the review text packet", () => {
 
   test("the packet carries the whole generated review verbatim plus the durable brief", () => {
     const md = buildStoryReviewClipboardText(review);
@@ -144,33 +141,8 @@ describe("copy director review", () => {
     expect(md).toContain("No fact sheet was produced for this story.");
   });
 
-  test("copy writes the packet for this review; failures are reported, not hidden", async () => {
-    const clip = { writeText: vi.fn(async () => {}) };
-    expect(await copyDirectorReview(review, clip)).toBe(true);
-    expect(clip.writeText).toHaveBeenCalledWith(buildStoryReviewClipboardText(review));
 
-    expect(await copyDirectorReview(review, { writeText: vi.fn(async () => { throw new Error("denied"); }) })).toBe(false);
-    expect(await copyDirectorReview(review, undefined)).toBe(false);
-  });
 
-  test("copy does not approve or change tab; approve does not copy", () => {
-    const onApprove = vi.fn();
-    const onCopy = vi.fn();
-    const onTab = vi.fn();
-    const tree = view("facts", { onApprove, onCopy, onTab });
-    button(tree, "Copy Director Review").props.onClick();
-    expect(onCopy).toHaveBeenCalledOnce();
-    expect(onApprove).not.toHaveBeenCalled();
-    expect(onTab).not.toHaveBeenCalled();
-    button(tree, "Approve & continue").props.onClick();
-    expect(onApprove).toHaveBeenCalledOnce();
-    expect(onCopy).toHaveBeenCalledOnce();
-  });
-
-  test("button label reflects copied / failed", () => {
-    expect(html("story", { copy: "copied" })).toContain(">Copied</button>");
-    expect(html("story", { copy: "failed" })).toContain(">Copy failed</button>");
-  });
 });
 
 describe("director revision", () => {
@@ -196,13 +168,11 @@ describe("director revision", () => {
     shortScript: "Revised short RS-1.",
   };
 
-  test("the footer orders Copy Director Review, Revise story, Approve & continue", () => {
+  test("the footer offers Revise story, then Continue production, and nothing else", () => {
     const footer = html("long", { revise: controls() }).split("<footer")[1];
-    const at = (s: string) => footer.indexOf(s);
-    expect(at(">Copy Director Review</button>")).toBeGreaterThan(-1);
-    expect(at(">Revise story</button>")).toBeGreaterThan(at(">Copy Director Review</button>"));
-    expect(at("Approve &amp; continue")).toBeGreaterThan(at(">Revise story</button>"));
+    expect(footer.indexOf(">Continue production</button>")).toBeGreaterThan(footer.indexOf(">Revise story</button>"));
     expect(footer).toMatch(/class="btn btn-ghost"[^>]*>Revise story</);
+    expect(footer).not.toMatch(/Copy|More|Director Review/);
   });
 
   test("closed by default: no feedback box; opening calls onOpen and nothing else", () => {
@@ -263,7 +233,7 @@ describe("director revision", () => {
     const out = html("story", { revise: controls({ open: true, feedback: "Tighten the opening.", running: true }) });
     expect(out).toContain("Revising…</button>");
     expect(out).toMatch(/<textarea[^>]*disabled=""/);
-    expect(out).toMatch(/disabled=""[^>]*>Approve &amp; continue</);
+    expect(out).toMatch(/disabled=""[^>]*>Continue production</);
     const onRevise = vi.fn(async () => {});
     expect(await submitRevision("Tighten the opening.", true, onRevise)).toEqual({ status: "skipped" });
     expect(onRevise).not.toHaveBeenCalled();
@@ -277,14 +247,7 @@ describe("director revision", () => {
     const onApprove = vi.fn();
     // The first "Revise story" is the submit in the feedback box; the last is the footer opener.
     const tree = view("story", { revise, onApprove });
-    const all: any[] = [];
-    const walk = (n: any): void => {
-      if (Array.isArray(n)) return n.forEach(walk);
-      if (!n || typeof n !== "object") return;
-      if (n.type === "button" && text(n) === "Revise story") all.push(n);
-      walk(n.props?.children);
-    };
-    walk(StoryReviewView(tree.props));
+    const all = buttons(tree, "Revise story");
     expect(all).toHaveLength(2);
     all[0].props.onClick();
     expect(revise.onSubmit).toHaveBeenCalledOnce();
@@ -309,20 +272,20 @@ describe("director revision", () => {
     expect(out).not.toContain("Revision applied");
   });
 
-  test("a successful revision says it was applied and still waits for Approve", () => {
+  test("a successful revision says it was applied and still waits for Continue production", () => {
     const onApprove = vi.fn();
     const out = html("story", { review: revised, onApprove, revise: controls({ notice: { kind: "applied" } }) });
     const status = out.slice(out.indexOf('role="status"'), out.indexOf("<footer"));
     expect(status).toContain("Revision applied");
-    expect(status).toContain("Review the updated draft before approving.");
+    expect(status).toContain("Read the updated story, then continue production.");
     expect(out).not.toContain("Revision failed");
-    expect(out).toMatch(/<button class="btn btn-primary">Approve &amp; continue</);
+    expect(out).toMatch(/<button class="btn btn-primary">Continue production</);
     expect(onApprove).not.toHaveBeenCalled();
     // Opening the box again for another pass hides the old confirmation.
     expect(html("story", { revise: controls({ open: true, notice: { kind: "applied" } }) })).not.toContain("Revision applied");
   });
 
-  test("a revised review renders normally, and Copy Director Review copies the revision", async () => {
+  test("a revised review renders normally and still waits for Continue production", () => {
     const story = html("story", { review: revised, revise: controls() });
     expect(story).toContain("Revised title R-4");
     expect(story).toContain("Revised moment RM-1");
@@ -330,16 +293,8 @@ describe("director revision", () => {
     expect(html("long", { review: revised })).toContain("Revised long RL-1.");
     expect(html("short", { review: revised })).toContain("Revised short RS-1.");
     expect(html("facts", { review: revised })).toContain("Revised fact RF-1.");
-    // Still at the text gate: Approve is there, enabled, and waits for a click.
-    expect(story).toMatch(/<button class="btn btn-primary">Approve &amp; continue</);
-
-    const clip = { writeText: vi.fn(async () => {}) };
-    expect(await copyDirectorReview(revised, clip)).toBe(true);
-    const md = clip.writeText.mock.calls[0][0] as string;
-    expect(md).toContain("## TITLE\n\nRevised title R-4\n");
-    expect(md).toContain("## LONG SCRIPT\n\nRevised long RL-1.\n");
-    expect(md).not.toContain("Generated title T-91");
-    expect(md).not.toContain("Long script L-1");
+    expect(story).toMatch(/<button class="btn btn-primary">Continue production</);
+    expect(buildStoryReviewClipboardText(revised)).toContain("## LONG SCRIPT\n\nRevised long RL-1.\n");
   });
 
   test("the panel shows the Revise story action only when revision is wired", () => {
@@ -351,52 +306,95 @@ describe("director revision", () => {
   });
 });
 
-describe("Automatic Text QA on the Creating screen", () => {
-  const job =(over: Partial<Job>): Job =>
+describe("Text needs you: the simple issue view and the advanced review", () => {
+  const job = (over: Partial<Job>): Job =>
     ({ id: "j", storyId: "s", state: "awaiting_text", step: "scripts", message: "", error: null, mock: false, estimatedCost: 5, approvedMax: 15, spent: 1, preview: null, createdAt: "", updatedAt: "", ...over }) as Job;
-  const progress = (j: Job) => renderToStaticMarkup(React.createElement(CreatingProgress, { job: j }));
+  const progress = (j: Job) => renderToStaticMarkup(React.createElement(ProductionProgress, { job: j }));
+  const controls = (over: Record<string, unknown> = {}) => ({ open: false, feedback: "", running: false, notice: null, onOpen: vi.fn(), onCancel: vi.fn(), onFeedback: vi.fn(), onSubmit: vi.fn(), ...over });
+  const issueProps = (over: Record<string, unknown> = {}) =>
+    ({ review, issue: { section: "long", reason: "The Long says not a single shot was fired LR-7." }, index: 0, total: 2, onBack: vi.fn(), onNext: vi.fn(), onApprove: vi.fn(), approving: false, more: null, revise: controls(), ...over }) as any;
+  const issueHtml = (over: Record<string, unknown> = {}) => renderToStaticMarkup(React.createElement(TextIssueView, issueProps(over)));
 
-  test("a stop opens the Story Review with the reason above it, and every manual tool stays", () => {
-    const qa = {
-      status: "stopped" as const,
-      stage: "final_verify" as const,
-      message: "Text repair completed, but the final verification still needs you.",
-      summary: "The Short still overstates SO-1.",
-      issues: [{ section: "short" as const, reason: "Ends on a weak statistic WS-4." }],
-      feedback: "Remove the disputed fact FX-2.",
-      error: undefined,
-    };
-    const out = renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false, onRevise: vi.fn(async () => {}), qa }));
-    const panel = out.slice(out.indexOf('aria-label="Text QA"'), out.indexOf('role="tablist"'));
-    for (const s of ["Text QA needs you", qa.message, "The Short still overstates SO-1.", "Issues:", "Short script:</span> Ends on a weak statistic WS-4.", "Remove the disputed fact FX-2."]) expect(panel).toContain(s);
-    for (const t of ["Story", "Facts &amp; Sources", "Long script", "Short script"]) expect(out).toContain(`>${t}</button>`);
-    for (const b of ["Copy Director Review", "Revise story", "Approve &amp; continue"]) expect(out).toContain(`>${b}</button>`);
-    expect(out).toContain("Generated title T-91"); // the current draft stays visible
-
-    const failed = renderToStaticMarkup(
-      React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false, qa: { status: "stopped", stage: "director_review", message: "Text QA could not complete. Review the current draft manually.", summary: "", issues: [], error: "OpenAI responses 500" } }),
-    );
-    expect(failed).toContain("Text QA could not complete. Review the current draft manually.");
-    expect(failed).toContain("OpenAI responses 500");
-    expect(failed).not.toContain("Issues:");
-    // No Text QA state: the Story Review is exactly as before.
-    expect(renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false }))).not.toContain("Text QA");
+  test("one issue: its section, its reason and only the text it is about", () => {
+    const out = issueHtml();
+    expect(out).toContain("Issue 1 of 2");
+    expect(out).toContain(">Long script</h1>");
+    expect(out).toContain("The Long says not a single shot was fired LR-7.");
+    const content = out.slice(out.indexOf("data-issue-content"));
+    expect(content).toContain("Long script L-1.\n\nLong paragraph L-2.");
+    for (const s of ["Short script S-9", "Fact F-1", "Moment one M-1"]) expect(content).not.toContain(s);
+    // Not the workspace: no tabs, no approval, no packet.
+    for (const s of ['role="tablist"', "Approve", "Copy Director Review", "Text QA"]) expect(out).not.toContain(s);
+    // The other sections show their own content.
+    const at = (section: string) => renderToStaticMarkup(React.createElement(IssueText, { review, section } as any));
+    expect(at("facts")).toContain("Fact F-1 in full.");
+    expect(at("short")).toContain("Short script S-9.");
+    expect(at("spine")).toContain("Moment one M-1");
+    expect(at("hook")).toContain("Generated hook H-37");
+    expect(at("hook")).not.toContain("Moment one");
   });
 
-  test("while Text QA runs the progress screen shows its phases, never the approval", () => {
-    const reviewing = progress(job({ textQa: { status: "running", phase: "review" } }));
-    expect(reviewing).toContain("Director reviewing…</h1>");
-    expect(reviewing).not.toContain("Applying text repair");
+  test("Revise story opens the existing revision, started from the issue; Next issue and Back work", () => {
+    const p = issueProps();
+    const tree = React.createElement(TextIssueView, p);
+    button(tree, "Revise story").props.onClick();
+    expect(p.revise.onOpen.mock.calls).toEqual([["Revise the long script: The Long says not a single shot was fired LR-7."]]);
+    button(tree, "Next issue →").props.onClick();
+    button(tree, "← Back to issues").props.onClick();
+    expect(p.onNext).toHaveBeenCalledOnce();
+    expect(p.onBack).toHaveBeenCalledOnce();
+    expect(issueHtml({ onNext: undefined })).not.toContain("Next issue");
+    // Open: the same feedback form as the advanced review; submit goes through it.
+    const open = issueProps({ revise: controls({ open: true, feedback: "Cut the claim." }) });
+    expect(renderToStaticMarkup(React.createElement(TextIssueView, open))).toMatch(/<textarea[^>]*>Cut the claim\.<\/textarea>/);
+    buttons(React.createElement(TextIssueView, open), "Revise story")[0].props.onClick();
+    expect(open.revise.onSubmit).toHaveBeenCalledOnce();
+  });
+
+  test("after a revision, continuing is the decision", () => {
+    const p = issueProps({ revise: controls({ notice: { kind: "applied" } }) });
+    const out = renderToStaticMarkup(React.createElement(TextIssueView, p));
+    expect(out).toContain("Revision applied.");
+    button(React.createElement(TextIssueView, p), "Continue production").props.onClick();
+    expect(p.onApprove).toHaveBeenCalledOnce();
+    expect(issueHtml()).not.toContain("Continue production"); // not before a revision
+  });
+
+  test("the whole story opens on the issue's tab, returns to the issue, and keeps only Revise story and Continue production", () => {
+    const onBack = vi.fn();
+    const out = renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false, onRevise: vi.fn(async () => {}), initialTab: "short", onBack, backLabel: "Back to issue" }));
+    expect(out).toContain("The whole story");
+    expect(out).toMatch(/aria-selected="true"[^>]*>Short script</);
+    for (const t of ["Story", "Facts &amp; Sources", "Long script", "Short script"]) expect(out).toContain(`>${t}</button>`);
+    for (const b of ["Revise story", "Continue production"]) expect(out).toContain(`>${b}</button>`);
+    expect(out).not.toMatch(/Copy Director Review|Text QA|Issue 1|Production details|Review whether the story is clear and interesting/);
+    button(view("short", { onBack, backLabel: "Back to issue" } as any), "← Back to issue").props.onClick();
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(html("facts")).not.toContain("Back to"); // not opened from anywhere: no back link
+  });
+
+  test("while Text QA runs the progress screen reads Writing: no QA phase, no stale script count, never the approval", () => {
+    // The finished Scripts count is still on the job at the text gate.
+    const reviewing = progress(job({ textQa: { status: "running", phase: "review" }, progress: { current: 2, total: 2 } }));
+    expect(reviewing).toContain("Writing…</h1>");
+    expect(reviewing).toContain("Step 2 of 6");
+    expect(reviewing).toContain('aria-current="step" data-stage-current="writing"');
+    const primary = reviewing.slice(0, reviewing.indexOf("<details"));
+    for (const s of ["Director reviewing", "Applying text repair", "Final text verification", "%", "2 / 2", "Text QA"]) expect(primary).not.toContain(s);
     expect(reviewing).not.toContain("Approve");
 
     const verifying = progress(job({ textQa: { status: "running", phase: "verify" } }));
-    expect(verifying).toContain("Final text verification…</h1>");
-    const qaList = verifying.slice(verifying.indexOf('aria-label="Text QA"'));
-    for (const s of ["Director reviewing", "Applying text repair", "Final text verification"]) expect(qaList).toContain(s);
+    expect(verifying).toContain("Writing…</h1>");
+    expect(verifying).not.toMatch(/verify|Text QA|review ·/); // no check phase anywhere, details included
 
+    // Approved: Writing is ticked and production resumes at narration.
     const passed = progress(job({ state: "queued", step: "queued", textQa: { status: "passed" } }));
-    expect(passed).toContain("Text QA passed. Continuing to visuals…");
-    expect(progress(job({ state: "running", step: "scripts", progress: { current: 2, total: 2 } }))).toContain("Auditing scripts…</h1>");
-    expect(progress(job({ state: "running", step: "research" }))).toContain("Researching the story…</h1>");
+    expect(passed).toContain("Recording narration…</h1>");
+    expect(passed).toMatch(/✓<\/span>Writing<\/li>/);
+    expect(progress(job({ state: "running", step: "scripts", progress: { current: 1, total: 2 } }))).toContain("Step 2 of 6 · 50%");
+    const auditing = progress(job({ state: "running", step: "scripts", progress: { current: 2, total: 2 } }));
+    expect(auditing).toContain("Writing…</h1>");
+    expect(auditing.slice(0, auditing.indexOf("<details"))).not.toContain("%");
+    expect(progress(job({ state: "running", step: "research" }))).toContain("Researching…</h1>");
   });
 });

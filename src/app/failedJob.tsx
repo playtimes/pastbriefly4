@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { STEP_ORDER, STEP_LABELS, type Job } from "../types.ts";
+import { stageLabel } from "./productionStage.ts";
+import type { Job } from "../types.ts";
 
 // True when a job failed because the next paid call would have passed its
 // approved maximum. The budget guard is the only source of this wording.
@@ -74,44 +75,16 @@ export function ApproveMoreResume({
   );
 }
 
-// Shared read-out for a failed job: which steps completed, where it failed, the
-// error, and tracked spend (a conservative estimate, not a provider invoice) vs.
-// the approved max. Uses only values already on the job.
+// Shared read-out for a failed job: the stage it stopped in, the error, and
+// tracked spend (a conservative estimate, not a provider invoice) vs. the
+// approved max. Uses only values already on the job.
 export function FailedJobDetails({ job }: { job: Job }): React.ReactElement {
-  const failedIndex = STEP_ORDER.indexOf(job.step); // -1 for queued/preview/etc.
   return (
     <div className="flex flex-col gap-4">
-      {failedIndex >= 0 ? (
-        <ol className="flex flex-col gap-2">
-          {STEP_ORDER.map((step, i) => {
-            const status = i < failedIndex ? "done" : i === failedIndex ? "failed" : "pending";
-            return (
-              <li key={step} className="flex flex-col gap-1">
-                <div className="flex items-center gap-2.5">
-                  <span
-                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[0.6rem] ${
-                      status === "done"
-                        ? "bg-accent text-[#f7f4ee]"
-                        : status === "failed"
-                          ? "border-2 border-red-400 text-red-400"
-                          : "border border-line"
-                    }`}
-                  >
-                    {status === "done" ? "✓" : status === "failed" ? "✕" : ""}
-                  </span>
-                  <span className={status === "failed" ? "text-red-400" : status === "done" ? "text-muted" : "text-muted/60"}>
-                    {STEP_LABELS[step]}
-                    {status === "failed" ? " - failed here" : ""}
-                  </span>
-                </div>
-                {status === "failed" && <p className="pl-[30px] text-[13px] leading-[1.5] text-red-400 [text-wrap:pretty]">{job.error || "Generation failed."}</p>}
-              </li>
-            );
-          })}
-        </ol>
-      ) : (
-        <p className="text-[13px] leading-[1.5] text-red-400 [text-wrap:pretty]">{job.error || "Generation failed."}</p>
-      )}
+      <div className="flex flex-col gap-1.5">
+        <p className="text-[14px] text-ink">Stopped while {stageLabel(job).toLowerCase()}.</p>
+        <p className="text-[13px] leading-[1.5] text-red-400 [text-wrap:pretty] break-words">{job.error || "Generation failed."}</p>
+      </div>
 
       <dl className="flex flex-col gap-1 border-t border-line pt-3 text-[13px]">
         <SpendRow label="Tracked spend (est.)" value={job.spent} strong />

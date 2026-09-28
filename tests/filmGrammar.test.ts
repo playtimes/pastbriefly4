@@ -936,10 +936,9 @@ describe("reuse: each used asset is acquired once", () => {
     expect(p).toMatchObject({ reconstruction: 2, graphic: 1, archive: 0, motionSelected: 1, remainingMotionCost: 0 });
     expect(p.motionCandidates).toBeGreaterThanOrEqual(1);
     const ui = readFileSync(path.join(__dirname, "..", "src", "app", "visualReview", "Inspector.tsx"), "utf8");
-    expect(ui).toMatch(/REUSE OF \{asset\.id\}/);
-    expect(ui).toMatch(/framingLabel\(f\)/);
-    expect(ui).toMatch(/Selected · animated after approval/);
-    expect(ui).not.toMatch(/reframe of slot|reframeOf/);
+    // The film view says a reused image plainly, without edit-engine terms.
+    expect(ui).toMatch(/The same image appears in slot/);
+    expect(ui).not.toMatch(/REUSE OF|ORIGINAL ASSET|base view|reframe of slot|reframeOf/);
   });
 });
 

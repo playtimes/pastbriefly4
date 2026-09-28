@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api, type StoryDetail } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { FailedJobDetails, ApproveMoreResume, isBudgetFailure } from "../failedJob.tsx";
+import { productionFace, storyProductionLabel } from "../productionStage.ts";
 
 export function Story({ slug }: { slug: string }): React.ReactElement {
   const [detail, setDetail] = useState<StoryDetail | null>(null);
@@ -81,6 +82,7 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
 
   const { story, videos, activeJob, failedJob } = detail;
   const busy = activeJob && activeJob.state !== "done" && activeJob.state !== "failed";
+  const needsYou = !!activeJob && ["text", "visuals"].includes(productionFace(activeJob));
   const hasFilms = videos.length >= 2;
   const paragraphs = story.summary.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
 
@@ -150,15 +152,17 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
           <div className="rounded-[18px] border border-line bg-[#16110f] p-6">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-dim">Make the film</div>
             {busy ? (
+              // This story's own active job, as the Production screen names it.
               <button
                 onClick={() => navigate(`/story/${slug}/creating`)}
-                className="mt-4 flex h-[54px] w-full items-center justify-center rounded-full border border-line text-[14px] font-medium text-[#cabfb0] transition hover:border-[rgba(245,235,222,0.32)] hover:text-ink"
+                data-production-status
+                className={`mt-4 flex h-[54px] w-full items-center justify-center rounded-full text-[14.5px] font-semibold transition ${needsYou ? "bg-accent text-white shadow-[0_8px_24px_rgba(229,9,20,0.3)] hover:bg-accent-hover" : "border border-line font-medium text-[#cabfb0] hover:border-[rgba(245,235,222,0.32)] hover:text-ink"}`}
               >
-                Generation in progress →
+                {storyProductionLabel(activeJob)} →
               </button>
             ) : failedJob ? (
               <div className="mt-4 flex flex-col gap-4">
-                <p className="text-[14px] font-semibold text-red-400">Last generation failed</p>
+                <p className="text-[14px] font-semibold text-red-400">Production stopped</p>
                 <FailedJobDetails job={failedJob} />
                 {maxSpend > 0 && isBudgetFailure(failedJob) && (
                   <ApproveMoreResume job={failedJob} maxSpendUsd={maxSpend} onApprove={(m) => approveMore(failedJob.id, m)} />
@@ -180,10 +184,7 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z" /></svg>
                   Watch films
                 </button>
-                <button
-                  onClick={() => setShowCost(true)}
-                  className="mt-[10px] h-[46px] w-full rounded-full border border-line text-[14px] font-medium text-[#cabfb0] transition hover:border-[rgba(245,235,222,0.32)] hover:text-ink"
-                >
+                <button onClick={() => setShowCost(true)} className="mt-[14px] block mx-auto text-[13px] text-dim transition hover:text-accent">
                   Generate again
                 </button>
               </>
@@ -193,9 +194,9 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
                   onClick={() => setShowCost(true)}
                   className="mt-4 h-[54px] w-full rounded-full bg-accent text-[15px] font-semibold text-white shadow-[0_8px_24px_rgba(229,9,20,0.3)] transition hover:bg-accent-hover hover:shadow-[0_10px_30px_rgba(229,9,20,0.42)]"
                 >
-                  Generate Short + Long
+                  Generate films
                 </button>
-                <p className="mt-[14px] text-[12.5px] leading-[1.5] text-dim">Creates a short cut and a long-form documentary edit from this story.</p>
+                <p className="mt-[14px] text-[12.5px] leading-[1.5] text-dim">A long documentary and a Short. PB4 asks only if it needs you.</p>
               </>
             )}
           </div>

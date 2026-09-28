@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { api, mediaUrl } from "../api.ts";
 import { navigate } from "../App.tsx";
-import { STEP_LABELS, type Story } from "../../types.ts";
+import { stageLabel } from "../productionStage.ts";
+import type { Story } from "../../types.ts";
 
 const GRADE = "[filter:saturate(0.92)_contrast(1.03)]";
 
@@ -48,7 +49,7 @@ export function Stories(): React.ReactElement {
                 {s.activeJobId && (
                   <p className="mt-2.5 flex items-center gap-2 text-xs text-muted">
                     <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-                    {s.activeJobStep ? STEP_LABELS[s.activeJobStep] : "Generating films"}
+                    {s.activeJobStep ? `In production · ${stageLabel({ state: s.activeJobStep === "queued" ? "queued" : "running", step: s.activeJobStep })}` : "In production"}
                   </p>
                 )}
               </div>

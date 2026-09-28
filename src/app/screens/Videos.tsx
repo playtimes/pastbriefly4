@@ -13,9 +13,9 @@ function fmtDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-export function Videos({ slug }: { slug: string }): React.ReactElement {
+export function Videos({ slug, film = "long" }: { slug: string; film?: VideoKind }): React.ReactElement {
   const [detail, setDetail] = useState<StoryDetail | null>(null);
-  const [tab, setTab] = useState<VideoKind>("long");
+  const [tab, setTab] = useState<VideoKind>(film);
   const [published, setPublished] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);

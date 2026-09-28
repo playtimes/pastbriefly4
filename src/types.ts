@@ -68,23 +68,6 @@ export type JobStep =
   | "rendering"
   | "finishing";
 
-// Human-facing labels for each step, in order.
-export const STEP_LABELS: Record<JobStep, string> = {
-  queued: "Queued",
-  research: "Researching the story",
-  scripts: "Writing the films",
-  archive: "Finding historical material",
-  stills: "Creating missing scenes",
-  preview: "Reviewing visual direction",
-  narration: "Recording narration",
-  build: "Adding motion",
-  rendering: "Rendering the films",
-  finishing: "Finishing",
-};
-
-// The steps shown in the Creating screen, in the order they run.
-export const STEP_ORDER: JobStep[] = ["research", "scripts", "narration", "archive", "stills", "build", "rendering", "finishing"];
-
 export interface Job {
   id: string;
   storyId: string;

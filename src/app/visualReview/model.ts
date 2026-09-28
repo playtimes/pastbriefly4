@@ -1,12 +1,10 @@
 import type { PreviewFrame, VisualPreview } from "../../types.ts";
 
-// The visual review's view model, derived only from the public preview frames.
-// Nothing here writes production state: film, mode, filter, the current slot and
-// the visited set are local UI state, and every count is derived from the frames.
+// The films' view model, derived only from the public preview frames (the engine
+// uses buildFilm too). Nothing here writes production state: the film and the
+// current slot are local UI state.
 
 export type Film = "long" | "short";
-export type Mode = "sequence" | "assets" | "director";
-export type Filter = "all" | "owners" | "motion" | "archive" | "graphics";
 
 // A generated owner still (never a reuse slot or an archive still) can be
 // regenerated. Mirrors the backend rule; the server still refuses anything else.
@@ -28,7 +26,6 @@ export interface FilmReview {
   frames: PreviewFrame[]; // in edit order
   assets: ReviewAsset[]; // unique owners, in order of first appearance
   assetOf: number[]; // frame index -> index into assets
-  metrics: { assets: number; reuses: number; archive: number; motion: number };
 }
 
 export const pad2 = (n: number): string => String(n).padStart(2, "0");
@@ -66,122 +63,32 @@ export function buildFilm(preview: VisualPreview, film: Film): FilmReview {
   for (const a of assets) a.uses.sort((x, y) => (x === a.owner ? -1 : y === a.owner ? 1 : x - y));
   assets.sort((x, y) => x.owner - y.owner);
   const assetOf = frames.map((f) => assets.findIndex((a) => a.key === assetKey(f)));
-  return {
-    film,
-    frames,
-    assets,
-    assetOf,
-    metrics: {
-      assets: assets.length,
-      reuses: frames.length - assets.length,
-      archive: assets.filter((a) => a.truth === "archive").length,
-      motion: frames.filter((f) => f.motion).length,
-    },
-  };
-}
-
-export const isOwnerFrame = (fr: FilmReview, i: number): boolean => fr.assets[fr.assetOf[i]]?.owner === i;
-export const assetOfFrame = (fr: FilmReview, i: number): ReviewAsset | undefined => fr.assets[fr.assetOf[i]];
-
-export const FILTERS: { key: Filter; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "owners", label: "Owners" },
-  { key: "motion", label: "Motion" },
-  { key: "archive", label: "Archive" },
-  { key: "graphics", label: "Graphics" },
-];
-
-export function matchesFilter(fr: FilmReview, i: number, filter: Filter): boolean {
-  const f = fr.frames[i];
-  switch (filter) {
-    case "owners":
-      return isOwnerFrame(fr, i);
-    case "motion":
-      return f.motion;
-    case "archive":
-      return f.truth === "archive";
-    case "graphics":
-      return f.truth === "graphic";
-    default:
-      return true;
-  }
-}
-
-export function matchingSlots(fr: FilmReview, filter: Filter): number[] {
-  return fr.frames.map((_, i) => i).filter((i) => matchesFilter(fr, i, filter));
+  return { film, frames, assets, assetOf };
 }
 
 // ---------------------------------------------------------------------------
-// Local navigation state
+// Local navigation state for the film view: which film, and which slot in it.
 
 export interface ReviewState {
   film: Film;
-  mode: Mode;
-  filter: Filter;
   index: Record<Film, number>; // current frame per film
-  asset: Record<Film, string | null>; // open asset key per film (Assets mode)
-  visited: Record<Film, number[]>; // frames the user has actually looked at
 }
 
-export type ReviewAction =
-  | { type: "film"; film: Film }
-  | { type: "mode"; mode: Mode }
-  | { type: "filter"; filter: Filter }
-  | { type: "slot"; index: number } // opens the slot in Sequence
-  | { type: "asset"; key: string | null } // opens the asset (null: back to the grid)
-  | { type: "markAll"; count: number }
-  | { type: "unvisit"; film: Film; indexes: number[] }; // slots whose visual just changed
+export type ReviewAction = { type: "film"; film: Film } | { type: "slot"; index: number };
 
 export function initialReview(preview: VisualPreview): ReviewState {
   const film: Film = preview.frames.some((f) => (f.kind ?? "long") === "long") || preview.frames.length === 0 ? "long" : "short";
-  return {
-    film,
-    mode: "sequence",
-    filter: "all",
-    index: { long: 0, short: 0 },
-    asset: { long: null, short: null },
-    visited: { long: film === "long" ? [0] : [], short: film === "short" ? [0] : [] },
-  };
+  return { film, index: { long: 0, short: 0 } };
 }
-
-const visit = (list: number[], i: number): number[] => (list.includes(i) ? list : [...list, i]);
-// The slot on screen in Sequence counts as visited.
-const seeCurrent = (s: ReviewState): ReviewState =>
-  s.mode === "sequence" ? { ...s, visited: { ...s.visited, [s.film]: visit(s.visited[s.film], s.index[s.film]) } } : s;
 
 export function reviewReducer(s: ReviewState, a: ReviewAction): ReviewState {
-  switch (a.type) {
-    case "film":
-      return seeCurrent({ ...s, film: a.film, filter: "all" });
-    case "mode":
-      return seeCurrent({ ...s, mode: a.mode });
-    case "filter":
-      return { ...s, filter: a.filter };
-    case "slot":
-      return { ...s, mode: "sequence", index: { ...s.index, [s.film]: a.index }, visited: { ...s.visited, [s.film]: visit(s.visited[s.film], a.index) } };
-    case "asset":
-      return { ...s, mode: "assets", asset: { ...s.asset, [s.film]: a.key } };
-    case "markAll":
-      return { ...s, visited: { ...s.visited, [s.film]: Array.from({ length: a.count }, (_, i) => i) } };
-    case "unvisit":
-      return { ...s, visited: { ...s.visited, [a.film]: s.visited[a.film].filter((i) => !a.indexes.includes(i)) } };
-  }
+  return a.type === "film" ? { ...s, film: a.film } : { ...s, index: { ...s.index, [s.film]: a.index } };
 }
 
-// The action Previous/Next (and the arrow keys) take: the next slot matching the
-// active filter in Sequence, the neighbouring asset in the asset inspector.
+// Previous/Next (and the arrow keys): the neighbouring slot, or null at an end.
 export function stepAction(s: ReviewState, fr: FilmReview, dir: 1 | -1): ReviewAction | null {
-  if (s.mode === "director") return null; // the board is a whole-film overview, not a stepper
-  if (s.mode === "sequence") {
-    for (let i = s.index[s.film] + dir; i >= 0 && i < fr.frames.length; i += dir) {
-      if (matchesFilter(fr, i, s.filter)) return { type: "slot", index: i };
-    }
-    return null;
-  }
-  const open = s.asset[s.film];
-  if (open === null) return null;
-  const j = fr.assets.findIndex((a) => a.key === open) + dir;
-  return j >= 0 && j < fr.assets.length ? { type: "asset", key: fr.assets[j].key } : null;
+  const i = s.index[s.film] + dir;
+  return i >= 0 && i < fr.frames.length ? { type: "slot", index: i } : null;
 }
 
 // The frame key the regenerate endpoint and the Creating screen use.

@@ -402,30 +402,35 @@ describe("Director feedback on a still regeneration", () => {
   });
 });
 
-describe("Regenerate still button", () => {
-  test("appears only on generated owner frames, and only with a handler", async () => {
+describe("Regenerate image button", () => {
+  test("appears wherever a slot shows a generated image (its owner is regenerated), never for archive, and only with a handler", async () => {
     const React = (await import("react")).default;
     const { renderToStaticMarkup } = await import("react-dom/server");
-    const { SlotInspector } = await import("../src/app/visualReview/Inspector.tsx");
-    const { buildFilm } = await import("../src/app/visualReview/model.ts");
+    const { ShotPanel } = await import("../src/app/visualReview/Inspector.tsx");
+    const { buildFilm, canRegenerate } = await import("../src/app/visualReview/model.ts");
     const { buildPreview } = await import("../src/production/visuals.ts");
     const { job } = seed();
     const s = getJob(job.id)!.scratch;
     const preview = buildPreview({ slug: "x" } as Story, s.longShots, s.shortShots);
     const idle = { running: null, failed: null, done: null };
     const inspect = (film: "long" | "short", index: number, regen: any = idle, onRegenerate: any = () => {}) =>
-      renderToStaticMarkup(React.createElement(SlotInspector, { fr: buildFilm(preview, film), index, dispatch: () => {}, onRegenerate, regen }));
-    const offered = (film: "long" | "short") => buildFilm(preview, film).frames.map((_, i) => inspect(film, i).includes("Regenerate still"));
+      renderToStaticMarkup(React.createElement(ShotPanel, { fr: buildFilm(preview, film), index, onRegenerate, regen }));
+    const offered = (film: "long" | "short") => buildFilm(preview, film).frames.map((_, i) => inspect(film, i).includes("Regenerate image"));
+    const expected = (film: "long" | "short") => {
+      const fr = buildFilm(preview, film);
+      return fr.frames.map((_, i) => canRegenerate(fr.frames[fr.assets[fr.assetOf[i]].owner]));
+    };
 
-    // Long owners 0 (reconstruction) and 3 (graphic), Short owner 0; not archive 1 or reuses 2 and 4.
-    expect(offered("long")).toEqual([true, false, false, true, false]);
+    // Long owners 0 (reconstruction) and 3 (graphic), Short owner 0; never the archive owner 1.
+    expect(offered("long")).toEqual(expected("long"));
+    expect(offered("long")[1]).toBe(false);
+    expect([offered("long")[0], offered("long")[3]]).toEqual([true, true]);
     expect(offered("short")).toEqual([true]);
-    expect(inspect("long", 2)).toContain("View original asset");
-    expect(inspect("long", 1)).toContain("not regenerated");
+    expect(inspect("long", 1)).toContain("An archive photograph is used as found. It is not regenerated.");
     const busy = inspect("long", 3, { ...idle, running: "long-3" });
     expect(busy).toContain("Regenerating…");
     expect(busy).toMatch(/<button[^>]*disabled[^>]*>.*Regenerating…/);
-    expect(inspect("long", 0, { ...idle, running: "long-3" })).toMatch(/<button[^>]*disabled[^>]*>.*Regenerate still/);
-    expect(inspect("long", 0, idle, null)).not.toContain("Regenerate still");
+    expect(inspect("long", 0, { ...idle, running: "long-3" })).toMatch(/<button[^>]*disabled[^>]*>.*Regenerate image/);
+    expect(inspect("long", 0, idle, null)).not.toContain("Regenerate image");
   });
 });

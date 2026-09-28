@@ -49,7 +49,7 @@ export function App(): React.ReactElement {
       view = <Creating slug={screen.slug} />;
       break;
     case "watch":
-      view = <Videos slug={screen.slug} />;
+      view = <Videos slug={screen.slug} film={screen.film} />;
       break;
     case "story":
       view = <Story slug={screen.slug} />;
