@@ -235,6 +235,173 @@ describe("regenerate one owner still", () => {
   });
 });
 
+// After sequence revisions moved ownership: asset A ("L00") was acquired at slot 0
+// (images/long-00.png) and is now owned by slot 2, reused at 3 and 4. Asset B
+// ("L02") owns slot 0 with the still it was acquired with at `bPath`; with the
+// default, B's file is exactly the path A's NEW owner slot number would name.
+function seedMoved(bPath = "images/long-02.png") {
+  const slug = `regen-moved-${seq++}`;
+  const story: Story = {
+    id: slug, slug, title: "Regen", hook: "A hook.", category: "Disasters", year: "1981", place: "Somewhere", summary: "S",
+    heroImage: null, moments: [], sources: [], productionNote: "", createdAt: new Date().toISOString(),
+  };
+  upsertStory(story);
+  ensureStoryDirs(slug);
+  const files: Record<string, string> = { "images/hero.png": "master", "images/long-00.png": "A old", [bPath]: "B bytes", "images/long-01.png": "C bytes", "images/short-00.png": "S bytes" };
+  for (const [rel, body] of Object.entries(files)) writeFileSync(inStory(slug, rel), body);
+  const A = { assetId: "L00", path: "images/long-00.png", prompt: "stored prompt A" };
+  const longShots = [
+    shot(0, { assetId: "L02", path: bPath, prompt: "stored prompt B" }),
+    shot(1, { truth: "graphic", assetId: "L01", path: "images/long-01.png" }),
+    shot(2, { ...A }),
+    shot(3, { ...A, edit: "reuse", assetShot: 2, presentation: "detail-left" }),
+    shot(4, { ...A, edit: "reuse", assetShot: 2 }),
+  ];
+  const shortShots = [shot(0, { assetId: "S00", path: "images/short-00.png" })];
+  const entry = (s: any) => ({ assetId: s.assetId, presentation: s.presentation, framing: s.framing, truth: s.truth, prompt: s.prompt, purpose: s.purpose, mustShow: [], mustNotShow: [], path: s.path });
+  const retainedPresentations = { long: [entry(longShots[2]), entry(longShots[3]), entry(longShots[0]), entry(longShots[1])], short: [entry(shortShots[0])] };
+  const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 10 });
+  const scratch = { research: { summary: "R" }, scripts: { long: "L", short: "S" }, textApproved: true, masterRef: "images/hero.png", spent: 4, longShots, shortShots, retainedPresentations };
+  updateJob(job.id, { scratch: scratch as any, spent: 4, state: "awaiting_preview", step: "preview", previewApproved: false, preview: { frames: [] } as any });
+  return { job, slug };
+}
+const body = (slug: string, rel: string) => readFileSync(inStory(slug, rel), "utf8");
+
+describe("regeneration after ownership moved", () => {
+  test("A: a moved owner replaces the asset's stored still, never a path from its new slot number", async () => {
+    const { job, slug } = seedMoved("images/long-05.png");
+    expect((await post(job.id, { kind: "long", slot: 2 })).statusCode).toBe(200);
+    expect(h.images).toHaveLength(1);
+    expect(h.images[0].prompt).toBe("stored prompt A");
+    expect(h.images[0].outPath).toBe(inStory(slug, "images/long-00.png"));
+    expect(body(slug, "images/long-00.png")).toBe("new");
+    expect(existsSync(inStory(slug, "images/long-02.png"))).toBe(false); // no slot-derived file
+    const s = getJob(job.id)!.scratch;
+    expect(s.longShots.slice(2).map((x: any) => x.path)).toEqual(["images/long-00.png", "images/long-00.png", "images/long-00.png"]);
+    expect(s.longShots[2]).toMatchObject({ edit: "new", assetId: "L00" });
+    expect(s.retainedPresentations.long.filter((r: any) => r.assetId === "L00").map((r: any) => r.path)).toEqual(["images/long-00.png", "images/long-00.png"]);
+    expect(readdirSync(inStory(slug, "images")).filter((f) => f.endsWith(".prev"))).toEqual([]);
+  });
+
+  test("B: another asset's file at the new slot's path is never adopted and never touched", async () => {
+    const { job, slug } = seedMoved();
+    const res = await post(job.id, { kind: "long", slot: 2 });
+    expect(res.statusCode).toBe(200);
+    // A real regeneration of A, charged once; the file at images/long-02.png was not taken as A.
+    expect(h.images).toHaveLength(1);
+    expect(h.images[0].outPath).toBe(inStory(slug, "images/long-00.png"));
+    expect(getJob(job.id)!.spent).toBe(round(4 + PRICING.openai.image));
+    expect(body(slug, "images/long-00.png")).toBe("new");
+    // B: same file, same bytes, same bindings, same retained entry.
+    expect(body(slug, "images/long-02.png")).toBe("B bytes");
+    const s = getJob(job.id)!.scratch;
+    expect(s.longShots[0]).toMatchObject({ assetId: "L02", edit: "new", path: "images/long-02.png" });
+    expect(s.retainedPresentations.long.find((r: any) => r.assetId === "L02").path).toBe("images/long-02.png");
+    // Every use of A shows A's regenerated still, never B's.
+    const frames = getJob(job.id)!.preview!.frames.filter((f) => f.kind === "long");
+    expect(frames.filter((f) => f.asset === "L00").map((f) => f.path)).toEqual(Array(3).fill(`stories/${slug}/images/long-00.png`));
+    expect(frames.find((f) => f.slot === 0)!.path).toBe(`stories/${slug}/images/long-02.png`);
+    expect(h.other).toBe(0);
+  });
+
+  test("E: a failed regeneration of a moved owner leaves A and B exactly as they were", async () => {
+    const { job, slug } = seedMoved();
+    const before = getJob(job.id)!;
+    h.fail = true;
+    const res = await post(job.id, { kind: "long", slot: 2 });
+    expect(res.statusCode).toBe(400);
+    expect(body(slug, "images/long-00.png")).toBe("A old");
+    expect(body(slug, "images/long-02.png")).toBe("B bytes");
+    expect(body(slug, "images/long-01.png")).toBe("C bytes");
+    expect(readdirSync(inStory(slug, "images")).filter((f) => f.endsWith(".prev"))).toEqual([]);
+    const after = getJob(job.id)!;
+    expect(after.scratch).toEqual(before.scratch); // plan, paths and retained pool untouched
+    expect(after.spent).toBe(4);
+    expect(after.state).toBe("awaiting_preview");
+  });
+});
+
+describe("Director feedback on a still regeneration", () => {
+  const note = "Remove the large emblem from the back wall. Keep the same composition.";
+
+  test("feedback is appended to the stored prompt for that one call; everything else is today's regeneration", async () => {
+    const { withDirectorRepair } = await import("../src/production/visuals.ts");
+    const plain = seed();
+    expect((await post(plain.job.id, { kind: "long", slot: 0 })).statusCode).toBe(200);
+    const withNote = seed();
+    const before = plan(withNote.job.id);
+    const res = await post(withNote.job.id, { kind: "long", slot: 0, directorFeedback: `  ${note}\n` });
+    expect(res.statusCode).toBe(200);
+
+    expect(h.images).toHaveLength(2); // one image each, no planning or other calls
+    expect(h.other).toBe(0);
+    const [a, b] = h.images;
+    // The stored prompt comes first and whole; the trimmed note is added as a repair instruction.
+    expect(b.prompt).toBe(withDirectorRepair("stored prompt 0", note));
+    expect(b.prompt.startsWith("stored prompt 0\n\nDIRECTOR REPAIR NOTE\n")).toBe(true);
+    expect(b.prompt).toContain(`\n${note}\n`);
+    expect(b.prompt).toMatch(/remain authoritative/);
+    expect(b.prompt).toMatch(/Do not treat this note as permission to invent new historical details/);
+    // Same references in the same order (PB1 style, then the master), same size and file.
+    expect(b.referencePaths!.map((p) => path.basename(p))).toEqual(a.referencePaths!.map((p) => path.basename(p)));
+    expect(b.referencePaths![0]).toBe(a.referencePaths![0]);
+    expect(b.referencePaths![1]).toBe(inStory(withNote.slug, "images/hero.png"));
+    expect(b.size).toBe(a.size);
+    expect(b.outPath).toBe(inStory(withNote.slug, "images/long-00.png"));
+
+    // The note is never stored; the plan, timing, framing and bindings are unchanged.
+    expect(plan(withNote.job.id)).toBe(before);
+    const after = getJob(withNote.job.id)!;
+    expect(JSON.stringify(after.scratch)).not.toContain("emblem");
+    expect(after.spent).toBe(round(4 + PRICING.openai.image));
+    expect(after.state).toBe("awaiting_preview");
+    expect(after.previewApproved).toBe(false);
+    // The one owner still is replaced and every reuse slot shows it.
+    const frames = after.preview!.frames.filter((f) => f.kind === "long" && f.path === `stories/${withNote.slug}/images/long-00.png`);
+    expect(frames.map((f) => f.slot)).toEqual([0, 2, 4]);
+  });
+
+  test("blank feedback is exactly today's regeneration", async () => {
+    for (const directorFeedback of ["", "   \n "]) {
+      h.images = [];
+      const { job } = seed();
+      expect((await post(job.id, { kind: "long", slot: 0, directorFeedback })).statusCode).toBe(200);
+      expect(h.images.map((i) => i.prompt)).toEqual(["stored prompt 0"]);
+    }
+  });
+
+  test("a graphic owner takes the note with no references, as before", async () => {
+    const { job } = seed();
+    expect((await post(job.id, { kind: "long", slot: 3, directorFeedback: "Use fewer labels." })).statusCode).toBe(200);
+    expect(h.images[0].prompt.startsWith("stored prompt 3\n\nDIRECTOR REPAIR NOTE")).toBe(true);
+    expect(h.images[0].referencePaths).toBeUndefined();
+  });
+
+  test("feedback over 2,000 characters is refused before any call, never truncated", async () => {
+    const { job, slug } = seed();
+    const res = await post(job.id, { kind: "long", slot: 0, directorFeedback: "x".repeat(2001) });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("Director feedback must be 2,000 characters or fewer.");
+    expect(h.images).toHaveLength(0);
+    expect(readFileSync(inStory(slug, "images/long-00.png"), "utf8")).toBe("old images/long-00.png");
+    expect((await post(job.id, { kind: "long", slot: 0, directorFeedback: "y".repeat(2000) })).statusCode).toBe(200);
+  });
+
+  test("a failed regeneration with feedback keeps the current still and changes nothing", async () => {
+    const { job, slug } = seed();
+    const before = getJob(job.id)!;
+    h.fail = true;
+    const res = await post(job.id, { kind: "long", slot: 0, directorFeedback: note });
+    expect(res.statusCode).toBe(400);
+    expect(readFileSync(inStory(slug, "images/long-00.png"), "utf8")).toBe("old images/long-00.png");
+    const after = getJob(job.id)!;
+    expect(after.scratch).toEqual(before.scratch);
+    expect(after.spent).toBe(4);
+    expect(after.state).toBe("awaiting_preview");
+    expect(after.previewApproved).toBe(false);
+  });
+});
+
 describe("Regenerate still button", () => {
   test("appears only on generated owner frames, and only with a handler", async () => {
     const React = (await import("react")).default;

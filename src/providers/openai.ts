@@ -26,18 +26,42 @@ function readOutputText(resp: any): string {
   return parts.join("");
 }
 
-// One structured-JSON Responses call, optionally with web search.
+// One labelled image for a vision call: the saved file's bytes, read by the caller.
+export interface InputImage {
+  label: string;
+  data: Buffer;
+  mimeType: string;
+}
+
+// One structured-JSON Responses call, optionally with web search. With `images`,
+// the input becomes one user message: the text, then each image preceded by its
+// own label, sent inline at high detail (the pixels are what is reviewed).
 export async function respondJson<T>(opts: {
   instructions: string;
   input: string;
   schemaName: string;
   schema: Record<string, unknown>;
   webSearch?: boolean;
+  images?: InputImage[];
 }): Promise<T> {
+  const input = opts.images?.length
+    ? [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: opts.input },
+            ...opts.images.flatMap((i) => [
+              { type: "input_text", text: i.label },
+              { type: "input_image", image_url: `data:${i.mimeType};base64,${i.data.toString("base64")}`, detail: "high" },
+            ]),
+          ],
+        },
+      ]
+    : opts.input;
   const body: Record<string, unknown> = {
     model: config.openai.model,
     instructions: opts.instructions,
-    input: opts.input,
+    input,
     text: { format: { type: "json_schema", name: opts.schemaName, strict: true, schema: opts.schema } },
   };
   if (opts.webSearch) body.tools = [{ type: "web_search" }];

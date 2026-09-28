@@ -1,4 +1,4 @@
-import type { Story, Job, Video, CostEstimate, Category, NichesResponse } from "../types.ts";
+import type { Story, Job, Video, CostEstimate, Category, NichesResponse, SequenceRevisionReport } from "../types.ts";
 
 export interface StoryDetail {
   story: Story;
@@ -76,9 +76,16 @@ export const api = {
   niches: () => get<NichesResponse>("/api/niches"),
   generate: (id: string, approvedMax: number) => post<{ job: Job; duplicate: boolean }>(`/api/stories/${id}/generate`, { approvedMax }),
   approveText: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-text`),
+  reviseText: (jobId: string, feedback: string) => post<{ job: Job }>(`/api/jobs/${jobId}/revise-text`, { feedback }),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
   rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),
-  regenerateStill: (jobId: string, kind: "long" | "short", slot: number) => post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, { kind, slot }),
+  regenerateStill: (jobId: string, kind: "long" | "short", slot: number, directorFeedback?: string) =>
+    post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, directorFeedback ? { kind, slot, directorFeedback } : { kind, slot }),
+  reviseSequence: (jobId: string, kind: "long" | "short", directorFeedback: string) =>
+    post<{ job: Job; revision: SequenceRevisionReport }>(`/api/jobs/${jobId}/revise-sequence`, { kind, directorFeedback }),
+  // Starts Run Director QA for one film on the server; the job's directorQa
+  // then shows its phase and, when it ends, its result.
+  runDirectorQa: (jobId: string, kind: "long" | "short") => post<{ job: Job }>(`/api/jobs/${jobId}/director-qa/${kind}/run`),
   retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
   approveSpend: (jobId: string, approvedMax: number) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-spend`, { approvedMax }),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),

@@ -1,4 +1,4 @@
-import { runJob } from "../production/generate.ts";
+import { runJob, autoTextQaForJob, autoVisualQaForJob } from "../production/generate.ts";
 import { getJob, resumableJobIds } from "./store.ts";
 
 // One local worker: a single film job runs at a time, tracked in the database,
@@ -23,7 +23,15 @@ async function pump(): Promise<void> {
   if (!next) return;
   active = next;
   try {
-    await runJob(next);
+    // A new draft at the text gate goes to Automatic Director Text QA. It runs
+    // outside the worker slot (text calls only); on PASS it approves the text and
+    // requeues the job through enqueueJob, exactly like Approve & continue.
+    // Freshly acquired visuals at the preview gate go to the Visual Autopilot,
+    // also outside the slot: Asset QA, Director QA for Long and Short, and only
+    // when all are clean the existing visual approval, requeued like Continue.
+    const reached = await runJob(next);
+    if (reached === "text_gate") void autoTextQaForJob(next, enqueueJob);
+    if (reached === "preview_gate") void autoVisualQaForJob(next, enqueueJob);
   } catch (e) {
     console.error(`[worker] job ${next} failed:`, (e as Error).message);
   } finally {

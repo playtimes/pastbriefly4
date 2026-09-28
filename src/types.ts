@@ -102,9 +102,69 @@ export interface Job {
   // (scripts/narration/archive/stills/build), or a plain percentage while rendering
   // (percent: true, current of 100). Absent for research/finishing.
   progress?: { current: number; total: number; percent?: boolean };
+  textQa?: TextQaState; // Automatic Director Text QA, around the text gate only (server memory, never persisted)
+  assetQa?: AssetQaState; // Pixel-aware Asset QA at the visual preview: its phase, then the latest result (persisted)
+  directorQa?: DirectorQaRuns; // Run Director QA per film at the visual preview: its phase, then the latest result (persisted)
+  visualAutopilot?: VisualAutopilotState; // the Visual Autopilot chain around the visual gate (server memory, never persisted)
   createdAt: string;
   updatedAt: string;
 }
+
+// ---- Automatic Director Text QA (the text gate autopilot) ----
+// One Director review of the saved draft, at most one automatic repair through
+// the existing revision path, and one read-only verification after a repair.
+// PASS approves through the existing approval path; anything else stops at the
+// Story Review with the reason.
+export type TextQaSection = "story" | "hook" | "spine" | "facts" | "long" | "short";
+export const TEXT_QA_SECTIONS: TextQaSection[] = ["story", "hook", "spine", "facts", "long", "short"];
+export interface TextQaIssue {
+  section: TextQaSection;
+  reason: string;
+}
+export interface TextQaReview {
+  decision: "PASS" | "REPAIR" | "HUMAN_REVIEW";
+  summary: string;
+  repairFeedback: string | null; // only for REPAIR
+  humanReview: TextQaIssue[]; // only for HUMAN_REVIEW
+}
+export interface TextQaVerify {
+  decision: "PASS" | "HUMAN_REVIEW";
+  summary: string;
+  humanReview: TextQaIssue[];
+}
+export type TextQaPhase = "review" | "repair" | "verify";
+export type TextQaStage = "director_review" | "revision" | "final_verify";
+export type TextQaState =
+  | { status: "running"; phase: TextQaPhase }
+  | { status: "passed" }
+  | { status: "stopped"; stage: TextQaStage; message: string; summary: string; issues: TextQaIssue[]; feedback?: string; error?: string };
+
+// ---- Pixel-aware Asset QA (v1: the current owner stills at the visual preview) ----
+// One pixel review of every unique current owner still, at most one automatic
+// regeneration of a clearly repairable GENERATED still through the existing
+// regenerateStill path, then one read-only verification of the regenerated
+// stills. Archive stills are read only. Whatever remains is a human exception.
+export type AssetQaDecision = "PASS" | "REGENERATE" | "HUMAN_REVIEW";
+export type AssetQaStage = "review" | "regenerate" | "verify";
+export interface AssetQaIssue {
+  kind: "long" | "short";
+  assetId: string;
+  truth: "archive" | "reconstruction" | "graphic";
+  stage: AssetQaStage; // the step that left it with a person
+  reason: string;
+  incomplete?: boolean; // the pixel review of this asset could not complete
+}
+export type AssetQaPhase = "review" | "repair" | "verify";
+export type AssetQaState =
+  | { status: "running"; phase: AssetQaPhase; current?: number; total?: number }
+  // clean: every current still was reviewed (and any regeneration verified) with nothing left for a person.
+  | { status: "done"; reviewed: number; regenerated: number; incomplete: number; message: string; issues: AssetQaIssue[]; clean: boolean };
+
+// ---- Visual Autopilot (fresh visuals only) ----
+// Asset QA, then Director QA for Long and for Short, then the existing visual
+// approval when all three are clean. Which job is in the chain is server memory
+// only; each stage's own persisted state stays the record of what happened.
+export type VisualAutopilotState = { status: "running" } | { status: "passed" } | { status: "failed"; error: string };
 
 export interface CostLine {
   label: string;
@@ -129,6 +189,129 @@ export interface StoryReview {
   longScript: string;
   shortScript: string;
 }
+
+// Director feedback for a text-gate revision: checked the same way by the review
+// screen (before any request) and by the server. Never truncated.
+export const DIRECTOR_FEEDBACK_MAX = 20000;
+export function directorFeedbackError(feedback: string): string | null {
+  const f = feedback.trim();
+  if (!f) return "Director feedback is required.";
+  if (f.length > DIRECTOR_FEEDBACK_MAX) return "Director feedback must be 20,000 characters or fewer.";
+  return null;
+}
+
+// Optional Director feedback for one still regeneration. It is appended to an
+// image prompt, so its cap is far below the text-revision one. Blank means none.
+export const STILL_FEEDBACK_MAX = 2000;
+export function stillFeedbackError(feedback: string): string | null {
+  return feedback.trim().length > STILL_FEEDBACK_MAX ? "Director feedback must be 2,000 characters or fewer." : null;
+}
+
+// Director feedback for one film's sequence revision: required, and sized for an
+// editing instruction rather than a script. Checked by the board and the server.
+export const SEQUENCE_FEEDBACK_MAX = 4000;
+export function sequenceFeedbackError(feedback: string): string | null {
+  const f = feedback.trim();
+  if (!f) return "Director feedback is required.";
+  if (f.length > SEQUENCE_FEEDBACK_MAX) return "Director feedback must be 4,000 characters or fewer.";
+  return null;
+}
+
+// What a successful sequence revision did: the slot ids it changed, and each
+// requested change it could not make (those slots kept their visual).
+export interface SequenceRevisionReport {
+  changed: number[];
+  unresolved: { slotId: number; reason: string }[];
+}
+
+// The reason a sequence revision gives for a slot no existing presentation can
+// legally fill on its own.
+export const NO_LEGAL_ALTERNATIVE = "No legal alternative existing presentation is available.";
+
+// The original Director finding behind an automatic repair that stayed
+// unresolved, carried (in memory only) into the coordinated repair of that slot.
+export interface DirectorRepairIntent {
+  reason: string;
+  instruction: string;
+}
+
+// The one coordinated-neighbourhood repair Director QA may make last: a small
+// window around one unresolved slot, re-picked together from existing media.
+export interface CoordinatedRepairReport {
+  target: number;
+  changed: number[];
+  humanReview: { slotId: number; reason: string }[]; // the target when it stayed unresolved, and any slot not attempted
+  remaining: { slotId: number; reason: string }[]; // the deterministic patterns still present afterwards
+  error?: string; // the coordinated revision failed; the edit before it stays saved
+}
+
+// The final read-only Director verification of the CURRENT saved film, after all
+// automatic repairs. Its findings are the definitive semantic exceptions; the
+// deterministic patterns are recomputed on that same saved film.
+export interface DirectorVerifyReport {
+  summary: string;
+  humanReview: { slotId: number; reason: string }[];
+  patterns: { slotId: number; reason: string }[];
+  error?: string; // the verification failed; the repaired edit is kept
+}
+
+// Director sequence QA (v1): one editorial review of one film's stored edit.
+// A repair can be applied automatically with existing media; a human-review
+// finding is only shown. Slots in neither list are implicitly kept.
+export interface DirectorQaFinding {
+  slotId: number;
+  reason: string;
+  instruction: string;
+}
+export interface DirectorQaReport {
+  summary: string;
+  repairs: DirectorQaFinding[];
+  humanReview: { slotId: number; reason: string }[];
+}
+
+// The deterministic cleanup after Director QA: at most one more bounded sequence
+// revision, aimed only at repetition patterns PB4 can see in its own metadata.
+// `remaining` is every such pattern still present afterwards, as human exceptions.
+export interface SequenceCleanupReport {
+  ran: boolean; // a cleanup revision was attempted
+  changed: number[];
+  unresolved: { slotId: number; reason: string }[];
+  remaining: { slotId: number; reason: string }[];
+  error?: string; // the cleanup revision failed; the edit before it stays saved
+}
+
+// ---- Run Director QA, orchestrated on the server ----
+// One film's latest Director QA run, persisted in the job: its phase while it
+// runs, then the final result the Director panel shows. Only the outcome is kept:
+// no prompts, provider answers or history. The initial review's semantic findings
+// are never kept once a final verification ran (they may describe replaced visuals).
+export type DirectorQaPhase = "reviewing" | "repairing" | "cleaning" | "coordinating" | "verifying";
+export interface DirectorQaSlotNote {
+  slotId: number;
+  reason: string;
+}
+export interface DirectorQaResult {
+  repairError?: string; // the Director's repairs were not applied
+  cleanupError?: string; // the edit before the cleanup stays saved
+  coordinatedError?: { target: number; error: string }; // the edit before it stays saved
+  verified: boolean; // the final verification completed
+  verifyError?: string; // the repaired edit is kept; the final semantic check did not complete
+  automaticChanges: number;
+  cleanupChanges: number;
+  coordinatedChanges: number;
+  changed: number[]; // every slot an automatic step changed
+  unresolvedRepairs: DirectorQaSlotNote[];
+  requestedRepairs: DirectorQaSlotNote[]; // only when the Director's repairs failed
+  humanReview: DirectorQaSlotNote[];
+  summary: string;
+  clean: boolean; // the FINAL film: verified, nothing for a person, no unresolved repair, no failed step (automatic changes allowed)
+}
+export type DirectorQaRun =
+  | { status: "running"; phase: DirectorQaPhase }
+  | { status: "failed"; error: string } // the review failed: nothing changed
+  | { status: "interrupted" } // a restart stopped it; the last completed valid step is saved
+  | ({ status: "complete" } & DirectorQaResult);
+export type DirectorQaRuns = { long?: DirectorQaRun; short?: DirectorQaRun };
 
 // The taste gate shown before spending on motion.
 export interface VisualPreview {

@@ -36,6 +36,12 @@ For a real run, copy `.env.example` to `.env`, add provider keys, and set
 | `npm test` | run the test suite |
 | `npm run render:paul-bunyan` | render the acceptance Long + Short locally (mock, no paid calls) |
 | `npm run studio` | open the Remotion studio |
+| `npm run youtube:auth` | one-time read-only OAuth for the PastBriefly channel (owner analytics) |
+| `npm run youtube:analytics -- --start YYYY-MM-DD --end YYYY-MM-DD` | official owner snapshot (default: last 28 complete days) |
+| `npm run youtube:reporting:init` | create the missing Reporting API jobs (idempotent) |
+| `npm run youtube:reporting:sync` | download new Reporting API CSVs |
+
+Owner analytics credentials, tokens and raw data live only in `data/analytics/youtube/` (gitignored).
 
 ## Structure
 

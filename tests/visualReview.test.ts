@@ -286,6 +286,80 @@ describe("regenerate and the existing actions", () => {
     expect(view(run(), { regen: p.regen }).html).toContain(`src="/media/${img("long", 3)}"`);
   });
 
+  describe("Director feedback box", () => {
+    // Long index 0 is L01 (slot 3, key long-3), a reconstruction owner used in 3 slots.
+    const inspector = (over: Record<string, unknown> = {}) => {
+      const fr = buildFilm(preview(), "long");
+      const p = { fr, index: 0, dispatch: vi.fn(), regen: idle, onRegenerate: vi.fn(), onDraft: vi.fn(), draft: null, ...over } as any;
+      return { fr, p, el: React.createElement(SlotInspector, p), html: renderToStaticMarkup(React.createElement(SlotInspector, p)) };
+    };
+    const lastButton = (el: any, label: string) => buttons(el, label).at(-1);
+
+    test("Regenerate still opens the box and calls nothing", () => {
+      const { p, el, html } = inspector();
+      expect(html).not.toContain("<textarea");
+      buttons(el, "Regenerate still")[0].props.onClick();
+      expect(p.onDraft).toHaveBeenCalledWith({ key: "long-3", text: "" });
+      expect(p.onRegenerate).not.toHaveBeenCalled();
+    });
+
+    test("the open box names the asset, keeps the replace-everywhere note, and Cancel only closes", () => {
+      const { p, el, html } = inspector({ draft: { key: "long-3", text: "Fix the sign." } });
+      expect(html).toContain("Regenerate L01");
+      expect(html).toContain("Director feedback (optional)");
+      expect(html).toMatch(/<textarea[^>]*>Fix the sign\.<\/textarea>/);
+      expect(html).toContain("Replaces L01 in all 3 slots that use it.");
+      buttons(el, "Cancel")[0].props.onClick();
+      expect(p.onDraft).toHaveBeenCalledWith(null);
+      expect(p.onRegenerate).not.toHaveBeenCalled();
+    });
+
+    test("blank feedback regenerates exactly as before; text is trimmed and sent", () => {
+      const blank = inspector({ draft: { key: "long-3", text: "  \n " } });
+      lastButton(blank.el, "Regenerate still").props.onClick();
+      expect(blank.p.onRegenerate.mock.calls).toEqual([[blank.fr.frames[0], undefined]]);
+
+      const withNote = inspector({ draft: { key: "long-3", text: "  Remove the emblem.\n" } });
+      lastButton(withNote.el, "Regenerate still").props.onClick();
+      expect(withNote.p.onRegenerate.mock.calls).toEqual([[withNote.fr.frames[0], "Remove the emblem."]]);
+    });
+
+    test("while regenerating, the box and its buttons are disabled", () => {
+      const { html } = inspector({ draft: { key: "long-3", text: "Remove the emblem." }, regen: { ...idle, running: "long-3" } });
+      expect(html).toMatch(/<textarea[^>]*disabled=""/);
+      expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Cancel/);
+      expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Regenerating…/);
+    });
+
+    test("over 2,000 characters says so and cannot be sent", () => {
+      const { p, el, html } = inspector({ draft: { key: "long-3", text: "x".repeat(2001) } });
+      expect(html).toContain("Director feedback must be 2,000 characters or fewer.");
+      const submit = lastButton(el, "Regenerate still");
+      expect(submit.props.disabled).toBe(true);
+      submit.props.onClick();
+      expect(p.onRegenerate).not.toHaveBeenCalled();
+    });
+
+    test("a failure keeps the still and the feedback, and Retry resends it", () => {
+      const failed = { ...idle, failed: { key: "long-3", message: "OpenAI image 500" } };
+      const { p, el, html } = inspector({ draft: { key: "long-3", text: "Remove the emblem." }, regen: failed });
+      expect(html).toContain("Could not regenerate this still. The current one is kept.");
+      expect(html).toMatch(/<textarea[^>]*>Remove the emblem\.<\/textarea>/);
+      buttons(el, "Retry")[0].props.onClick();
+      expect(p.onRegenerate.mock.calls).toEqual([[p.fr.frames[0], "Remove the emblem."]]);
+    });
+
+    test("success closes the box and says the new still is in place for review", () => {
+      const { html } = inspector({ draft: null, regen: { ...idle, done: "long-3" } });
+      expect(html).not.toContain("<textarea");
+      expect(html).toContain("New still in place - review it now");
+    });
+
+    test("another asset's box does not open on this one", () => {
+      expect(inspector({ draft: { key: "long-6", text: "x" } }).html).not.toContain("<textarea");
+    });
+  });
+
   test("Continue and Rebuild call the existing handlers, and back returns to the story", () => {
     const p = props();
     const films = { long: buildFilm(p.preview, "long"), short: buildFilm(p.preview, "short") };

@@ -7,6 +7,13 @@ export const PRICING = {
     script: 0.03, // one script completion
     visualPlan: 0.05, // one visual planning call: Coverage or Editor (both films, no web search)
     image: 0.08, // one gpt-image-1 still
+    // Pixel Asset QA: one vision call (the text model with image inputs) is billed
+    // by tokens, so it is budgeted per call plus per image. At gpt-4.1 rates ($2/M
+    // input, $8/M output) a high-detail still is at most ~1,500 input tokens
+    // (~$0.003) plus its intent text and a short verdict; $0.01 per image and
+    // $0.02 per call (instructions, story line, summary) keep ~3x headroom.
+    assetReviewCall: 0.02,
+    assetReviewImage: 0.01,
   },
   elevenlabs: {
     perThousandChars: 0.3,
@@ -21,6 +28,11 @@ export const MOTION_CLIP_SECONDS = 5;
 
 export function round(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+// One Asset QA vision call reviewing `images` stills.
+export function assetReviewUsd(images: number): number {
+  return round(PRICING.openai.assetReviewCall + images * PRICING.openai.assetReviewImage);
 }
 
 export function ttsUsd(chars: number): number {

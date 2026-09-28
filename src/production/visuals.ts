@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { config, ROOT } from "../server/config.ts";
-import type { Story, Category, VisualPreview, PreviewFrame } from "../types.ts";
+import type { Story, Category, VisualPreview, PreviewFrame, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent } from "../types.ts";
+import { NO_LEGAL_ALTERNATIVE } from "../types.ts";
 import type { RenderPlan, Shot, Truth, Motion, Caption, Framing, Clarity } from "../render/types.ts";
 import type { StoryWorld, ResearchPackage } from "./pipelineTypes.ts";
 import type { Narration } from "./narration.ts";
@@ -1265,6 +1266,730 @@ export function applyEditRepair(kind: "long" | "short", edit: EditorAssignment[]
 }
 
 // ---------------------------------------------------------------------------
+// Director sequence revision: a bounded Editor repair of ONE film's stored edit
+// at the visual preview gate. Same Editor rules and validation; it re-picks only
+// among presentations the film already shows and creates no media.
+// ---------------------------------------------------------------------------
+
+// One presentation a saved film edit has shown, kept after its last slot moves
+// away so a later sequence revision can select it again. Only the asset fields a
+// slot takes from it (reassembleStoredEdit) and its owner's acquired still:
+// nothing slot-specific, no motion.
+export type RetainedPresentation = Pick<
+  PlannedShot,
+  "assetId" | "presentation" | "focus" | "framing" | "truth" | "prompt" | "purpose" | "mustShow" | "mustNotShow" | "archiveQuery" | "useMaster" | "source"
+> & { path: string };
+
+// Add every presentation the saved edit shows now to its film's retained pool.
+// An entry is never removed, and one already kept is refreshed in place, not
+// duplicated. Every entry of an asset in use follows its owner's current still
+// (a regeneration can move it), so the pool keeps pointing at the same media.
+// Only shots with an acquired still count. Without a pool (an older job) it is
+// seeded from the current edit alone: nothing dropped earlier comes back.
+export function retainPresentations(pool: RetainedPresentation[] | undefined, shots: PlannedShot[]): RetainedPresentation[] {
+  const out = new Map((pool ?? []).map((r) => [`${r.assetId}:${r.presentation}`, r]));
+  for (const s of shots) {
+    if (!s.path || !isStillPath(s.path)) continue;
+    const r: RetainedPresentation = {
+      assetId: s.assetId,
+      presentation: s.presentation,
+      framing: s.framing,
+      truth: s.truth,
+      prompt: s.prompt,
+      purpose: s.purpose,
+      mustShow: [...s.mustShow],
+      mustNotShow: [...s.mustNotShow],
+      path: s.path,
+      ...(s.focus !== undefined ? { focus: s.focus } : {}),
+      ...(s.archiveQuery !== undefined ? { archiveQuery: s.archiveQuery } : {}),
+      ...(s.useMaster !== undefined ? { useMaster: s.useMaster } : {}),
+      ...(s.source !== undefined ? { source: s.source } : {}),
+    };
+    out.set(`${s.assetId}:${s.presentation}`, r);
+  }
+  const owners = new Map(shots.filter((s) => s.edit === "new" && s.path && isStillPath(s.path)).map((s) => [s.assetId, s]));
+  return [...out.values()].map((r) => {
+    const own = owners.get(r.assetId);
+    if (!own) return r;
+    const next: RetainedPresentation = { ...r, path: own.path!, truth: own.truth };
+    delete next.source;
+    return own.source === undefined ? next : { ...next, source: own.source };
+  });
+}
+
+function presentationOf(s: Omit<RetainedPresentation, "path">, motionEligible: boolean): Presentation {
+  const base = s.presentation === "base";
+  return {
+    id: `${s.assetId}:${s.presentation}`,
+    assetId: s.assetId,
+    kind: s.presentation,
+    framing: s.framing,
+    description: base ? `${s.truth}, ${s.framing}: ${s.purpose}` : `crop on ${s.focus ?? ""}`,
+    elements: base ? [...s.mustShow] : (s.focus ?? "").split("; ").filter(Boolean),
+    truth: s.truth,
+    motionEligible,
+  };
+}
+
+// The presentations a stored film can still use: those its plan shows now, then
+// its `retained` ones no slot shows any more (existing media PB4 already has; the
+// caller passes only those whose still is on disk). An unused library asset was
+// never acquired and an unused crop's region was never stored, so neither is
+// offered. A base is motion eligible only where the plan already gave it a motion
+// priority (which planning validated); a retained unused one never is.
+export function storedPresentations(shots: PlannedShot[], retained: RetainedPresentation[] = []): Presentation[] {
+  const out = new Map<string, Presentation>();
+  for (const s of shots) {
+    const id = `${s.assetId}:${s.presentation}`;
+    const eligible = s.presentation === "base" && ((s.motionPriority ?? 0) > 0 || s.wantsMotion);
+    const known = out.get(id);
+    if (known) {
+      if (eligible) known.motionEligible = true;
+      continue;
+    }
+    out.set(id, presentationOf(s, eligible));
+  }
+  for (const r of retained) {
+    const id = `${r.assetId}:${r.presentation}`;
+    if (!out.has(id)) out.set(id, presentationOf(r, false));
+  }
+  return [...out.values()];
+}
+
+export const storedEdit = (shots: PlannedShot[]): EditorAssignment[] =>
+  shots.map((s) => ({ slotId: s.index, presentationId: `${s.assetId}:${s.presentation}`, motionPriority: s.motionPriority ?? 0 }));
+
+// Slots the Director explicitly keeps: a sentence or line with "keep" that names
+// slot numbers ("Keep slot 01.", "Keep 15, 17 and 23.", "Keep L06 at slot 07.",
+// "Keep motion owner L01 at 24."). Asset ids (L06) and durations (15 s) are not
+// slot numbers. Conservative: anything vaguer is left to the Editor.
+export function keptSlots(feedback: string, slotCount: number): number[] {
+  const kept = new Set<number>();
+  for (const part of feedback.split(/[\n.;]+/)) {
+    if (!/\bkeep\b/i.test(part) || !/\bkeep\s+\d|\bslots?\b|\bat\s+\d/i.test(part)) continue;
+    for (const m of part.matchAll(/(?<![A-Za-z\d])(\d{1,3})(?!\d)(?!\s*(?:s|secs?|seconds?|%)\b)/g)) {
+      const n = Number(m[1]);
+      if (n < slotCount) kept.add(n);
+    }
+  }
+  return [...kept].sort((a, b) => a - b);
+}
+
+export interface SequenceRevisionInput {
+  story: Story;
+  kind: "long" | "short";
+  slots: EditSlot[];
+  shots: PlannedShot[];
+  presentations: Presentation[];
+  locked: Map<number, string>; // slot id -> why it cannot change in this revision
+  choices: Map<number, string[]>; // unlocked slot id -> its individually legal changes (sequenceSlotChoices)
+  feedback: string;
+  // Coordinated mode only: the unresolved target and its local window. Every
+  // unlocked window slot may then take any presentation of the film's menu.
+  // `intent` is the original Director finding when the target was a Director QA
+  // repair; other unresolved targets have none.
+  coordinated?: { target: number; reason: string; window: number[]; intent?: DirectorRepairIntent };
+}
+
+export { NO_LEGAL_ALTERNATIVE } from "../types.ts";
+
+// Per unlocked slot: the stored presentations that are individually legal there.
+// Each one is tried as a ONE-slot substitution of the current valid edit, through
+// the same steps a revision is saved with: validateEdit, reassembleStoredEdit and
+// the Film Grammar plan check. Only if all pass is it offered. resolveReuse runs
+// once on the stored plan (with a story): a substitution only ever points slots
+// at those same owner stills, so its file checks cannot differ per trial, and the
+// final save runs it again. Conservative on purpose: a choice that is only legal
+// together with other changes is not offered. The slot's current presentation is
+// no change, so it is never offered. A slot can end up with no choices at all.
+export function sequenceSlotChoices(
+  kind: "long" | "short",
+  slots: EditSlot[],
+  shots: PlannedShot[],
+  presentations: Presentation[],
+  locked: Map<number, string>,
+  story?: Story,
+  retained: RetainedPresentation[] = [],
+): Map<number, string[]> {
+  const current = storedEdit(shots);
+  if (story) resolveReuse(story, kind, reassembleStoredEdit(shots, current, retained)); // every owner still is on disk
+  const choices = new Map<number, string[]>();
+  for (const slot of slots) {
+    if (locked.has(slot.id)) continue;
+    choices.set(
+      slot.id,
+      presentations
+        .map((p) => p.id)
+        .filter((id) => {
+          if (id === current[slot.id].presentationId) return false;
+          const trial = current.map((e) => (e.slotId === slot.id ? { slotId: e.slotId, presentationId: id, motionPriority: 0 } : e));
+          try {
+            assertFilmGrammarPlan(kind, reassembleStoredEdit(shots, validateEdit(kind, slots, trial, presentations), retained));
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+    );
+  }
+  return choices;
+}
+
+export interface SequenceUnresolved {
+  slotId: number;
+  reason: string;
+}
+
+export type SequenceReviser = (input: SequenceRevisionInput, respond?: typeof respondJson) => Promise<unknown>;
+
+export const SEQUENCE_REVISION_INSTRUCTIONS = `You are the Editor for PastBriefly, repairing an existing edit at the human visual gate. The edit is already cut into FIXED SLOTS with fixed times and narration, and every slot already shows one presentation of media PastBriefly already has. Apply the DIRECTOR FEEDBACK precisely, for this one film only.
+
+The fixed slots, their timing and narration, the factual grounding of every asset, the listed presentations and the Editor rules below remain authoritative. You may only move EXISTING presentations between slots: choose each changed slot's replacement from that slot's own "legal changes" list, exactly as written. AVAILABLE PRESENTATIONS describes what each one shows. You cannot acquire, generate, crop or describe new media.
+
+- Change only the slots the feedback requires. Every other slot keeps its current presentation: set it to null.
+- A slot marked LOCKED must not change. If the feedback needs a LOCKED slot changed, list it under unresolved with the reason.
+- Prefer existing presentations that are unused or used less often nearby, where they genuinely support the slot's narration.
+- If no available presentation can satisfy a requested change for a slot, leave that slot unchanged and list it under unresolved with a short, specific reason. Never fake a fit.
+- Every replacement must directly support its slot's narration, or be a genuinely supported cutaway for it. Archive must match the words being spoken. Do not anticipate facts the film introduces later.
+- The exact same presentationId may never appear in two adjacent slots, except a presentation marked "adjacent repeat: one deliberate hold", on two adjacent slots at most. Check your changes against their final neighbours.
+- Avoid three consecutive slots from the same asset where the narration allows another supported choice.
+
+Return strict JSON { "changes": { "<slot id>": "<presentationId>" or null, ... }, "unresolved": [{ "slotId", "reason" }] }: "changes" has one key for every slot that has legal changes; its value is the new presentationId from that slot's list, or null to keep the slot as it is. "unresolved" has one entry per requested change you could not make.`;
+
+// "changes" is keyed by slot id, so a slot can be answered at most once by
+// construction. Each key is an editable slot with at least one legal choice, and
+// its value is one of THAT slot's choices, or null for no change. Strict
+// structured output needs every key listed as required, so "optional" is null.
+// Locked slots and slots with no choice are not keys at all.
+export function sequenceRevisionSchema(input: Pick<SequenceRevisionInput, "slots" | "choices">) {
+  const open = [...input.choices].filter(([, ids]) => ids.length);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["changes", "unresolved"],
+    properties: {
+      changes: {
+        type: "object",
+        additionalProperties: false,
+        required: open.map(([slotId]) => String(slotId)),
+        properties: Object.fromEntries(open.map(([slotId, ids]) => [String(slotId), { type: ["string", "null"], enum: [...ids, null] }])),
+      },
+      unresolved: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["slotId", "reason"],
+          properties: { slotId: { type: "integer", enum: input.slots.map((s) => s.id) }, reason: { type: "string" } },
+        },
+      },
+    },
+  };
+}
+
+// The stored presentation menu as the sequence Editor and the Director QA see it.
+function presentationMenu(shots: PlannedShot[], presentations: Presentation[]): string[] {
+  const current = storedEdit(shots);
+  return presentations.map((p) => {
+    const own = presentations.filter((q) => q.assetId === p.assetId);
+    const hold = p.kind === "base" && p.truth === "archive" && own.length === 1;
+    const used = current.filter((e) => e.presentationId === p.id).map((e) => e.slotId);
+    return [
+      `${p.id} - ${p.description}`,
+      `  shows: ${p.elements.join("; ") || "(not listed)"}`,
+      `  type: ${p.truth}${p.kind === "base" ? "" : " detail"}`,
+      `  used now at slot${used.length === 1 ? "" : "s"}: ${used.join(", ") || "none"}`,
+      hold ? `  adjacent repeat: one deliberate hold (2 adjacent slots at most, ${ARCHIVE_HOLD_MAX_SEC}s combined at most)` : "  adjacent repeat: FORBIDDEN",
+    ].join("\n");
+  });
+}
+
+export function sequenceRevisionPayload(input: SequenceRevisionInput): string {
+  const { story, kind, slots, shots, presentations, locked, feedback } = input;
+  const name = kind.toUpperCase();
+  const current = storedEdit(shots);
+  const pres = presentationMenu(shots, presentations);
+  const slotLines = slots.map((s) => {
+    const shot = shots[s.id];
+    const role = shot.edit === "new" ? "owner" : `reuse of slot ${shot.assetShot}`;
+    const legal = input.choices.get(s.id) ?? [];
+    const options = locked.has(s.id)
+      ? [`LOCKED: ${locked.get(s.id)}`]
+      : [legal.length ? `legal changes: ${legal.join(", ")}` : `legal changes: none - this slot cannot change; if the feedback asks, list it as unresolved`];
+    return [slotBlock(s), `current: ${current[s.id].presentationId} (${role})`, ...options].join("\n");
+  });
+  return [
+    `STORY: ${story.title} (${story.year}, ${story.place})`,
+    `FILM: ${name}, ${slots.length} fixed slots. Only this film may change.`,
+    "",
+    `AVAILABLE PRESENTATIONS (existing media only, ${presentations.length}):`,
+    "",
+    pres.join("\n\n"),
+    "",
+    `${name} CURRENT EDIT:`,
+    "",
+    slotLines.join("\n\n"),
+    "",
+    "DIRECTOR FEEDBACK:",
+    feedback,
+    "",
+    'Return JSON { "changes": { "<slot id>": "<presentationId>" or null }, "unresolved": [...] }: every slot with legal changes is a key, null where it keeps its presentation.',
+  ].join("\n");
+}
+
+export const openAiSequenceRevision: SequenceReviser = async (input, respond = respondJson) =>
+  respond<unknown>({
+    instructions: SEQUENCE_REVISION_INSTRUCTIONS,
+    input: sequenceRevisionPayload(input),
+    schemaName: "sequence_revision",
+    schema: sequenceRevisionSchema(input),
+  });
+
+// Mock mode never calls a provider: the edit is returned unchanged.
+export const fallbackSequenceRevision: SequenceReviser = async () => ({ changes: {}, unresolved: [] });
+
+export const COORDINATED_REPAIR_INSTRUCTIONS = `COORDINATED LOCAL SEQUENCE REPAIR
+
+You are the Editor for PastBriefly. Repair this small existing sequence window using only presentations already available in this film.
+
+The unresolved target could not be repaired as a one-slot substitution because its neighbouring slots use presentations that need to move together.
+
+Priorities:
+1. Match each slot's narration truthfully. Archive must match the words being spoken; do not anticipate facts the film introduces later.
+2. Fix the unresolved target.
+3. Reassign nearby presentations where necessary to make that possible.
+4. Avoid adjacent identical presentations and invalid archive holds (including against the FIXED slots just outside the window).
+5. Avoid creating obvious A-B-A-B repetition.
+6. Preserve motion-locked slots (they are not yours to change).
+7. Change as few slots as necessary.
+8. Do not alter anything outside this local window.
+
+Do not invent media. Do not change timing, narration, captions or Film Grammar.
+
+Return strict JSON { "changes": { "<slot id>": "<presentationId>" or null, ... }, "unresolved": [] }: one key for every editable window slot, with a presentationId from AVAILABLE PRESENTATIONS, or null to keep the slot as it is.`;
+
+export function coordinatedRevisionPayload(input: SequenceRevisionInput): string {
+  const { story, kind, slots, shots, presentations, locked, coordinated } = input;
+  if (!coordinated) throw new Error("A coordinated repair needs its target and window.");
+  const { target, reason, window, intent } = coordinated;
+  const name = kind.toUpperCase();
+  const current = storedEdit(shots);
+  const pres = new Map(presentations.map((p) => [p.id, p]));
+  const first = window[0];
+  const last = window[window.length - 1];
+  const fixed = [first - 1, last + 1].filter((i) => i >= 0 && i < slots.length).map((i) => `slot #${i}: ${current[i].presentationId} (fixed)`);
+  const slotLines = window.map((id) => {
+    const s = slots[id];
+    const shot = shots[id];
+    const p = pres.get(current[id].presentationId);
+    return [
+      slotBlock(s),
+      `caption: ${shot.caption?.text ? `"${shot.caption.text}"` : "(none)"}`,
+      `current: ${current[id].presentationId} - ${p?.description ?? ""} (${shot.edit === "new" ? "owner" : `reuse of slot ${shot.assetShot}`})`,
+      `asset: ${shot.assetId}, ${shot.truth}`,
+      locked.has(id) ? `LOCKED: ${locked.get(id)}` : id === target ? "editable: yes (UNRESOLVED TARGET)" : "editable: yes",
+    ].join("\n");
+  });
+  return [
+    `STORY: ${story.title} (${story.year}, ${story.place})`,
+    `FILM: ${name}. Only slots #${first}-#${last} may change; every other slot of the film is fixed.`,
+    `FIXED NEIGHBOURS: ${fixed.join("; ") || "(none)"}`,
+    `UNRESOLVED TARGET: slot #${target}. ${reason}`,
+    "",
+    ...(intent
+      ? ["DIRECTOR REPAIR INTENT", "", "Reason:", intent.reason, "", "Requested correction:", intent.instruction, "", "Why the one-slot repair could not complete:", reason, ""]
+      : []),
+    `AVAILABLE PRESENTATIONS (existing media only, ${presentations.length}; "used now at" counts the whole film):`,
+    "",
+    presentationMenu(shots, presentations).join("\n\n"),
+    "",
+    `${name} WINDOW:`,
+    "",
+    slotLines.join("\n\n"),
+    "",
+    'Return JSON { "changes": { "<slot id>": "<presentationId>" or null }, "unresolved": [] }.',
+  ].join("\n");
+}
+
+// The coordinated call: its own instruction and payload, the SAME keyed schema
+// (whose per-slot enums are, in coordinated mode, the whole current menu).
+export const openAiCoordinatedRevision: SequenceReviser = async (input, respond = respondJson) =>
+  respond<unknown>({
+    instructions: COORDINATED_REPAIR_INSTRUCTIONS,
+    input: coordinatedRevisionPayload(input),
+    schemaName: "coordinated_revision",
+    schema: sequenceRevisionSchema(input),
+  });
+
+// Apply one sequence revision answer to the stored edit. "changes" is keyed by
+// slot id, so no slot can be changed twice; a null (or absent) key is no change.
+// A malformed answer (not keyed, an unknown slot or presentation) is rejected
+// whole. A change
+// to a LOCKED slot, or to a presentation outside that slot's legal choices, is
+// not applied and is reported unresolved instead; a slot the answer itself lists
+// as unresolved keeps its presentation (a slot with no legal choice says so).
+// Changed slots get motion priority 0. The caller validates the result in full.
+export function applySequenceRevision(
+  kind: "long" | "short",
+  edit: EditorAssignment[],
+  presentations: Presentation[],
+  locked: Map<number, string>,
+  choices: Map<number, string[]>,
+  raw: unknown,
+): { edit: EditorAssignment[]; changed: number[]; unresolved: SequenceUnresolved[] } {
+  const reject = (reason: string): never => {
+    throw new VisualPlanError(`Invalid sequence revision: ${kind} ${reason}.`);
+  };
+  const answer = (raw && typeof raw === "object" ? raw : {}) as { changes?: unknown; unresolved?: unknown };
+  const keyed = answer.changes && typeof answer.changes === "object" && !Array.isArray(answer.changes);
+  if (!keyed || !Array.isArray(answer.unresolved)) return reject('answer is not { "changes": { "<slot id>": id | null }, "unresolved": [...] }');
+  const legal = new Set(presentations.map((p) => p.id));
+  const inRange = (id: unknown): id is number => isInt(id) && id >= 0 && id < edit.length;
+  const unresolved = new Map<number, string>();
+  for (const item of answer.unresolved as { slotId?: unknown; reason?: unknown }[]) {
+    if (!inRange(item?.slotId)) return reject(`unresolved slot ${JSON.stringify(item?.slotId ?? null)} is unknown`);
+    if (unresolved.has(item.slotId)) continue;
+    const none = !locked.has(item.slotId) && !(choices.get(item.slotId) ?? []).length;
+    unresolved.set(item.slotId, none ? NO_LEGAL_ALTERNATIVE : String(item.reason ?? "").trim() || "No existing presentation fits this slot.");
+  }
+  const next = edit.map((e) => ({ ...e }));
+  for (const [key, presentationId] of Object.entries(answer.changes as Record<string, unknown>)) {
+    const slotId = /^\d+$/.test(key) ? Number(key) : NaN;
+    if (!inRange(slotId)) return reject(`change slot ${JSON.stringify(key)} is unknown`);
+    if (presentationId === null) continue; // kept as it is
+    if (typeof presentationId !== "string" || !legal.has(presentationId)) return reject(`slot ${slotId}: presentationId ${JSON.stringify(presentationId ?? null)} is not an existing ${kind} presentation`);
+    if (unresolved.has(slotId)) continue;
+    if (locked.has(slotId)) {
+      unresolved.set(slotId, `Not changed: ${locked.get(slotId)}`);
+      continue;
+    }
+    if (presentationId === edit[slotId].presentationId) continue; // no change
+    const allowed = choices.get(slotId) ?? [];
+    if (!allowed.includes(presentationId)) {
+      unresolved.set(slotId, allowed.length ? `Not changed: ${presentationId} is not a legal choice for this slot.` : NO_LEGAL_ALTERNATIVE);
+      continue;
+    }
+    next[slotId] = { slotId, presentationId, motionPriority: 0 };
+  }
+  const changed = next.filter((e, i) => e.presentationId !== edit[i].presentationId).map((e) => e.slotId);
+  return { edit: next, changed, unresolved: [...unresolved].sort((a, b) => a[0] - b[0]).map(([slotId, reason]) => ({ slotId, reason })) };
+}
+
+// Rebuild one film's planned shots after a sequence revision, from the stored
+// shots only. Every slot keeps its own timing, words and caption. A changed slot
+// takes its new presentation's asset fields (prompt, purpose, constraints,
+// framing) from a stored shot already showing it, with no motion. Ownership
+// follows assembleEdit's rule: an asset's motion slot, else its current owner if
+// that slot still shows it, else its first use. The owner keeps the asset's
+// existing still; reuses point at it (resolveReuse). Nothing is created. A
+// `retained` presentation no slot shows now is taken from the film's retained
+// pool, and its first use owns that asset's existing still again.
+export function reassembleStoredEdit(shots: PlannedShot[], edit: EditorAssignment[], retained: RetainedPresentation[] = []): PlannedShot[] {
+  const template = new Map<string, RetainedPresentation | PlannedShot>();
+  for (const s of shots) template.set(`${s.assetId}:${s.presentation}`, template.get(`${s.assetId}:${s.presentation}`) ?? s);
+  for (const r of retained) template.set(`${r.assetId}:${r.presentation}`, template.get(`${r.assetId}:${r.presentation}`) ?? r);
+  const still = new Map(shots.filter((s) => s.edit === "new").map((s) => [s.assetId, s]));
+  const kept = new Map<string, RetainedPresentation>();
+  for (const r of retained) if (!kept.has(r.assetId)) kept.set(r.assetId, r);
+  const next = shots.map((s, i): PlannedShot => {
+    if (edit[i].presentationId === `${s.assetId}:${s.presentation}`) return { ...s };
+    const t = template.get(edit[i].presentationId)!;
+    const out: PlannedShot = {
+      ...s,
+      assetId: t.assetId,
+      presentation: t.presentation,
+      focus: t.focus,
+      framing: t.framing,
+      truth: t.truth,
+      prompt: t.prompt,
+      purpose: t.purpose,
+      mustShow: [...t.mustShow],
+      mustNotShow: [...t.mustNotShow],
+      archiveQuery: t.archiveQuery,
+      useMaster: t.useMaster,
+      motion: "hold",
+      wantsMotion: false,
+      motionPriority: 0,
+      motionCandidate: false,
+    };
+    if (out.focus === undefined) delete out.focus;
+    delete out.path;
+    delete out.mediaType;
+    delete out.motionPath;
+    return out;
+  });
+  const owner = new Map<string, number>();
+  for (const s of next) if (s.wantsMotion) owner.set(s.assetId, s.index);
+  for (const [id, old] of still) if (!owner.has(id) && next[old.index]?.assetId === id) owner.set(id, old.index);
+  for (const s of next) if (!owner.has(s.assetId)) owner.set(s.assetId, s.index);
+  for (const s of next) {
+    const own = owner.get(s.assetId)!;
+    if (own === s.index) {
+      const src = still.get(s.assetId);
+      const media = src ?? kept.get(s.assetId)!;
+      s.edit = "new";
+      delete s.assetShot;
+      s.path = media.path;
+      s.mediaType = src ? src.mediaType : "image";
+      s.truth = media.truth;
+      s.source = media.source;
+      if (!s.wantsMotion) delete s.motionPath;
+    } else {
+      s.edit = "reuse";
+      s.assetShot = own;
+      delete s.motionPath;
+    }
+  }
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// Director sequence QA (v1): ONE editorial review of one film's stored edit,
+// from its semantic metadata only (narration, captions, what each presentation
+// shows, owner/reuse, usage, motion and the board's attention flags). It is not
+// pixel vision. Findings existing media can fix go to the bounded sequence
+// revision (once, targets only); everything else goes to a human.
+// ---------------------------------------------------------------------------
+
+export interface DirectorQaInput {
+  story: Story;
+  kind: "long" | "short";
+  slots: EditSlot[];
+  shots: PlannedShot[];
+  presentations: Presentation[];
+  flags: string[][]; // per slot, the Director board's attention flags
+  openingSec: number;
+  endingSec: number;
+}
+
+export type DirectorQaReviewer = (input: DirectorQaInput, respond?: typeof respondJson) => Promise<unknown>;
+
+// The strict narration check for factual graphics, shared word for word by the
+// initial review and the final verification. Archive and reconstruction imagery
+// keep the general relevance judgement.
+export const FACTUAL_GRAPHIC_RULE = `FACTUAL GRAPHICS - STRICT NARRATION MATCH. For every slot whose asset type is "graphic", explicitly compare that slot's narration with what the graphic depicts (its description and "shows"). A graphic that states a factual claim - a year or date, a percentage, a vote count or other statistic, a named event or institution, a before/after state, or a map standing for a particular story beat - must support the CURRENT narration beat of its slot. It is a narration / visual mismatch when the graphic:
+- depicts a different event than the narration;
+- shows a later event before the narration reaches it;
+- shows an earlier event after the narration has moved on;
+- displays numbers or statistics that belong to another story beat;
+- could make the viewer associate the narration with the wrong fact.
+For example: narration about an earlier referendum and its percentage over a graphic of a later parliamentary vote and its vote count is a mismatch, and so is narration about the later parliamentary vote over the earlier referendum result. When the metadata states the graphic's event or values, the mismatch is proven by the metadata: it is not ambiguous and does not need the image. Low reuse, clean attention flags or an otherwise coherent sequence never excuse it. A graphic whose event and values match the narration is not a problem merely because it is a graphic. This strict check applies to factual graphics only: judge archive and reconstruction imagery by general relevance, as before.`;
+
+export const DIRECTOR_QA_INSTRUCTIONS = `You are the Director for PastBriefly ("true historical stories that sound made up"), reviewing the SEQUENCE of one finished edit at the human visual gate. The edit is cut into fixed slots with fixed narration. For every slot you get its narration, on-screen caption, the existing presentation it shows and what that presentation depicts, owner or reuse, how many slots of this film use the asset, whether the slot carries motion, and its deterministic attention flags. You also get the film's whole menu of existing presentations.
+
+You judge sequence editorial quality from this metadata only. You cannot see the images. Never judge pixel-level problems (malformed hands, text or logos inside an image, exact geometry, generation artefacts): those belong to the separate asset review. Do not pretend to see what the metadata does not say.
+
+Look only for meaningful sequence problems:
+A. NARRATION / VISUAL MISMATCH - the visual does not clearly support what that slot's narration says.
+B. OPENING CLARITY - within the opening window the strange premise is not made visually understandable.
+C. REDUNDANT REUSE - a visual repeats so closely or so often that the film feels visually stalled, even though it is technically valid. The flags ADJACENT REUSE, CLOSE REUSE and HIGH REUSE are evidence, not verdicts.
+D. PAYOFF PROGRESSION - the story's major payoff or action section does not progress visually because one or two stills dominate it.
+E. GENERIC FILLER - a slot shows mere period atmosphere while another existing presentation clearly shows what the narration is about.
+F. HUMAN AMBIGUITY - you cannot confidently tell whether a visual is relevant, or whether changing it would improve the film.
+
+${FACTUAL_GRAPHIC_RULE}
+In this review, a proven factual-graphic mismatch is a repair whenever an existing presentation in the menu shows the event or values the narration states, even if that presentation is already used at other slots or the fix may also need neighbouring slots to change: name it in the instruction; the automatic repair handles the rest. Do not send such a mismatch to humanReview merely because it is a graphic. Only when no existing presentation matches the narration, or the slot carries motion, is it a humanReview finding that states the conflicting facts.
+
+Classify each problem slot once:
+- repairs: a problem that another EXISTING presentation in the menu clearly fixes for that slot. Give the reason and a short instruction saying what the slot should show instead (you may name menu ids). Motion slots can never be repairs.
+- humanReview: anything ambiguous (F), anything that depends on seeing the image, any motion slot that seems wrong, and any problem no existing presentation clearly fixes.
+Most slots need nothing: set them to null. Never list a slot to keep or praise it. Never put the same slot in both lists. Be conservative: a few clear, meaningful findings are better than many marginal ones. Never call the film approved or perfect.
+
+Return strict JSON { "repairs": { "<slot id>": { "reason", "instruction" } or null }, "humanReview": { "<slot id>": "<reason>" or null }, "summary": "<two or three plain sentences>" }.`;
+
+// Keyed by slot id, so each slot is at most one repair and at most one human
+// review. Motion slots are not repair keys at all; every slot is a review key.
+export function directorQaSchema(input: Pick<DirectorQaInput, "slots" | "shots">) {
+  const all = input.slots.map((s) => s.id);
+  const repairable = all.filter((id) => !input.shots[id]?.wantsMotion);
+  const finding = {
+    anyOf: [
+      { type: "object", additionalProperties: false, required: ["reason", "instruction"], properties: { reason: { type: "string" }, instruction: { type: "string" } } },
+      { type: "null" },
+    ],
+  };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["repairs", "humanReview", "summary"],
+    properties: {
+      repairs: { type: "object", additionalProperties: false, required: repairable.map(String), properties: Object.fromEntries(repairable.map((id) => [String(id), finding])) },
+      humanReview: { type: "object", additionalProperties: false, required: all.map(String), properties: Object.fromEntries(all.map((id) => [String(id), { type: ["string", "null"] }])) },
+      summary: { type: "string" },
+    },
+  };
+}
+
+// The review payload, and in "verify" mode the final verification payload: the
+// same per-slot description of the CURRENT saved edit, without the presentation
+// menu (the verification can change nothing) and with its own closing line.
+export function directorQaPayload(input: DirectorQaInput, mode: "review" | "verify" = "review"): string {
+  const { story, kind, slots, shots, presentations, flags, openingSec, endingSec } = input;
+  const name = kind.toUpperCase();
+  const current = storedEdit(shots);
+  const pres = new Map(presentations.map((p) => [p.id, p]));
+  const duration = slots.at(-1)?.endSec ?? 0;
+  const uses = (assetId: string) => shots.filter((s) => s.assetId === assetId).length;
+  const slotLines = slots.map((s) => {
+    const shot = shots[s.id];
+    const p = pres.get(current[s.id].presentationId);
+    return [
+      slotBlock(s),
+      `caption: ${shot.caption?.text ? `"${shot.caption.text}"` : "(none)"}`,
+      `current: ${current[s.id].presentationId} - ${p?.description ?? ""} (${shot.edit === "new" ? "owner" : `reuse of slot ${shot.assetShot}`})`,
+      `shows: ${p?.elements.join("; ") || "(not listed)"}`,
+      `asset: ${shot.assetId}, ${shot.truth}, used in ${uses(shot.assetId)} slot${uses(shot.assetId) === 1 ? "" : "s"} of this film`,
+      `motion: ${mode === "verify" ? (shot.wantsMotion ? "selected" : "no") : shot.wantsMotion ? "selected (never a repair)" : "no"}`,
+      `flags: ${flags[s.id]?.join(", ") || "none"}`,
+    ].join("\n");
+  });
+  const verify = mode === "verify";
+  return [
+    `STORY: ${story.title} (${story.year}, ${story.place})`,
+    `FILM: ${name}, ${slots.length} fixed slots, ${duration.toFixed(1)}s. Only this film is ${verify ? "verified" : "reviewed"}.`,
+    `OPENING WINDOW: 0.0-${openingSec.toFixed(1)}s. ENDING WINDOW: ${Math.max(0, duration - endingSec).toFixed(1)}-${duration.toFixed(1)}s.`,
+    "",
+    ...(verify ? [] : [`AVAILABLE PRESENTATIONS (existing media only, ${presentations.length}):`, "", presentationMenu(shots, presentations).join("\n\n"), ""]),
+    verify ? `${name} FINAL SAVED EDIT (after automatic repairs; this is authoritative):` : `${name} EDIT:`,
+    "",
+    slotLines.join("\n\n"),
+    "",
+    verify
+      ? 'Return JSON { "humanReview": {...}, "summary": "..." }: a current reason for each slot that still needs a person, null for every other slot.'
+      : 'Return JSON { "repairs": {...}, "humanReview": {...}, "summary": "..." }: null for every slot that needs nothing.',
+  ].join("\n");
+}
+
+export const DIRECTOR_VERIFY_INSTRUCTIONS = `You are performing the final editorial verification of the CURRENT saved PastBriefly sequence ("true historical stories that sound made up") after automatic repairs.
+
+You cannot change the edit. Review only the sequence supplied here, from its metadata; you cannot see the images. Identify only issues that still require human attention.
+
+Judge:
+- narration / visual mismatch
+- opening premise clarity
+- materially distracting repetition
+- weak visual progression during the payoff
+- generic filler where relevance is genuinely unclear
+- ambiguity that the metadata cannot resolve
+
+Deterministic attention flags are evidence, not automatic failures. Do not report an issue merely because CLOSE REUSE or HIGH REUSE exists.
+
+${FACTUAL_GRAPHIC_RULE}
+In this verification, every factual graphic in the current sequence that contradicts its slot's narration MUST be a humanReview finding that states the narration's fact and the graphic's conflicting fact, even when everything else about the sequence is clean.
+
+Do not discuss an earlier visual or an earlier edit: the supplied current sequence is authoritative. Describe each issue in terms of what the slot shows NOW.
+
+Do not suggest automatic repairs. Do not call the film approved or perfect.
+
+If the metadata is insufficient because the judgement requires viewing the image, send that slot to human review and say why.
+
+Return strict JSON { "humanReview": { "<slot id>": "<current reason>" or null }, "summary": "<two or three plain sentences about the current sequence>" }: only CURRENT human-review exceptions, null for every other slot.`;
+
+// Keyed by slot id (every slot, motion or not): at most one finding per slot. No
+// repairs and no instructions: the verification cannot act.
+export function directorVerifySchema(input: Pick<DirectorQaInput, "slots">) {
+  const all = input.slots.map((s) => String(s.id));
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["humanReview", "summary"],
+    properties: {
+      humanReview: { type: "object", additionalProperties: false, required: all, properties: Object.fromEntries(all.map((id) => [id, { type: ["string", "null"] }])) },
+      summary: { type: "string" },
+    },
+  };
+}
+
+export const openAiDirectorVerify: DirectorQaReviewer = async (input, respond = respondJson) =>
+  respond<unknown>({ instructions: DIRECTOR_VERIFY_INSTRUCTIONS, input: directorQaPayload(input, "verify"), schemaName: "director_verify", schema: directorVerifySchema(input) });
+
+// Mock mode never calls a provider: no findings.
+export const fallbackDirectorVerify: DirectorQaReviewer = async () => ({ humanReview: {}, summary: "Mock mode: no final Director verification model was called." });
+
+// Read one final verification answer; a malformed answer is rejected whole.
+export function readDirectorVerify(kind: "long" | "short", shots: PlannedShot[], raw: unknown): { summary: string; humanReview: { slotId: number; reason: string }[] } {
+  const reject = (reason: string): never => {
+    throw new VisualPlanError(`Invalid Director verification: ${kind} ${reason}.`);
+  };
+  const answer = (raw && typeof raw === "object" ? raw : {}) as { humanReview?: unknown; summary?: unknown };
+  const map = answer.humanReview;
+  if (!map || typeof map !== "object" || Array.isArray(map) || typeof answer.summary !== "string") return reject('answer is not { "humanReview": {...}, "summary" }');
+  const humanReview: { slotId: number; reason: string }[] = [];
+  for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
+    const slotId = /^\d+$/.test(key) ? Number(key) : NaN;
+    if (!Number.isInteger(slotId) || slotId >= shots.length) return reject(`slot ${JSON.stringify(key)} is unknown`);
+    if (value === null) continue;
+    if (typeof value !== "string" || !value.trim()) return reject(`slot ${slotId} has no reason`);
+    humanReview.push({ slotId, reason: value.trim() });
+  }
+  return { summary: answer.summary.trim(), humanReview: humanReview.sort((a, b) => a.slotId - b.slotId) };
+}
+
+export const openAiDirectorQa: DirectorQaReviewer = async (input, respond = respondJson) =>
+  respond<unknown>({ instructions: DIRECTOR_QA_INSTRUCTIONS, input: directorQaPayload(input), schemaName: "director_qa", schema: directorQaSchema(input) });
+
+// Mock mode never calls a provider: no findings.
+export const fallbackDirectorQa: DirectorQaReviewer = async () => ({ repairs: {}, humanReview: {}, summary: "Mock mode: no Director review model was called." });
+
+// Read one Director QA answer. A malformed answer is rejected whole. A slot in
+// both lists stays a human-review finding only (the conservative choice), and a
+// repair on a motion slot becomes a human-review finding: neither is changed
+// automatically.
+export function readDirectorQa(kind: "long" | "short", shots: PlannedShot[], raw: unknown): DirectorQaReport {
+  const reject = (reason: string): never => {
+    throw new VisualPlanError(`Invalid Director QA: ${kind} ${reason}.`);
+  };
+  const answer = (raw && typeof raw === "object" ? raw : {}) as { repairs?: unknown; humanReview?: unknown; summary?: unknown };
+  const isMap = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
+  if (!isMap(answer.repairs) || !isMap(answer.humanReview) || typeof answer.summary !== "string") return reject('answer is not { "repairs": {...}, "humanReview": {...}, "summary" }');
+  const slotOf = (key: string) => {
+    const id = /^\d+$/.test(key) ? Number(key) : NaN;
+    return Number.isInteger(id) && id < shots.length ? id : reject(`slot ${JSON.stringify(key)} is unknown`);
+  };
+  const text = (x: unknown) => (typeof x === "string" ? x.trim() : "");
+  const human = new Map<number, string>();
+  for (const [key, value] of Object.entries(answer.humanReview)) {
+    const slotId = slotOf(key);
+    if (value === null) continue;
+    if (!text(value)) return reject(`human review for slot ${slotId} has no reason`);
+    human.set(slotId, text(value));
+  }
+  const repairs: DirectorQaFinding[] = [];
+  for (const [key, value] of Object.entries(answer.repairs)) {
+    const slotId = slotOf(key);
+    if (value === null) continue;
+    const f = (isMap(value) ? value : {}) as { reason?: unknown; instruction?: unknown };
+    if (!text(f.reason) || !text(f.instruction)) return reject(`repair for slot ${slotId} needs a reason and an instruction`);
+    if (human.has(slotId)) continue;
+    if (shots[slotId].wantsMotion) human.set(slotId, `Motion slot, not changed automatically: ${text(f.reason)}`);
+    else repairs.push({ slotId, reason: text(f.reason), instruction: text(f.instruction) });
+  }
+  return {
+    summary: answer.summary.trim(),
+    repairs: repairs.sort((a, b) => a.slotId - b.slotId),
+    humanReview: [...human].sort((a, b) => a[0] - b[0]).map(([slotId, reason]) => ({ slotId, reason })),
+  };
+}
+
+// The bounded Director feedback the automatic repair hands to the existing
+// sequence revision: exactly the repair slots, every other slot kept. The
+// revision also locks every non-target slot, so this wording is not the guard.
+export function directorRepairFeedback(repairs: DirectorQaFinding[], slotCount: number): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const targets = new Set(repairs.map((r) => r.slotId));
+  const keep = Array.from({ length: slotCount }, (_, i) => i).filter((i) => !targets.has(i));
+  return [
+    "AUTO DIRECTOR SEQUENCE REPAIR",
+    "",
+    "CHANGE:",
+    ...repairs.flatMap((r) => [`Slot ${pad(r.slotId)}: ${r.reason}`, `  Instruction: ${r.instruction}`]),
+    "",
+    "KEEP ALL OTHER SLOTS.",
+    `Do not change: ${keep.map(pad).join(", ") || "(none)"}`,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Local motion budget
 // ---------------------------------------------------------------------------
 
@@ -1829,10 +2554,34 @@ export function seedArchiveLedger(story: Story, films: Array<["long" | "short", 
 // reused a file already on disk, and "mock" wrote a local placeholder.
 export type StillResult = "generated" | "archive" | "existing" | "mock";
 
-export async function acquireStill(story: Story, kind: "long" | "short", shot: PlannedShot, masterRef: string | null, ledger: ArchiveLedger = new Map()): Promise<StillResult> {
+// A Director's one-off correction for a single-still regeneration, appended after
+// the stored shot prompt. The prompt, its PB1 safeguards and the reference stack
+// stay authoritative; the note is never stored on the plan.
+export function withDirectorRepair(prompt: string, note: string): string {
+  return `${prompt}
+
+DIRECTOR REPAIR NOTE
+The shot direction above, its factual grounding, the style reference and any continuity reference remain authoritative. Apply this correction to the regenerated still:
+${note}
+Preserve everything the correction does not affect. Do not treat this note as permission to invent new historical details, change the shot's narrative purpose, change the recurring subject, change the period or location, add unrelated objects or people, or redesign the composition unnecessarily.`;
+}
+
+// A first acquisition names the still after the owner slot. A regeneration passes
+// `stillPath`, the asset's existing stored still: the file is the asset's
+// identity, so it is replaced in place even after a sequence revision moved
+// ownership to a slot whose own number may name another asset's file.
+export async function acquireStill(
+  story: Story,
+  kind: "long" | "short",
+  shot: PlannedShot,
+  masterRef: string | null,
+  ledger: ArchiveLedger = new Map(),
+  directorNote?: string,
+  stillPath?: string,
+): Promise<StillResult> {
   // A reuse shows its asset owner's still (resolveReuse); it never acquires media.
   if (shot.edit === "reuse") throw new Error(`${kind} slot ${shot.index} reuses asset ${shot.assetId} and never acquires its own still.`);
-  const rel = `images/${kind}-${String(shot.index).padStart(2, "0")}.png`;
+  const rel = stillPath ?? `images/${kind}-${String(shot.index).padStart(2, "0")}.png`;
   const abs = inStory(story.slug, rel);
   const size = kind === "short" ? { w: 1080, h: 1920, oa: "1024x1536" } : { w: 1920, h: 1080, oa: "1536x1024" };
 
@@ -1884,7 +2633,8 @@ export async function acquireStill(story: Story, kind: "long" | "short", shot: P
     // reconstruction) generates from the canonical PB1 style reference; a continuity
     // shot adds the master second. Graphics get no reference. See stillReferencePaths.
     const refs = stillReferencePaths(story, shot, masterRef);
-    await generateImageFile({ prompt: shot.prompt, size: size.oa, outPath: abs, referencePaths: refs });
+    const prompt = directorNote ? withDirectorRepair(shot.prompt, directorNote) : shot.prompt;
+    await generateImageFile({ prompt, size: size.oa, outPath: abs, referencePaths: refs });
     shot.path = rel;
     shot.mediaType = "image";
     return "generated";

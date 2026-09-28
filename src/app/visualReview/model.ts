@@ -5,7 +5,7 @@ import type { PreviewFrame, VisualPreview } from "../../types.ts";
 // the visited set are local UI state, and every count is derived from the frames.
 
 export type Film = "long" | "short";
-export type Mode = "sequence" | "assets";
+export type Mode = "sequence" | "assets" | "director";
 export type Filter = "all" | "owners" | "motion" | "archive" | "graphics";
 
 // A generated owner still (never a reuse slot or an archive still) can be
@@ -129,7 +129,8 @@ export type ReviewAction =
   | { type: "filter"; filter: Filter }
   | { type: "slot"; index: number } // opens the slot in Sequence
   | { type: "asset"; key: string | null } // opens the asset (null: back to the grid)
-  | { type: "markAll"; count: number };
+  | { type: "markAll"; count: number }
+  | { type: "unvisit"; film: Film; indexes: number[] }; // slots whose visual just changed
 
 export function initialReview(preview: VisualPreview): ReviewState {
   const film: Film = preview.frames.some((f) => (f.kind ?? "long") === "long") || preview.frames.length === 0 ? "long" : "short";
@@ -162,12 +163,15 @@ export function reviewReducer(s: ReviewState, a: ReviewAction): ReviewState {
       return { ...s, mode: "assets", asset: { ...s.asset, [s.film]: a.key } };
     case "markAll":
       return { ...s, visited: { ...s.visited, [s.film]: Array.from({ length: a.count }, (_, i) => i) } };
+    case "unvisit":
+      return { ...s, visited: { ...s.visited, [a.film]: s.visited[a.film].filter((i) => !a.indexes.includes(i)) } };
   }
 }
 
 // The action Previous/Next (and the arrow keys) take: the next slot matching the
 // active filter in Sequence, the neighbouring asset in the asset inspector.
 export function stepAction(s: ReviewState, fr: FilmReview, dir: 1 | -1): ReviewAction | null {
+  if (s.mode === "director") return null; // the board is a whole-film overview, not a stepper
   if (s.mode === "sequence") {
     for (let i = s.index[s.film] + dir; i >= 0 && i < fr.frames.length; i += dir) {
       if (matchesFilter(fr, i, s.filter)) return { type: "slot", index: i };

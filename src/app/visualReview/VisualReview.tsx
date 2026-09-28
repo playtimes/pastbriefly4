@@ -16,13 +16,15 @@ import {
 } from "./model.ts";
 import { AssetInspector, SlotInspector, type RegenProps } from "./Inspector.tsx";
 import { AssetGrid } from "./AssetGrid.tsx";
+import { DirectorBoard, type RunDirectorQa } from "./DirectorBoard.tsx";
 import { Filmstrip } from "./Filmstrip.tsx";
 import { RefreshIcon, Still } from "./Still.tsx";
-import type { VisualPreview } from "../../types.ts";
+import { AssetQaNotice, VisualQaSummary } from "./AssetQaNotice.tsx";
+import type { AssetQaState, DirectorQaRuns, SequenceRevisionReport, VisualAutopilotState, VisualPreview } from "../../types.ts";
 
 // The visual-review gate: one film at a time, reviewed as a Sequence of edit slots
 // or as its unique Assets, with a large current visual, a compact inspector and a
-// filmstrip. All navigation is local UI state; the only actions that touch the
+// filmstrip - or as a read-only Director board of every slot. All navigation is local UI state; the only actions that touch the
 // job are the existing Continue, Rebuild visuals and Regenerate still handlers.
 
 export interface VisualReviewProps extends RegenProps {
@@ -34,6 +36,12 @@ export interface VisualReviewProps extends RegenProps {
   onRebuild: () => void;
   continuing: boolean;
   rebuilding: boolean;
+  onReviseSequence?: (kind: Film, feedback: string) => Promise<SequenceRevisionReport>;
+  onDirectorQa?: RunDirectorQa;
+  revisingSequence?: boolean; // a sequence revision or Director QA is running
+  directorQa?: DirectorQaRuns; // the latest Run Director QA per film (server state)
+  visualAutopilot?: VisualAutopilotState; // the Visual Autopilot, when its approval failed
+  assetQa?: Extract<AssetQaState, { status: "done" }>; // the latest Pixel Asset QA result
 }
 
 export function VisualReview(props: VisualReviewProps): React.ReactElement {
@@ -68,17 +76,21 @@ export function ReviewView(props: VisualReviewProps & { films: Record<Film, Film
   const seq = state.mode === "sequence";
   const openAsset = seq ? undefined : fr.assets.find((a) => a.key === state.asset[state.film]);
   const index = Math.min(state.index[state.film], Math.max(0, fr.frames.length - 1));
-  const regen: RegenProps = { onRegenerate: props.onRegenerate, regen: props.regen };
+  const regen: RegenProps = { onRegenerate: props.onRegenerate, regen: props.regen, draft: props.draft, onDraft: props.onDraft };
 
   return (
     <div className="flex flex-col" data-review-film={state.film} data-review-mode={state.mode}>
       <ReviewHeader {...props} fr={fr} />
+      {props.assetQa && <AssetQaNotice qa={props.assetQa} films={films} version={version} dispatch={dispatch} />}
+      <VisualQaSummary runs={props.directorQa} pilot={props.visualAutopilot} dispatch={dispatch} />
       {fr.frames.length === 0 ? (
         <p className="py-16 text-center text-dim">This film has no preview frames.</p>
       ) : (
         <>
           <Toolbar fr={fr} state={state} dispatch={dispatch} />
-          {!seq && !openAsset ? (
+          {state.mode === "director" ? (
+            <DirectorBoard key={fr.film} fr={fr} storyTitle={props.storyTitle ?? ""} version={version} dispatch={dispatch} onReviseSequence={props.onReviseSequence} onDirectorQa={props.onDirectorQa} directorQa={props.directorQa?.[fr.film]} />
+          ) : !seq && !openAsset ? (
             <AssetGrid fr={fr} dispatch={dispatch} version={version} />
           ) : (
             <>
@@ -193,11 +205,11 @@ function Metric({ n, label, dot }: { n: number; label: string; dot?: boolean }):
   );
 }
 
-function ContinueButton({ onContinue, continuing, rebuilding, regen, compact }: VisualReviewProps & { compact?: boolean }): React.ReactElement {
+function ContinueButton({ onContinue, continuing, rebuilding, regen, revisingSequence, compact }: VisualReviewProps & { compact?: boolean }): React.ReactElement {
   return (
     <button
       onClick={onContinue}
-      disabled={continuing || rebuilding || regen.running !== null}
+      disabled={continuing || rebuilding || regen.running !== null || !!revisingSequence}
       data-action="continue"
       className={`inline-flex items-center gap-2 rounded-full bg-accent text-white font-semibold whitespace-nowrap hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed ${compact ? "h-10 px-[18px] text-sm" : "h-[42px] px-[22px] text-sm shadow-[0_8px_24px_rgba(229,9,20,0.28)]"}`}
     >
@@ -207,11 +219,11 @@ function ContinueButton({ onContinue, continuing, rebuilding, regen, compact }: 
   );
 }
 
-function RebuildButton({ onRebuild, continuing, rebuilding, regen }: VisualReviewProps): React.ReactElement {
+function RebuildButton({ onRebuild, continuing, rebuilding, regen, revisingSequence }: VisualReviewProps): React.ReactElement {
   return (
     <button
       onClick={onRebuild}
-      disabled={continuing || rebuilding || regen.running !== null}
+      disabled={continuing || rebuilding || regen.running !== null || !!revisingSequence}
       data-action="rebuild"
       className="inline-flex items-center gap-2 h-10 px-3.5 rounded-full text-[13.5px] font-medium text-[#8f8579] whitespace-nowrap hover:text-[#f3ebde] hover:bg-[rgba(245,235,222,0.04)] disabled:opacity-50 disabled:cursor-not-allowed"
     >
@@ -230,7 +242,7 @@ function Toolbar({ fr, state, dispatch }: { fr: FilmReview; state: ReviewState; 
     <div className="flex items-center justify-between gap-4 flex-wrap pt-2">
       <div className="flex items-center gap-[26px] flex-wrap min-w-0">
         <div className="flex gap-5">
-          {(["sequence", "assets"] as const).map((k) => (
+          {(["sequence", "assets", "director"] as const).map((k) => (
             <button
               key={k}
               data-mode-tab={k}
@@ -238,7 +250,7 @@ function Toolbar({ fr, state, dispatch }: { fr: FilmReview; state: ReviewState; 
               onClick={() => dispatch({ type: "mode", mode: k })}
               className={`relative h-[34px] text-[11.5px] font-semibold tracking-[0.16em] uppercase hover:text-[#f3ebde] ${state.mode === k ? "text-[#f3ebde]" : "text-dim"}`}
             >
-              {k === "sequence" ? "Sequence" : "Assets"}
+              {k === "sequence" ? "Sequence" : k === "assets" ? "Assets" : "Director"}
               <span className="absolute left-0 right-0 bottom-0.5 h-0.5 rounded-sm" style={{ background: state.mode === k ? "#e50914" : "transparent" }} />
             </button>
           ))}

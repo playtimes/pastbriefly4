@@ -1,7 +1,7 @@
 import React from "react";
 import { canRegenerate, fmtTime, isOwnerFrame, regenKey, slotLabel, type FilmReview, type ReviewAction, type ReviewAsset } from "./model.ts";
 import { framingLabel, LinkIcon, RefreshIcon, TRUTH_LABEL } from "./Still.tsx";
-import type { PreviewFrame } from "../../types.ts";
+import { stillFeedbackError, type PreviewFrame } from "../../types.ts";
 
 // The compact inspector beside (desktop) or below (mobile) the current visual.
 // It shows only public preview data: slot timing, the asset, its truth, owner or
@@ -11,11 +11,23 @@ export interface RegenStatus {
   running: string | null; // regenKey of the still being regenerated
   failed: { key: string; message: string } | null;
   done: string | null; // regenKey of the last still replaced successfully
+  blocked?: boolean; // another edit operation (sequence revision, Director QA) is running
+}
+
+// The open Director-feedback box for one owner still (by regenKey). Ephemeral:
+// it lives in the review session only and is never stored.
+export interface RegenDraft {
+  key: string;
+  text: string;
 }
 
 export interface RegenProps {
-  onRegenerate?: (f: PreviewFrame) => void;
+  onRegenerate?: (f: PreviewFrame, directorFeedback?: string) => void;
   regen: RegenStatus;
+  // With onDraft, Regenerate still first opens the optional feedback box;
+  // without it, the button regenerates straight away as before.
+  draft?: RegenDraft | null;
+  onDraft?: (d: RegenDraft | null) => void;
 }
 
 const badge = "inline-flex items-center gap-1.5 h-[22px] px-[9px] rounded text-[10px] font-bold tracking-[0.14em]";
@@ -144,7 +156,7 @@ export function AssetInspector({ fr, asset, dispatch, ...regen }: { fr: FilmRevi
 
 // Regenerate still for an eligible generated owner, or the archive note. Reuse
 // slots never get here: they offer "View original asset" instead.
-function AssetActions({ asset, ownerFrame, onRegenerate, regen }: { asset: ReviewAsset; ownerFrame: PreviewFrame } & RegenProps): React.ReactElement | null {
+function AssetActions({ asset, ownerFrame, onRegenerate, regen, draft, onDraft }: { asset: ReviewAsset; ownerFrame: PreviewFrame } & RegenProps): React.ReactElement | null {
   if (ownerFrame.truth === "archive") {
     return <div className="mt-4 text-[12.5px] text-dim">Documentary material - used as found, not regenerated.</div>;
   }
@@ -152,24 +164,58 @@ function AssetActions({ asset, ownerFrame, onRegenerate, regen }: { asset: Revie
   const key = regenKey(ownerFrame);
   const running = regen.running === key;
   const failed = regen.failed?.key === key ? regen.failed : null;
+  const busy = regen.running !== null || !!regen.blocked;
   const n = asset.uses.length;
+  const open = onDraft && draft?.key === key ? draft : null;
+  const tooLong = open ? stillFeedbackError(open.text) : null;
+  // Blank feedback is no feedback: exactly today's regeneration.
+  const submit = () => (tooLong ? undefined : open ? onRegenerate(ownerFrame, open.text.trim() || undefined) : onRegenerate(ownerFrame));
+  const button = `inline-flex items-center gap-2 h-9 px-4 rounded-full border border-[rgba(245,235,222,0.18)] text-[13px] font-medium hover:border-[rgba(245,235,222,0.36)] hover:text-white disabled:cursor-not-allowed ${running ? "text-[#8f8579]" : "text-[#e8dfd2]"}`;
   return (
     <div className="mt-[18px] flex flex-col gap-2" data-regenerate={key}>
-      <div className="flex items-center gap-3 flex-wrap">
-        <button
-          onClick={() => onRegenerate(ownerFrame)}
-          disabled={regen.running !== null}
-          className={`inline-flex items-center gap-2 h-9 px-4 rounded-full border border-[rgba(245,235,222,0.18)] text-[13px] font-medium hover:border-[rgba(245,235,222,0.36)] hover:text-white disabled:cursor-not-allowed ${running ? "text-[#8f8579]" : "text-[#e8dfd2]"}`}
-        >
-          <RefreshIcon size={14} />
-          {running ? "Regenerating…" : "Regenerate still"}
-        </button>
-        {regen.done === key && !running && !failed && <span className="text-[12.5px] text-[#a9c3a4]">✓ New still in place</span>}
-      </div>
+      {open ? (
+        <div className="flex flex-col gap-2" data-regen-feedback={key}>
+          <span className="text-[11px] tracking-[0.2em] uppercase text-[#8f8579] font-semibold">Regenerate {asset.id}</span>
+          <label htmlFor={`regen-feedback-${key}`} className={rowLabel}>
+            Director feedback (optional)
+          </label>
+          <textarea
+            id={`regen-feedback-${key}`}
+            value={open.text}
+            onChange={(e) => onDraft!({ key, text: e.target.value })}
+            disabled={busy}
+            rows={3}
+            placeholder="One visual correction for this still. Leave blank to regenerate as planned."
+            className="w-full resize-y rounded-lg bg-field border border-[rgba(245,235,222,0.14)] px-3 py-2 text-[13px] leading-relaxed text-ink placeholder:text-dim outline-none transition focus:border-accent/55"
+          />
+          {tooLong && (
+            <span role="alert" className="text-[13px] font-medium text-[#f3ebde]">
+              {tooLong}
+            </span>
+          )}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <button onClick={() => onDraft!(null)} disabled={busy} className="text-[13px] text-[#cabfb0] hover:text-white disabled:cursor-not-allowed">
+              Cancel
+            </button>
+            <button onClick={submit} disabled={busy || !!tooLong} className={button}>
+              <RefreshIcon size={14} />
+              {running ? "Regenerating…" : "Regenerate still"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-3 flex-wrap">
+          <button onClick={() => (onDraft ? onDraft({ key, text: "" }) : onRegenerate(ownerFrame))} disabled={busy} className={button}>
+            <RefreshIcon size={14} />
+            {running ? "Regenerating…" : "Regenerate still"}
+          </button>
+          {regen.done === key && !running && !failed && <span className="text-[12.5px] text-[#a9c3a4]">✓ New still in place - review it now</span>}
+        </div>
+      )}
       {failed && (
         <div className="flex items-center gap-2.5 flex-wrap text-[13px] text-[#e3b8ab]" role="alert">
           <span>Could not regenerate this still. The current one is kept.</span>
-          <button onClick={() => onRegenerate(ownerFrame)} disabled={regen.running !== null} className="text-[#f3ebde] font-semibold underline underline-offset-[3px]">
+          <button onClick={submit} disabled={busy || !!tooLong} className="text-[#f3ebde] font-semibold underline underline-offset-[3px]">
             Retry
           </button>
           {failed.message && <span className="basis-full text-xs text-[#a88f86]">{failed.message}</span>}
