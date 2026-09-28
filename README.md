@@ -1,7 +1,7 @@
 # PastBriefly 4
 
-Pick a true historical story → press **Generate Short + Long** → get a Short and a
-long documentary that feel like PastBriefly → watch them in the app.
+Pick a true historical story → **Generate films** → PB4 works automatically → if
+needed, PB4 asks for one concrete decision → the Long and the Short are ready.
 
 One package. Boring code, exceptional films.
 
@@ -19,12 +19,22 @@ see the whole product and the real Remotion renderer end to end.
 For a real run, copy `.env.example` to `.env`, add provider keys, and set
 `PROVIDER_MODE=live`.
 
-## The four screens
+## The product
 
-1. **Stories** - browse featured stories, categories, search, Find stories, Surprise me.
-2. **Story** - hero, hook, summary, moments, sources, then **Generate Short + Long** (or **Watch**).
-3. **Creating** - human-facing progress, plus one **Visual direction** review before spending on motion.
-4. **Videos** - watch the Long and Short, download, sources, previous version.
+The four main areas:
+
+1. **Create** - find a story: search, categories, recommended and trending niches.
+2. **Stories** - your story library and where each one is in production.
+3. **Videos** - watch the Long and the Short, download, sources, previous versions.
+4. **Config** - provider mode and provider credentials.
+
+A story's own pages are part of that workflow, not extra nav items:
+
+- **Story** - hero, hook, summary, moments, sources, then **Generate films** (or **Watch**).
+- **Production** - where the story is (Researching, Writing, Recording narration,
+  Creating visuals, Checking films, Rendering). PB4 checks its own text and
+  visuals. It stops only when a real decision is needed, shows that one issue
+  plainly, and then carries on. When the films are done it shows them, ready to watch.
 
 ## Commands
 
@@ -34,7 +44,6 @@ For a real run, copy `.env.example` to `.env`, add provider keys, and set
 | `npm run build` | build the app |
 | `npm run typecheck` | type-check everything |
 | `npm test` | run the test suite |
-| `npm run render:paul-bunyan` | render the acceptance Long + Short locally (mock, no paid calls) |
 | `npm run studio` | open the Remotion studio |
 | `npm run youtube:auth` | one-time read-only OAuth for the PastBriefly channel (owner analytics) |
 | `npm run youtube:analytics -- --start YYYY-MM-DD --end YYYY-MM-DD` | official owner snapshot (default: last 28 complete days) |
@@ -47,15 +56,15 @@ Owner analytics credentials, tokens and raw data live only in `data/analytics/yo
 
 ```
 src/
-  app/         React + Tailwind UI (Stories, Story, Creating, Videos)
+  app/         React + Tailwind UI (Create, Stories, Story, Production, Videos, Config)
   server/      Fastify + better-sqlite3: config, db, store, routes, worker, security
-  production/  research → scripts → narration → visuals → generate (the pipeline)
-  providers/   openai, elevenlabs, runway (live API clients)
+  production/  research → scripts → narration → visuals → QA → generate (the pipeline)
+  providers/   openai, elevenlabs, runway, youtubeOwner
   render/      Remotion: Root, LongVideo, ShortVideo, Shot, Subtitles, PastBrieflyFrame, theme
   types.ts     shared types
 media/
-  style/       internal PastBriefly visual references
-  stories/     generated assets + renders per story
+  style/pb1/   the canonical PB1 style reference (see its README)
+  stories/     generated assets + renders per story (gitignored)
 ```
 
 ## Modes
@@ -63,9 +72,10 @@ media/
 - **mock** (default): local, free, offline. Placeholder stills, silent narration,
   no motion generation. Proves the full product and renderer.
 - **live**: real research (OpenAI), scripts (OpenAI), stills (OpenAI images),
-  narration (ElevenLabs), selective motion (Runway). Every paid run is gated
-  by one cost approval and one visual-direction review. Costs are reserved against
-  the approved maximum, and completed paid work is reused on resume.
+  narration (ElevenLabs), selective motion (Runway). You approve one maximum
+  spend when you press Generate films. After that, Autopilot handles text and
+  visual QA automatically and stops only for genuine human exceptions. Costs are
+  reserved against the approved maximum, and completed paid work is reused on resume.
 
 ## Environment (live)
 

@@ -12,7 +12,6 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "studio": "remotion studio src/render/index.ts",
-    "render:paul-bunyan": "tsx src/production/renderPaulBunyan.ts",
     "youtube:auth": "tsx scripts/youtube-auth.ts",
     "youtube:analytics": "tsx scripts/youtube-analytics.ts",
     "youtube:reporting:init": "tsx scripts/youtube-reporting.ts init",
