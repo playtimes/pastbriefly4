@@ -23,6 +23,12 @@ export const PRICING = {
   },
 } as const;
 
+// Not provider pricing: authorization headroom added to the cost approval so the
+// bounded automatic checks and repairs of a normal run fit inside the approved
+// maximum without asking for more. Nothing charges it; only successful paid calls
+// are recorded as spend, so unused reserve is never recorded as spend.
+export const AUTOPILOT_QUALITY_RESERVE_USD = 1.5;
+
 // Every Runway motion clip is exactly this long; pricing and the renderer rely on it.
 export const MOTION_CLIP_SECONDS = 5;
 

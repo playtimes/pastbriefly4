@@ -151,7 +151,8 @@ vi.mock("../src/providers/runway.ts", () => ({
 
 const { runJob, newJobId } = await import("../src/production/generate.ts");
 const { createJob, getJob, updateJob, upsertStory } = await import("../src/server/store.ts");
-const { PRICING, round, ttsUsd } = await import("../src/server/pricing.ts");
+const { PRICING, AUTOPILOT_QUALITY_RESERVE_USD, round, ttsUsd } = await import("../src/server/pricing.ts");
+const { estimateJob } = await import("../src/production/estimate.ts");
 const { ensureStoryDirs } = await import("../src/production/paths.ts");
 
 let n = 0;
@@ -331,5 +332,34 @@ describe("Film Grammar v2E spend", () => {
     expect(after.spent).toBe(2.5);
     expect(h.imageCalls.length).toBe(0);
     expect(h.archiveCalls).toBe(0);
+  });
+});
+
+describe("the quality reserve is authorization only", () => {
+  test("a job approved at exactly the estimate records only its successful calls; the reserve is never spent", async () => {
+    const story = makeStory();
+    const estimate = estimateJob(story);
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: estimate.total, approvedMax: estimate.total });
+    expect(getJob(job.id)!.spent).toBe(0); // nothing is taken when the job starts
+    await runJob(job.id, { autoApproveText: true }); // stops at the preview gate
+
+    const done = getJob(job.id)!;
+    expect(done.state).toBe("awaiting_preview");
+    const calls = round(TEXT() + 2 * PRICING.openai.visualPlan + h.imageCalls.length * PRICING.openai.image);
+    expect(done.spent).toBe(calls);
+    expect((done.scratch as any).spent).toBe(calls);
+    expect(done.approvedMax).toBe(estimate.total);
+    expect(round(done.approvedMax - done.spent)).toBeGreaterThanOrEqual(AUTOPILOT_QUALITY_RESERVE_USD); // the reserve is still unspent headroom
+  });
+
+  test("the spend guard is unchanged: each paid call is still checked against the approved maximum", async () => {
+    const story = makeStory();
+    const approvedMax = round(TEXT() + PRICING.openai.visualPlan); // room for Coverage, not the Editor
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: approvedMax, approvedMax });
+    await expect(runJob(job.id, { autoApproveText: true })).rejects.toThrow(/Approved maximum/);
+    const after = getJob(job.id)!;
+    expect(after.state).toBe("failed");
+    expect([h.coverageCalls, h.editorCalls]).toEqual([1, 0]); // the refused call never ran
+    expect(after.spent).toBe(approvedMax); // and was never charged
   });
 });

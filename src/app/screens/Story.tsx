@@ -305,7 +305,7 @@ function CostDialog({ detail, slug, mode, onClose }: { detail: StoryDetail; slug
     <div className="fixed inset-0 z-30 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
       <div className="surface p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
         <p className="kicker mb-1">Before we start</p>
-        <h3 className="text-2xl mb-4">Estimated cost</h3>
+        <h3 className="text-2xl mb-4">Estimated maximum</h3>
         <div className="flex flex-col gap-2">
           {estimate.lines.map((l, i) => (
             <div key={i} className="flex justify-between text-sm">
@@ -314,15 +314,11 @@ function CostDialog({ detail, slug, mode, onClose }: { detail: StoryDetail; slug
             </div>
           ))}
           <div className="border-t border-line mt-2 pt-2 flex justify-between font-semibold">
-            <span>Estimated total</span>
+            <span>Approved maximum</span>
             <span>${estimate.total.toFixed(2)}</span>
           </div>
         </div>
-        <p className="text-muted text-xs mt-3">
-          {mode === "mock"
-            ? "Local mode: this runs offline and free. The figures show the live-equivalent cost."
-            : "You approve this as the maximum spend. No paid work runs before you approve."}
-        </p>
+        <p className="text-muted text-xs mt-3">{costNote(mode)}</p>
         {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
         <div className="flex gap-3 mt-5">
           <button onClick={onClose} className="btn btn-ghost flex-1">Cancel</button>
@@ -333,6 +329,14 @@ function CostDialog({ detail, slug, mode, onClose }: { detail: StoryDetail; slug
       </div>
     </div>
   );
+}
+
+// The line under the cost figures. The total deliberately includes the quality
+// reserve, so live mode says plainly that PB4 may spend less.
+export function costNote(mode: string): string {
+  return mode === "mock"
+    ? "Local mode: this runs offline and free. The figures show the live-equivalent cost."
+    : "PB4 may spend less than this. The quality reserve is only used if automatic checks or bounded repairs need it. No paid work runs before you approve.";
 }
 
 function Back({ message }: { message: string }): React.ReactElement {

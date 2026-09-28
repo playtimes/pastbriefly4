@@ -1,5 +1,5 @@
 import type { CostEstimate, Story } from "../types.ts";
-import { PRICING, ttsUsd, round } from "../server/pricing.ts";
+import { PRICING, AUTOPILOT_QUALITY_RESERVE_USD, ttsUsd, round } from "../server/pricing.ts";
 import { getScripts } from "../server/store.ts";
 import { paulBunyanScripts } from "./fixtures/paulBunyan.ts";
 
@@ -38,6 +38,8 @@ export function estimateJob(story: Story): CostEstimate {
     { label: "Reference image (OpenAI images)", usd: PRICING.openai.image, detail: "1 master still" },
     { label: "Cinematic stills (OpenAI images)", usd: round(c.images * PRICING.openai.image), detail: `${c.images} images` },
     { label: "Selective motion (Runway Gen-4.5, 5s)", usd: round(c.motion * PRICING.runway.video5s), detail: `${c.motion} clips` },
+    { label: "Visual planning (OpenAI)", usd: round(2 * PRICING.openai.visualPlan), detail: "coverage + edit" },
+    { label: "Quality reserve", usd: AUTOPILOT_QUALITY_RESERVE_USD, detail: "automatic checks and bounded repairs; unused reserve is not spent" },
   ];
   const total = round(lines.reduce((a, l) => a + l.usd, 0));
   return { total, lines };
