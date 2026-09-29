@@ -522,6 +522,86 @@ describe("an issue's Change visual: only the issue's slot can change", () => {
   });
 });
 
+describe("a revision that changes nothing saves nothing", () => {
+  const qaRun = (kind: string) => ({ status: "complete", verified: true, automaticChanges: 0, cleanupChanges: 0, coordinatedChanges: 0, changed: [], unresolvedRepairs: [], requestedRepairs: [], humanReview: [{ slotId: 3, reason: `${kind} note` }], summary: "", clean: false });
+  async function withQa() {
+    const { job, story } = await seed();
+    updateJob(job.id, { scratch: { ...getJob(job.id)!.scratch, directorQa: { long: qaRun("long"), short: qaRun("short") } } as any });
+    return { job, story };
+  }
+  const open = (list: Shot[]) => list.findIndex((s, i) => i > 3 && !s.wantsMotion && !list[i - 1].wantsMotion && list[i + 1] && !list[i + 1].wantsMotion);
+  const keepAll = () => vi.fn(async () => ({ changes: {}, unresolved: [] }));
+
+  test("targeted and general revisions that keep everything leave the saved job exactly as it was, Director QA included", async () => {
+    const { job } = await withQa();
+    const before = getJob(job.id)!;
+    for (const target of [open(shots(job.id)), undefined]) {
+      const call = keepAll();
+      const r = await reviseSequenceForJob(job.id, "long", "Keep it.", call, target);
+      expect(call).toHaveBeenCalledOnce();
+      expect(r.changed).toEqual([]);
+      const after = getJob(job.id)!;
+      expect(JSON.stringify(after.scratch)).toBe(JSON.stringify(before.scratch)); // shots, retained pool and Director QA
+      expect(after.scratch.directorQa.long).toEqual(qaRun("long"));
+      expect(after.preview).toEqual(before.preview);
+    }
+  });
+
+  test("an actual saved change still clears that film's Director QA, and only that film's", async () => {
+    const { job } = await withQa();
+    const t = open(shots(job.id));
+    const r = await reviseSequenceForJob(job.id, "long", "Change it.", async (inp: any) => ({ changes: { [t]: inp.choices.get(t)[0] }, unresolved: [] }), t);
+    expect(r.changed).toEqual([t]);
+    expect(getJob(job.id)!.scratch.directorQa).toEqual({ short: qaRun("short") });
+  });
+
+  test("live: a paid targeted call that changes nothing is charged exactly once and keeps the film, its preview and Director QA", async () => {
+    const { job } = await withQa();
+    const before = getJob(job.id)!;
+    h.answer = { changes: {}, unresolved: [] };
+    setMode("live");
+    try {
+      const r = await reviseSequenceForJob(job.id, "long", "Keep it.", undefined, open(shots(job.id)));
+      expect(r.changed).toEqual([]);
+    } finally {
+      setMode("mock");
+    }
+    const after = getJob(job.id)!;
+    expect(h.calls.map((c) => c.schemaName)).toEqual(["sequence_revision"]);
+    expect(after.spent).toBeCloseTo(1 + PRICING.openai.visualPlan);
+    expect(after.scratch.spent).toBeCloseTo(1 + PRICING.openai.visualPlan);
+    expect(JSON.stringify(after.scratch.longShots)).toBe(JSON.stringify(before.scratch.longShots));
+    expect(after.preview).toEqual(before.preview);
+    expect(after.scratch.directorQa.long).toEqual(qaRun("long"));
+  });
+
+  test("live: paths that find no legal choice before any call stay uncharged", async () => {
+    const { job, story } = await withQa();
+    // Two base views alternating: no slot has a legal one-slot change.
+    const list = shots(job.id);
+    const [x, y] = [...new Set(list.map((s) => s.assetId))];
+    const next = v.reassembleStoredEdit(list, list.map((_, i) => ({ slotId: i, presentationId: `${i % 2 ? y : x}:base`, motionPriority: 0 })));
+    v.resolveReuse(story, "long", next);
+    updateJob(job.id, { scratch: { ...getJob(job.id)!.scratch, longShots: next }, preview: v.buildPreview(story, next, getJob(job.id)!.scratch.shortShots) });
+    const before = JSON.stringify(getJob(job.id)!.scratch);
+    const call = keepAll();
+    setMode("live");
+    try {
+      await expect(reviseSequenceForJob(job.id, "long", "Change something.", call)).rejects.toThrow(/No unlocked slot has a legal alternative/);
+      const t = open(next);
+      expect(await reviseSequenceForJob(job.id, "long", "Change this one.", call, t)).toMatchObject({ changed: [], unresolved: [{ slotId: t, reason: v.NO_LEGAL_ALTERNATIVE }] });
+      const r = await directorRepairForJob(job.id, "long", [{ slotId: t, reason: "r", instruction: "i" }], call);
+      expect(r.unresolved).toEqual([{ slotId: t, reason: v.NO_LEGAL_ALTERNATIVE }]);
+    } finally {
+      setMode("mock");
+    }
+    expect(call).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+    expect(getJob(job.id)!.spent).toBe(1);
+    expect(JSON.stringify(getJob(job.id)!.scratch)).toBe(before);
+  });
+});
+
 describe("POST /api/jobs/:id/revise-sequence", () => {
   const post = (id: string, payload: unknown) => app.inject({ method: "POST", url: `/api/jobs/${id}/revise-sequence`, payload });
 

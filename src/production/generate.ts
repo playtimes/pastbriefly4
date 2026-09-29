@@ -666,6 +666,9 @@ async function reviseStoredSequence(
   record(job.id, PRICING.openai.visualPlan, scratch); // paid even if the answer then fails validation, as in planning
   const current = storedEdit(shots);
   const revised = applySequenceRevision(kind, current, presentations, locked, choices, answer);
+  // Nothing changed (the call is already charged): the saved edit, its preview and
+  // the film's Director QA result all still describe the film, so nothing is saved.
+  if (!revised.changed.length) return { job: getJob(job.id)!, changed: [], unresolved: revised.unresolved, choices };
   const edit = validateEdit(kind, slots, revised.edit, presentations);
   const next = reassembleStoredEdit(shots, edit, pool);
   assertFilmGrammarPlan(kind, next);
