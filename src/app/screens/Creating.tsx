@@ -136,12 +136,13 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
 
   // Revise one film's edit from Director feedback at the visual preview. The job
   // stays at the preview; errors are thrown to the Director board, which keeps
-  // the current board and the pasted feedback.
-  async function reviseSequence(kind: "long" | "short", feedback: string): Promise<SequenceRevisionReport> {
+  // the current board and the pasted feedback. targetSlot (from an issue) limits
+  // the change to that one slot.
+  async function reviseSequence(kind: "long" | "short", feedback: string, targetSlot?: number): Promise<SequenceRevisionReport> {
     if (!jobId.current) throw new Error("The job is not loaded yet.");
     setRevisingSequence(true);
     try {
-      const { job, revision } = await api.reviseSequence(jobId.current, kind, feedback);
+      const { job, revision } = await api.reviseSequence(jobId.current, kind, feedback, targetSlot);
       show(job);
       return revision;
     } finally {

@@ -6,7 +6,12 @@ import { pad2, type Film } from "./model.ts";
 // words. It can only move images the film already has between its slots; the
 // narration, timing and media stay as they are.
 
-export type ReviseSequence = (kind: Film, feedback: string) => Promise<SequenceRevisionReport>;
+// targetSlot: an issue's own slot, the only one the revision may change. Never
+// read from the feedback text. Omitted when looking through a whole film.
+export type ReviseSequence = (kind: Film, feedback: string, targetSlot?: number) => Promise<SequenceRevisionReport>;
+
+// A failed request, in product words. The server keeps the diagnostic.
+export const SEQUENCE_FAILED = "The visual could not be changed. The current film was kept.";
 
 // The outcome of the last change in this session. Local only.
 export type SequenceNotice = { kind: "invalid"; message: string } | { kind: "failed"; message: string } | { kind: "applied"; report: SequenceRevisionReport };
@@ -27,21 +32,21 @@ export type SequenceOutcome = { status: "skipped" } | { status: "invalid"; error
 
 // Submit trimmed feedback for ONE film, once. Invalid feedback never reaches the
 // server and is never truncated; a revision already running is skipped; a
-// rejection becomes an error to show, and the caller keeps the typed text.
-export async function submitSequenceRevision(kind: Film, feedback: string, running: boolean, revise: ReviseSequence): Promise<SequenceOutcome> {
+// rejection becomes the plain failure copy, and the caller keeps the typed text.
+export async function submitSequenceRevision(kind: Film, feedback: string, running: boolean, revise: ReviseSequence, targetSlot?: number): Promise<SequenceOutcome> {
   if (running) return { status: "skipped" };
   const invalid = sequenceFeedbackError(feedback);
   if (invalid) return { status: "invalid", error: invalid };
   try {
-    return { status: "ok", report: await revise(kind, feedback.trim()) };
-  } catch (e: any) {
-    return { status: "failed", error: e?.message || "The visual could not be changed." };
+    return { status: "ok", report: await (targetSlot === undefined ? revise(kind, feedback.trim()) : revise(kind, feedback.trim(), targetSlot)) };
+  } catch {
+    return { status: "failed", error: SEQUENCE_FAILED };
   }
 }
 
 // The form's state: local, never stored. `busy` (another visual operation is
 // running) disables it. Undefined when changing visuals is not wired.
-export function useSequenceRevise(film: Film, onReviseSequence: ReviseSequence | undefined, busy: boolean): SequenceReviseControls | undefined {
+export function useSequenceRevise(film: Film, onReviseSequence: ReviseSequence | undefined, busy: boolean, targetSlot?: number): SequenceReviseControls | undefined {
   const [open, setOpen] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [running, setRunning] = useState(false);
@@ -50,7 +55,7 @@ export function useSequenceRevise(film: Film, onReviseSequence: ReviseSequence |
     if (!onReviseSequence || running || busy) return;
     setNotice(null);
     setRunning(true);
-    const out = await submitSequenceRevision(film, feedback, false, onReviseSequence);
+    const out = await submitSequenceRevision(film, feedback, false, onReviseSequence, targetSlot);
     setRunning(false);
     if (out.status === "invalid" || out.status === "failed") setNotice({ kind: out.status, message: out.error });
     if (out.status === "ok") {
@@ -99,10 +104,9 @@ export function ChangeVisualForm({ revise, film }: { revise: SequenceReviseContr
             </p>
           )}
           {revise.notice?.kind === "failed" && (
-            <div role="alert" className="flex flex-col gap-1 rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
-              <strong className="font-semibold">The visual was not changed</strong>
-              <span className="text-[13px] break-words">{revise.notice.message}</span>
-            </div>
+            <p role="alert" className="rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
+              {revise.notice.message}
+            </p>
           )}
           <div className="flex items-center justify-end gap-3">
             <button onClick={revise.onCancel} disabled={revise.running} className="btn btn-ghost">

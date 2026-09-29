@@ -57,7 +57,13 @@ function assetIssues(job: IssueJob, films: Record<Film, FilmReview>): VisualIssu
       continue;
     }
     const frame = fr.frames[asset.owner];
-    const regenerable = canRegenerate(frame);
+    // A generated still is regenerated. An archive image is never altered: the
+    // fix is Change visual, the existing revision choosing other media the film has.
+    const fix = canRegenerate(frame)
+      ? { fix: "regenerate" as const, asset }
+      : frame.truth === "archive"
+        ? { fix: "change" as const, note: "This archive image is used as found. It cannot be regenerated." }
+        : { note: "This image cannot be regenerated here." };
     out.set(key, {
       key,
       film: i.kind,
@@ -65,7 +71,7 @@ function assetIssues(job: IssueJob, films: Record<Film, FilmReview>): VisualIssu
       reasons: [reason],
       frame,
       target: { index: asset.owner, whole: true },
-      ...(regenerable ? { fix: "regenerate" as const, asset } : { note: frame.truth === "archive" ? "This is an archive photograph, used as found. It cannot be regenerated." : "This image cannot be regenerated here." }),
+      ...fix,
     });
   }
   const issues = [...out.values()];

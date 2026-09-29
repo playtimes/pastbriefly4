@@ -13,7 +13,7 @@ const { visualIssues, visualIssuesForJob, issueFrame, plain } = await import("..
 const { submitSequenceRevision } = await import("../src/app/visualReview/changeVisual.tsx");
 const { buildFilm, initialReview } = await import("../src/app/visualReview/model.ts");
 const { TextException, TextMore, VisualException, VisualMore, ReadyPanel, ProductionProgress, SECTION_TAB } = await import("../src/app/screens/Production.tsx");
-const { VisualIssueView } = await import("../src/app/visualReview/IssueView.tsx");
+const { VisualIssueView, VisualIssuePanel } = await import("../src/app/visualReview/IssueView.tsx");
 const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
 
 // ---- helpers
@@ -244,10 +244,30 @@ describe("visual issues", () => {
     expect(out[0]).toMatchObject({ key: "asset-long-L03", where: "Long · Slot 06 · 00:24", reasons: ["The labels are unreadable.", "The map is mirrored."], fix: "regenerate", target: { index: 3, whole: true } });
     expect(out[0].frame?.slot).toBe(6);
     expect(out[0].asset?.id).toBe("L03");
-    // Archive is read only: no fix, and it says why.
+    // Archive is read only: never regenerated; the fix is Change visual, and it says why.
     const archive = visualIssues({ assetQa: assetDone([{ kind: "long", assetId: "L02", truth: "archive", stage: "review", reason: "A modern logo." }]) }, films());
-    expect(archive[0].fix).toBeUndefined();
-    expect(archive[0].note).toBe("This is an archive photograph, used as found. It cannot be regenerated.");
+    expect(archive[0].fix).toBe("change");
+    expect(archive[0].asset).toBeUndefined();
+    expect(archive[0].note).toBe("This archive image is used as found. It cannot be regenerated.");
+  });
+
+  test("the fix follows the image: generated stills regenerate, an archive image changes, a stale one gets nothing", () => {
+    const one = (assetId: string, truth: string) => visualIssues({ assetQa: assetDone([{ kind: "long", assetId, truth, stage: "review", reason: "Wrong." }]) }, films())[0];
+    // 1, 2. Generated reconstruction and graphic stills keep Regenerate image.
+    expect(one("L01", "reconstruction")).toMatchObject({ fix: "regenerate", where: "Long · Slot 03 · 00:12" });
+    expect(one("L03", "graphic")).toMatchObject({ fix: "regenerate", where: "Long · Slot 06 · 00:24" });
+    // 3, 6. An archive image at a current slot: Change visual, in neutral wording.
+    const archive = one("L02", "archive");
+    expect(archive).toMatchObject({ fix: "change", where: "Long · Slot 04 · 00:16", target: { index: 1, whole: true } });
+    expect(archive.frame?.truth).toBe("archive");
+    expect(archive.note).toContain("archive image");
+    expect(archive.note).not.toContain("photograph");
+    // 7. An asset the current film no longer has: no slot, no image, no invented action.
+    const stale = one("L99", "archive");
+    expect(stale.fix).toBeUndefined();
+    expect(stale.frame).toBeUndefined();
+    expect(stale.target).toBeUndefined();
+    expect(stale.note).toBe("This part of the film has changed since PB4 checked it, so there is nothing to show.");
   });
 
   test("an unfinished image check says PB4 could not finish it; nothing reruns PB4's checks", () => {
@@ -434,10 +454,24 @@ describe("visual issue view", () => {
     expect(p.onBack).toHaveBeenCalledOnce();
   });
 
-  test("a read-only archive photograph has no invented fix, only why", () => {
-    const out = html(view(issueOf({ assetQa: assetDone([{ kind: "long", assetId: "L02", truth: "archive", stage: "review", reason: "A modern logo." }]) })));
-    expect(out).toContain("This is an archive photograph, used as found. It cannot be regenerated.");
-    expect(actions(out)).toBe(0);
+  test("a read-only archive image: Change visual, which runs the existing sequence revision, never Regenerate image", () => {
+    const issue = issueOf({ assetQa: assetDone([{ kind: "long", assetId: "L02", truth: "archive", stage: "review", reason: "A modern logo." }]) });
+    // 4, 5. Wired as Creating wires it: the one action is Change visual.
+    const onReviseSequence = vi.fn();
+    const out = renderToStaticMarkup(React.createElement(VisualIssuePanel, view(issue, { onReviseSequence })));
+    expect(out).toContain("This archive image is used as found. It cannot be regenerated.");
+    expect(out).not.toContain("archive photograph");
+    expect(out).toContain('data-action="change-visual"');
+    expect(visible(out)).toContain(">Change visual<");
+    expect(out).not.toContain("Regenerate image");
+    expect(actions(out)).toBe(1);
+    expect(onReviseSequence).not.toHaveBeenCalled(); // nothing runs until the person asks
+    // Without a sequence revision to run, no action is invented.
+    expect(actions(renderToStaticMarkup(React.createElement(VisualIssuePanel, view(issue))))).toBe(0);
+    // The button opens the existing revision for the Long film, about this slot.
+    const revise = changeControls();
+    buttons(React.createElement(VisualIssueView, view(issue, { revise })), "Change visual")[0].props.onClick();
+    expect(revise.onOpen).toHaveBeenCalledWith("Slot 04: A modern logo.");
   });
 
   test("a placement problem: the slot as the film shows it and Change visual, which runs the existing sequence revision", async () => {

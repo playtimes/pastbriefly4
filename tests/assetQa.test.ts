@@ -522,9 +522,9 @@ describe("Asset QA in the page", () => {
     const listed = visualIssuesForJob({ preview, assetQa: needs });
     expect(listed.map((i) => [i.key, i.fix ?? null])).toEqual([
       ["asset-long-L03", "regenerate"], // the generated graphic
-      ["asset-long-L01", null], // never the archive still
+      ["asset-long-L01", "change"], // the archive still is never regenerated, only changed
     ]);
-    expect(listed[1].note).toBe("This is an archive photograph, used as found. It cannot be regenerated.");
+    expect(listed[1].note).toBe("This archive image is used as found. It cannot be regenerated.");
     const html = plain(
       renderToStaticMarkup(React.createElement(VisualException, { job: { ...job, state: "awaiting_preview", preview, assetQa: needs }, storyTitle: "T", issues: listed, version: 0, onReview: vi.fn(), onContinue: vi.fn(), continuing: false, busy: false, more: null } as any)),
     );

@@ -690,19 +690,30 @@ const defaultReviser = (): SequenceReviser => (config.mode === "live" ? openAiSe
 // bounded Editor repair call that may only move presentations the film already
 // shows, charged like a visual planning call. No Coverage, acquisition, image,
 // motion or render work; the other film is never touched. The job stays
-// awaiting_preview and unapproved.
+// awaiting_preview and unapproved. With `targetSlot` (an issue's slot) it is the
+// existing targeted revision: every other slot is locked, and a target with no
+// legal alternative comes back unresolved without a call.
 export async function reviseSequenceForJob(
   jobId: string,
   kind: "long" | "short",
   feedback: string,
   reviser: SequenceReviser = defaultReviser(),
+  targetSlot?: number,
 ): Promise<{ job: JobRecord; changed: number[]; unresolved: SequenceUnresolved[] }> {
   const film = storedFilm(jobId, kind);
+  if (targetSlot !== undefined && !(Number.isInteger(targetSlot) && film.slots.some((s) => s.id === targetSlot))) throw new Error(`Slot ${targetSlot} is not a ${kind} slot.`);
   if (revisingSequence.has(jobId)) throw new Error("A sequence revision is already running for this job.");
   revisingSequence.add(jobId);
   try {
-    const { job, changed, unresolved } = await reviseStoredSequence(film, kind, feedback, reviser);
-    return { job, changed, unresolved };
+    if (targetSlot === undefined) {
+      const { job, changed, unresolved } = await reviseStoredSequence(film, kind, feedback, reviser);
+      return { job, changed, unresolved };
+    }
+    const r = await reviseStoredSequence(film, kind, feedback, reviser, [targetSlot]);
+    // Only the target is reported: a locked slot the reviser touched was simply not changed.
+    const unresolved = r.unresolved.filter((u) => u.slotId === targetSlot);
+    if (!r.changed.includes(targetSlot) && !unresolved.length) unresolved.push({ slotId: targetSlot, reason: "The current visual was kept." });
+    return { job: r.job, changed: r.changed, unresolved };
   } finally {
     revisingSequence.delete(jobId);
   }

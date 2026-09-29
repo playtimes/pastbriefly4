@@ -22,8 +22,11 @@ export interface VisualIssueProps extends RegenProps {
   more: React.ReactNode;
 }
 
+// Change visual here is structurally about the issue's slot as the film shows it
+// now: only that slot may change, whatever the feedback text says.
 export function VisualIssuePanel(props: VisualIssueProps): React.ReactElement {
-  const revise = useSequenceRevise(props.issue.film ?? "long", props.issue.fix === "change" ? props.onReviseSequence : undefined, props.busy);
+  const target = issueFrame(props.issue, props.films)?.frame.slot;
+  const revise = useSequenceRevise(props.issue.film ?? "long", props.issue.fix === "change" ? props.onReviseSequence : undefined, props.busy, target);
   return <VisualIssueView {...props} revise={revise} />;
 }
 

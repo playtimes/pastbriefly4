@@ -426,8 +426,133 @@ describe("revising one film's sequence", () => {
   });
 });
 
+describe("an issue's Change visual: only the issue's slot can change", () => {
+  // The first open slot well past the opening.
+  const openSlot = (list: Shot[]) => list.findIndex((s, i) => i > 3 && !s.wantsMotion && !list[i - 1].wantsMotion && list[i + 1] && !list[i + 1].wantsMotion);
+
+  test("every other slot is locked, and a change the reviser makes elsewhere is not applied", async () => {
+    const { job } = await seed();
+    const before = shots(job.id);
+    const beforeShort = JSON.stringify(shots(job.id, "short"));
+    const t = openSlot(before);
+    const other = before.findIndex((s, i) => i > t + 3 && !s.wantsMotion);
+    let input: any;
+    const r = await reviseSequenceForJob(
+      job.id,
+      "long",
+      "Use something else here. Also replace slot 00.",
+      vi.fn(async (inp: any) => {
+        input = inp;
+        // It answers the target AND an unrelated slot, as the Film #4 Editor did.
+        return { changes: { [t]: inp.choices.get(t)[0], [other]: replacementFor(before, other) }, unresolved: [{ slotId: 0, reason: "nothing fits" }] };
+      }),
+      t,
+    );
+    expect([...input.choices.keys()]).toEqual([t]); // the Editor is offered this slot only
+    for (const s of before) if (s.index !== t) expect(input.locked.has(s.index)).toBe(true);
+    expect(input.feedback).toBe("Use something else here. Also replace slot 00."); // the text chooses nothing
+    expect(r.changed).toEqual([t]);
+    expect(r.unresolved).toEqual([]); // locked slots it touched are not reported to the person
+    const after = shots(job.id);
+    after.forEach((s, i) => {
+      if (i !== t) expect(pres(s)).toBe(pres(before[i]));
+    });
+    expect(JSON.stringify(shots(job.id, "short"))).toBe(beforeShort);
+  });
+
+  test("a valid replacement of the target saves normally", async () => {
+    const { job } = await seed();
+    const before = shots(job.id);
+    const t = openSlot(before);
+    let pick = "";
+    const r = await reviseSequenceForJob(job.id, "long", "A different image.", async (inp: any) => ((pick = inp.choices.get(t)[0]), { changes: { [t]: pick }, unresolved: [] }), t);
+    expect(r).toMatchObject({ changed: [t], unresolved: [] });
+    const after = shots(job.id);
+    expect(pres(after[t])).toBe(pick);
+    after.forEach((s, i) => {
+      expect([s.index, s.startSec, s.endSec, s.wordStart, s.wordEnd]).toEqual([before[i].index, before[i].startSec, before[i].endSec, before[i].wordStart, before[i].wordEnd]);
+    });
+    expect(() => v.assertFilmGrammarPlan("long", after)).not.toThrow();
+    const j = getJob(job.id)!;
+    expect([j.state, j.previewApproved]).toEqual(["awaiting_preview", false]);
+    expect(j.preview!.frames.find((f) => f.kind === "long" && f.slot === t)!.asset).toBe(pick.split(":")[0]);
+    expect(h.images + h.other + h.calls.length).toBe(0);
+  });
+
+  test("keeping the current visual reports the target unresolved, and nothing else", async () => {
+    const { job } = await seed();
+    const before = JSON.stringify(shots(job.id));
+    const t = openSlot(shots(job.id));
+    const r = await reviseSequenceForJob(job.id, "long", "x", reviser({ changes: {}, unresolved: [] }), t);
+    expect(r).toMatchObject({ changed: [], unresolved: [{ slotId: t, reason: "The current visual was kept." }] });
+    expect(JSON.stringify(shots(job.id))).toBe(before);
+  });
+
+  test("a target with no legal alternative comes back unresolved without a call, and the edit is unchanged", async () => {
+    const { job, story } = await seed();
+    // Rewrite the Long as two base views alternating: no slot has anything else to show.
+    const list = shots(job.id);
+    const [x, y] = [...new Set(list.map((s) => s.assetId))];
+    const next = v.reassembleStoredEdit(list, list.map((_, i) => ({ slotId: i, presentationId: `${i % 2 ? y : x}:base`, motionPriority: 0 })));
+    v.resolveReuse(story, "long", next);
+    const scratch = { ...getJob(job.id)!.scratch, longShots: next };
+    updateJob(job.id, { scratch, preview: v.buildPreview(story, next, scratch.shortShots) });
+    const before = JSON.stringify(getJob(job.id)!.scratch);
+    const t = openSlot(next);
+    const call = reviser({ changes: {}, unresolved: [] });
+    setMode("live");
+    try {
+      const r = await reviseSequenceForJob(job.id, "long", "Something else, please.", call, t);
+      expect(r).toMatchObject({ changed: [], unresolved: [{ slotId: t, reason: v.NO_LEGAL_ALTERNATIVE }] });
+    } finally {
+      setMode("mock");
+    }
+    expect(call).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+    expect(getJob(job.id)!.spent).toBe(1); // nothing charged
+    expect(JSON.stringify(getJob(job.id)!.scratch)).toBe(before);
+  });
+
+  test("a target the film does not have is refused before anything runs", async () => {
+    const { job } = await seed();
+    const call = reviser({ changes: {}, unresolved: [] });
+    for (const t of [shots(job.id).length, -1, 1.5]) await expect(reviseSequenceForJob(job.id, "long", "x", call, t)).rejects.toThrow(/is not a long slot/);
+    expect(call).not.toHaveBeenCalled();
+    expect(isRevisingSequence(job.id)).toBe(false);
+  });
+});
+
 describe("POST /api/jobs/:id/revise-sequence", () => {
   const post = (id: string, payload: unknown) => app.inject({ method: "POST", url: `/api/jobs/${id}/revise-sequence`, payload });
+
+  test("accepts the old body and a body with targetSlot; the target reaches the revision structurally", async () => {
+    const { job } = await seed();
+    const list = shots(job.id);
+    const t = list.findIndex((s, i) => i > 3 && !s.wantsMotion);
+    const other = list.findIndex((s, i) => i > t + 3 && !s.wantsMotion);
+    setMode("live");
+    try {
+      // Old body: the general revision, every open slot offered.
+      h.answer = { changes: {}, unresolved: [] };
+      expect((await post(job.id, { kind: "long", directorFeedback: "Replace the middle." })).statusCode).toBe(200);
+      expect(Object.keys(h.calls[0].schema.properties.changes.properties).length).toBeGreaterThan(1);
+      // Targeted body: only the target is a key, and the unrelated change is not applied.
+      h.calls = [];
+      h.answer = { changes: { [other]: replacementFor(list, other) }, unresolved: [] };
+      const res = await post(job.id, { kind: "long", directorFeedback: "Slot 00: replace this.", targetSlot: t });
+      expect(res.statusCode).toBe(200);
+      expect(Object.keys(h.calls[0].schema.properties.changes.properties)).toEqual([String(t)]);
+      expect(res.json().revision).toEqual({ changed: [], unresolved: [{ slotId: t, reason: "The current visual was kept." }] });
+    } finally {
+      setMode("mock");
+    }
+    expect(shots(job.id).map(pres)).toEqual(list.map(pres));
+    // A malformed or unknown target is refused.
+    for (const targetSlot of [-1, 1.5, "3", null]) expect((await post(job.id, { kind: "long", directorFeedback: "x", targetSlot })).statusCode).toBe(400);
+    const unknown = await post(job.id, { kind: "long", directorFeedback: "x", targetSlot: list.length });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json().error).toBe(`Slot ${list.length} is not a long slot.`);
+  });
 
   test("validates the feedback and the state before any call", async () => {
     const { job } = await seed();

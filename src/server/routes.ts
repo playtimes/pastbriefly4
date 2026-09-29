@@ -342,17 +342,18 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   // Revise ONE film's edit from Director feedback at the visual preview gate. Only
   // presentations the film already shows can move; the job stays awaiting_preview
-  // and unapproved; nothing is requeued. On failure the edit is unchanged.
-  const sequenceBody = z.object({ kind: z.enum(["long", "short"]), directorFeedback: z.string() }).strict();
+  // and unapproved; nothing is requeued. On failure the edit is unchanged. An
+  // optional targetSlot (an issue's slot) is the only slot that may change.
+  const sequenceBody = z.object({ kind: z.enum(["long", "short"]), directorFeedback: z.string(), targetSlot: z.number().int().nonnegative().optional() }).strict();
   app.post("/api/jobs/:id/revise-sequence", async (req, reply) => {
     const { id } = req.params as { id: string };
     const job = getJob(id);
     if (!job) return reply.code(404).send({ error: "Job not found" });
     const parsed = sequenceBody.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: "kind ('long' or 'short') and directorFeedback are required." });
+    if (!parsed.success) return reply.code(400).send({ error: "kind ('long' or 'short') and directorFeedback are required; targetSlot, when given, is a slot number." });
     const invalid = sequenceFeedbackError(parsed.data.directorFeedback);
     if (invalid) return reply.code(400).send({ error: invalid });
-    const { kind } = parsed.data;
+    const { kind, targetSlot } = parsed.data;
     const feedback = parsed.data.directorFeedback.trim();
     if (job.state !== "awaiting_preview") return reply.code(409).send({ error: "The sequence can only be revised at the visual preview." });
     if (isDirectorQaRunning(id)) return reply.code(409).send({ error: DIRECTOR_QA_BUSY });
@@ -360,7 +361,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (isRevisingSequence(id)) return reply.code(409).send({ error: "A sequence revision is already running for this job." });
     if (isAssetQaRunning(id)) return reply.code(409).send({ error: ASSET_QA_BUSY });
     try {
-      const r = await reviseSequenceForJob(id, kind, feedback);
+      const r = await reviseSequenceForJob(id, kind, feedback, undefined, targetSlot);
       return { job: toPublic(r.job), revision: { changed: r.changed, unresolved: r.unresolved } };
     } catch (e: any) {
       const error = e?.message || "Could not revise the sequence.";

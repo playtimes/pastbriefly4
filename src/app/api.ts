@@ -81,8 +81,8 @@ export const api = {
   rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),
   regenerateStill: (jobId: string, kind: "long" | "short", slot: number, directorFeedback?: string) =>
     post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, directorFeedback ? { kind, slot, directorFeedback } : { kind, slot }),
-  reviseSequence: (jobId: string, kind: "long" | "short", directorFeedback: string) =>
-    post<{ job: Job; revision: SequenceRevisionReport }>(`/api/jobs/${jobId}/revise-sequence`, { kind, directorFeedback }),
+  reviseSequence: (jobId: string, kind: "long" | "short", directorFeedback: string, targetSlot?: number) =>
+    post<{ job: Job; revision: SequenceRevisionReport }>(`/api/jobs/${jobId}/revise-sequence`, targetSlot === undefined ? { kind, directorFeedback } : { kind, directorFeedback, targetSlot }),
   retry: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/retry`),
   approveSpend: (jobId: string, approvedMax: number) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-spend`, { approvedMax }),
   job: (jobId: string) => get<{ job: Job }>(`/api/jobs/${jobId}`),
