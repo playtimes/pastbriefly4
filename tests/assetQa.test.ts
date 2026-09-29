@@ -73,7 +73,7 @@ const Fastify = (await import("fastify")).default;
 const { registerRoutes } = await import("../src/server/routes.ts");
 const { autoAssetQaForJob, runJob, regenerateStill, clearVisualsForRebuild, newJobId, isAssetQaRunning } = await import("../src/production/generate.ts");
 const aq = await import("../src/production/assetQa.ts");
-const { withDirectorRepair, buildPreview } = await import("../src/production/visuals.ts");
+const { withDirectorRepair, buildPreview, planSlots } = await import("../src/production/visuals.ts");
 const { createJob, getJob, updateJob, upsertStory } = await import("../src/server/store.ts");
 const { ensureStoryDirs, inStory } = await import("../src/production/paths.ts");
 const { assetReviewUsd, PRICING, round } = await import("../src/server/pricing.ts");
@@ -101,11 +101,25 @@ function shot(index: number, over: Record<string, unknown>) {
     mustShow: [`shows ${index}`], mustNotShow: [`no text ${index}`], wordStart: 0, wordEnd: 0, mediaType: "image", ...over,
   };
 }
+// Scripts and narration whose fixed slot grids (planSlots) are 7 Long slots and 2
+// Short slots: the saved shots sit on that grid, as planning puts them.
+const SENTENCES = ["The bats flew out over the desert at dawn.", "Nobody expected what came next that night.", "The hangar caught fire within minutes.", "Firemen raced across the airfield.", "The general was not amused at all.", "The project moved to a new site.", "It was cancelled a year later.", "The bats were never used in the war."];
+const SCRIPTS = { long: SENTENCES.join(" "), short: SENTENCES.slice(0, 2).join(" ") };
+const narration = (kind: "long" | "short") => {
+  const words = SCRIPTS[kind].split(" ");
+  return { audioRel: `audio/${kind}.mp3`, audioMediaRel: `m/${kind}`, durationSec: words.length * 0.4, words: words.map((word, i) => ({ word, start: i * 0.4, end: i * 0.4 + 0.35 })) };
+};
+const onGrid = (kind: "long" | "short", shots: any[]) => {
+  const slots = planSlots(kind, SCRIPTS[kind], narration(kind) as any);
+  if (slots.length !== shots.length) throw new Error(`fixture: ${kind} has ${shots.length} shots for ${slots.length} slots`);
+  return shots.map((s, i) => ({ ...s, startSec: slots[i].startSec, endSec: slots[i].endSec }));
+};
 const entry = (s: any) => ({ assetId: s.assetId, presentation: s.presentation, framing: s.framing, truth: s.truth, prompt: s.prompt, purpose: s.purpose, mustShow: s.mustShow, mustNotShow: s.mustNotShow, path: s.path });
 
 // Long: L00 reconstruction owner (reused at 2 as a detail and at 4), L01 archive,
 // L03 graphic, L05 and L06 reconstructions: five owners, two batches. Short: S00
-// (reused at 1). The retained pool also holds L09, which no slot shows now.
+// (reused at 1 as a detail, never the identical presentation twice in a row).
+// The retained pool also holds L09, which no slot shows now.
 let seq = 0;
 function seed(opts: { approvedMax?: number } = {}) {
   const slug = `asset-qa-${seq++}`;
@@ -118,7 +132,7 @@ function seed(opts: { approvedMax?: number } = {}) {
   const files = ["images/hero.png", "images/long-00.png", "archive/long-01.jpg", "images/long-03.png", "images/long-05.png", "images/long-06.png", "images/long-09.png", "images/short-00.png"];
   for (const rel of files) writeFileSync(inStory(slug, rel), `v1 ${rel}`);
   const L00 = { assetId: "L00", path: "images/long-00.png", prompt: "stored prompt 0", purpose: "purpose 0", mustShow: ["shows 0"], mustNotShow: ["no text 0"] };
-  const longShots = [
+  const longShots = onGrid("long", [
     shot(0, { ...L00, caption: { text: "The switch" } }),
     shot(1, { truth: "archive", path: "archive/long-01.jpg", archiveQuery: "street 1967", source: "Wikimedia Commons" }),
     shot(2, { ...L00, edit: "reuse", assetShot: 0, presentation: "detail-left", framing: "detail-left", focus: "the left sign" }),
@@ -126,12 +140,15 @@ function seed(opts: { approvedMax?: number } = {}) {
     shot(4, { ...L00, edit: "reuse", assetShot: 0 }),
     shot(5, { path: "images/long-05.png" }),
     shot(6, { path: "images/long-06.png" }),
-  ];
-  const shortShots = [shot(0, { assetId: "S00", path: "images/short-00.png" }), shot(1, { assetId: "S00", edit: "reuse", assetShot: 0, path: "images/short-00.png" })];
+  ]);
+  const shortShots = onGrid("short", [
+    shot(0, { assetId: "S00", path: "images/short-00.png" }),
+    shot(1, { assetId: "S00", edit: "reuse", assetShot: 0, presentation: "detail-left", framing: "detail-left", focus: "the left sign", path: "images/short-00.png" }),
+  ]);
   const unique = (list: any[]) => list.filter((s, i) => list.findIndex((x) => x.assetId === s.assetId && x.presentation === s.presentation) === i).map(entry);
   const retainedPresentations = { long: [...unique(longShots), entry(shot(9, { path: "images/long-09.png" }))], short: unique(shortShots) };
   const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: opts.approvedMax ?? 10 });
-  const scratch = { research: { summary: "R" }, scripts: { long: "L", short: "S" }, textApproved: true, narration: { long: {}, short: {} }, masterRef: "images/hero.png", spent: 4, longShots, shortShots, retainedPresentations };
+  const scratch = { research: { summary: "R" }, scripts: SCRIPTS, textApproved: true, narration: { long: narration("long"), short: narration("short") }, masterRef: "images/hero.png", spent: 4, longShots, shortShots, retainedPresentations };
   updateJob(job.id, { scratch: scratch as any, spent: 4, state: "awaiting_preview", step: "preview", previewApproved: false, preview: buildPreview(story, longShots as any, shortShots as any) });
   return { job, story, slug };
 }
@@ -353,15 +370,15 @@ describe("Asset QA: autopilot, persistence and concurrency", () => {
     const { enqueueJob } = await import("../src/server/worker.ts");
     const { visualAutopilotState } = await import("../src/production/generate.ts");
     enqueueJob(job.id);
-    // The Visual Autopilot runs Asset QA, then tries the Long Director QA, which
-    // this fixture's placeholder scripts cannot give a slot grid: the start is refused and the chain stops.
+    // The Visual Autopilot runs Asset QA, then the Long Director QA, whose review
+    // call this fake provider refuses: the Long run fails and the chain stops.
     for (let i = 0; i < 300 && (scratchOf(job.id).assetQa?.status !== "done" || visualAutopilotState(job.id)); i++) await new Promise((r) => setTimeout(r, 10));
     const logged = log.mock.calls.map((c) => String(c[0]));
     log.mockRestore();
     expect(scratchOf(job.id).assetQa).toMatchObject({ status: "done", message: "Asset QA passed.", clean: true });
     expect(reviews()).toHaveLength(3);
-    expect(logged.some((l) => l.startsWith(`Visual Autopilot stopped job=${job.id} stage=long error=`))).toBe(true);
-    expect(scratchOf(job.id).directorQa).toBeUndefined();
+    expect(logged.some((l) => l.startsWith(`Director QA failed job=${job.id} kind=long stage=review error=`))).toBe(true);
+    expect(scratchOf(job.id).directorQa).toEqual({ long: { status: "failed", error: "unexpected provider call director_qa" } });
     expect(visualAutopilotState(job.id)).toBeUndefined();
     expect(getJob(job.id)!.state).toBe("awaiting_preview");
     expect(getJob(job.id)!.previewApproved).toBe(false);

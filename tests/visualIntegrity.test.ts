@@ -48,7 +48,7 @@ vi.mock("../src/providers/runway.ts", () => ({ generateMotion: vi.fn(async () =>
 const { runJob, newJobId } = await import("../src/production/generate.ts");
 const { createJob, getJob, updateJob, upsertStory } = await import("../src/server/store.ts");
 const { inStory, ensureStoryDirs } = await import("../src/production/paths.ts");
-const { buildPreview } = await import("../src/production/visuals.ts");
+const { buildPreview, planSlots } = await import("../src/production/visuals.ts");
 const { PRICING, round } = await import("../src/server/pricing.ts");
 const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
 const { buildFilm, initialReview, reviewReducer } = await import("../src/app/visualReview/model.ts");
@@ -80,18 +80,33 @@ function shot(index: number, extra: Record<string, unknown> = {}) {
   return { index, edit: "new", assetId: `L${String(index).padStart(2, "0")}`, presentation: "base", framing: "wide", startSec: index, endSec: index + 1, truth: "reconstruction", motion: "hold", wantsMotion: false, prompt: `scene ${index}`, purpose: "p", mustShow: [], mustNotShow: [], wordStart: 0, wordEnd: 0, ...extra };
 }
 
+// Scripts and narration whose fixed slot grids (planSlots) are 2 Long slots and
+// 1 Short slot: the saved shots sit on that grid, as planning puts them.
+const SCRIPTS = { long: "The bats flew out over the desert at dawn. Nobody expected what came next that night.", short: "The bats flew out over the desert at dawn." };
+const nar = (kind: "long" | "short") => {
+  const words = SCRIPTS[kind].split(" ");
+  return { audioRel: `audio/${kind}.mp3`, audioMediaRel: `m/${kind}`, durationSec: words.length * 0.4, words: words.map((word, i) => ({ word, start: i * 0.4, end: i * 0.4 + 0.35 })) };
+};
+
 // A job whose research, scripts, narration and shot plans are already done, so
-// runJob goes straight to the master and still acquisition.
+// runJob goes straight to the master and still acquisition. A grid slot a test
+// leaves out gets a shot that already has its still.
 function seedJob(story: Story, opts: { masterRef?: string; longShots?: any[]; shortShots?: any[]; approvedMax?: number } = {}) {
   const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: opts.approvedMax ?? 15 });
-  const nar = (kind: string) => ({ audioRel: `audio/${kind}.mp3`, audioMediaRel: `m/${kind}`, durationSec: 1, words: [{ word: "a", start: 0, end: 0.6 }] });
+  const onGrid = (kind: "long" | "short", given: any[]) =>
+    planSlots(kind, SCRIPTS[kind], nar(kind) as any).map((slot, i) => {
+      if (given[i]) return { ...given[i], startSec: slot.startSec, endSec: slot.endSec };
+      const rel = `images/${kind}-${String(i).padStart(2, "0")}.png`;
+      writeFileSync(inStory(story.slug, rel), "done");
+      return shot(i, { path: rel, startSec: slot.startSec, endSec: slot.endSec });
+    });
   const scratch = {
     research: { summary: "S", moments: [], sources: [], facts: [], productionNote: "", world: { period: "1900", place: "X", palette: "p", visualDirection: "v", recurringPeople: [], recurringLocations: [], referenceImages: [] } },
-    scripts: { long: "L", short: "S" },
+    scripts: SCRIPTS,
     textApproved: true,
     narration: { long: nar("long"), short: nar("short") },
-    longShots: opts.longShots ?? [shot(0), shot(1)],
-    shortShots: opts.shortShots ?? [shot(0)],
+    longShots: onGrid("long", opts.longShots ?? [shot(0), shot(1)]),
+    shortShots: onGrid("short", opts.shortShots ?? [shot(0)]),
     spent: 0,
     ...(opts.masterRef ? { masterRef: opts.masterRef } : {}),
   };

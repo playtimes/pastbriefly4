@@ -56,6 +56,7 @@ import {
   applySequenceRevision,
   sequenceSlotChoices,
   validateEdit,
+  adjacentRepeatTargets,
   reassembleStoredEdit,
   openAiSequenceRevision,
   fallbackSequenceRevision,
@@ -297,6 +298,16 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     for (const [kind, shots] of films(scratch)) resolveReuse(story, kind, shots);
     for (const [kind, shots] of films(scratch)) retain(scratch, kind, shots);
     updateJob(jobId, { scratch });
+
+    // The acquired media must still agree with each film's edit (an archive hold
+    // whose archive fell back is repaired once, or the job stops here). A valid
+    // edit is untouched; a repair (and its charge) is saved, so it is picked up from
+    // the job, also when the check stops the job.
+    try {
+      for (const [kind] of films(scratch)) await repairBrokenArchiveHolds(jobId, kind);
+    } finally {
+      Object.assign(scratch, getJob(jobId)!.scratch as Scratch);
+    }
 
     // 5. Visual preview gate
     const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
@@ -605,12 +616,13 @@ export function isRevisingSequence(jobId: string): boolean {
 }
 
 // One film's stored edit at the visual preview gate, with its fixed slots rebuilt
-// exactly as planning built them. Refuses a job that is not at the preview, has
-// no edit, or whose stored edit no longer matches its slot grid.
-function storedFilm(jobId: string, kind: "long" | "short") {
+// exactly as planning built them. Refuses a job that is not at the preview (unless
+// `atGate` is false: the post-acquisition check, run before the preview exists),
+// has no edit, or whose stored edit no longer matches its slot grid.
+function storedFilm(jobId: string, kind: "long" | "short", atGate = true) {
   const job = getJob(jobId);
   if (!job) throw new Error("Job not found.");
-  if (job.state !== "awaiting_preview") throw new Error("The sequence can only be revised at the visual preview.");
+  if (atGate && job.state !== "awaiting_preview") throw new Error("The sequence can only be revised at the visual preview.");
   const story = getStory(job.storyId);
   if (!story) throw new Error("Story not found.");
   const scratch: Scratch = { ...(job.scratch as Scratch) };
@@ -688,6 +700,85 @@ async function reviseStoredSequence(
 }
 
 const defaultReviser = (): SequenceReviser => (config.mode === "live" ? openAiSequenceRevision : fallbackSequenceRevision);
+
+export const ARCHIVE_HOLD_REPAIR_FAILED = "PB4 could not repair the visual edit after archive material was unavailable.";
+export const ACQUIRED_EDIT_INVALID = "PB4 could not validate the visual edit after media acquisition.";
+
+// Mock mode never calls a provider: each target takes its first legal choice.
+const firstLegalChoice: SequenceReviser = async (input) => ({ changes: Object.fromEntries([...input.choices].map(([id, ids]) => [id, ids[0] ?? null])), unresolved: [] });
+
+// After acquisition the acquired truth is authoritative. A planned archive HOLD
+// (one archive base on two adjacent slots) whose archive search fell back to a
+// reconstruction is no longer a legal hold, so the edit can reach the preview
+// invalid. Each film's saved edit is checked here against its authoritative fixed
+// slots (storedFilm: planSlots from the scripts and narration, the same grid
+// invariants): a valid edit is left exactly as it is (no call, no charge, so a
+// resume simply passes). A broken hold gets ONE targeted repair of its later slot
+// with the existing sequence revision (existing media only, every other slot and
+// every motion slot locked, the usual final checks). A grid mismatch, any other
+// invalid edit, or a repair that does not leave a valid edit stops the job before
+// the preview; unrelated defects are never repaired here.
+async function repairBrokenArchiveHolds(jobId: string, kind: "long" | "short", reviser: SequenceReviser = config.mode === "live" ? openAiSequenceRevision : firstLegalChoice): Promise<void> {
+  const fail =
+    (message: string) =>
+    (why: string): never => {
+      console.error(`Post-acquisition edit check failed job=${jobId} kind=${kind}: ${why}`);
+      throw new Error(message);
+    };
+  const invalid = fail(ACQUIRED_EDIT_INVALID);
+  const load = () => {
+    try {
+      return storedFilm(jobId, kind, false);
+    } catch (e: any) {
+      return invalid(e?.message || "the saved edit could not be read");
+    }
+  };
+  const check = (f: ReturnType<typeof storedFilm>, strict = true): string | null => {
+    try {
+      validateEdit(kind, f.slots, storedEdit(f.shots), f.presentations, !strict);
+      return null;
+    } catch (e: any) {
+      return e?.message || "invalid edit";
+    }
+  };
+  const film = load();
+  const problem = check(film);
+  if (!problem) return;
+  // A broken hold: a two-slot run of an archive-planned base (archiveQuery kept
+  // from the plan) whose asset is now a reconstruction. It is repaired only when
+  // the broken holds are the edit's only defects.
+  const { shots } = film;
+  const edit = storedEdit(shots);
+  const id = (i: number) => edit[i]?.presentationId;
+  const repeats = adjacentRepeatTargets(edit);
+  const broken = repeats.filter((i) => {
+    const s = shots[i];
+    return s.presentation === "base" && s.truth !== "archive" && !!s.archiveQuery && id(i - 2) !== id(i) && id(i + 1) !== id(i);
+  });
+  if (!broken.length || broken.length !== repeats.length) return invalid(problem);
+  const other = check(film, false);
+  if (other) return invalid(other);
+  const failed = fail(ARCHIVE_HOLD_REPAIR_FAILED);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const feedback = [
+    "STRUCTURAL EDIT REPAIR",
+    "",
+    `The archive material planned for slot${broken.length === 1 ? "" : "s"} ${broken.map(pad).join(", ")} could not be found, so that image is now a generated reconstruction, which may not be held across two adjacent slots.`,
+    `Target only these slots: ${broken.map(pad).join(", ")}.`,
+    "",
+    "For each target choose an existing legal presentation that matches its narration.",
+    "",
+    "KEEP ALL OTHER SLOTS.",
+  ].join("\n");
+  let r: Awaited<ReturnType<typeof reviseStoredSequence>>;
+  try {
+    r = await reviseStoredSequence(film, kind, feedback, reviser, broken);
+  } catch (e: any) {
+    return failed(e?.message || "repair failed");
+  }
+  const left = check(load());
+  if (left || !broken.every((t) => r.changed.includes(t))) failed(left ?? `not repaired: ${JSON.stringify(r.unresolved)}`);
+}
 
 // At the visual preview gate, revise ONE film's edit from Director feedback: one
 // bounded Editor repair call that may only move presentations the film already
