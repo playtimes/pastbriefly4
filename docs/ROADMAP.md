@@ -51,6 +51,38 @@ PB4 selects strong stories
 Do not publish automatically until the production system has proven repeatable
 quality across multiple fresh stories.
 
+## Editorial hunting ground
+
+The promise stays the same: TRUE HISTORICAL STORIES THAT SOUND MADE UP. What
+broadens is the pool PastBriefly hunts in. "History" is not a narrow category:
+search a much larger pool of extraordinary true stories.
+
+Priority story territories:
+- espionage / covert operations
+- scams, frauds and corporate / financial collapses
+- engineering disasters and impossible projects
+- catastrophes, survival and bizarre real events
+- deception, escapes and hoaxes
+- strange diplomatic incidents
+- unusual military / intelligence operations
+- traditional historical stories (fully included)
+- true-crime-adjacent stories, selectively, only when the premise is
+  exceptional and fits PastBriefly
+
+The filter is the story, not the category. A PastBriefly story still needs:
+- an instantly understandable strange premise
+- to be true and well sourced
+- strong causal progression / escalation
+- enough visual potential for a premium Long
+- enough substance for a Long without padding
+- a premise that sounds difficult to believe at first hearing
+
+Do NOT chase CPM for its own sake: no pivot into unrelated categories such as
+generic personal finance, AI tutorials, real estate or business advice merely
+because advertiser rates may be higher. Broaden only where the stories still
+feel unmistakably like PastBriefly. Which territory deserves more focus is
+decided by real performance (step 16D), not in advance.
+
 ## Visual direction
 
 PB4 should increasingly behave like an **automated documentary editor**, not an
@@ -354,6 +386,26 @@ therefore evaluate BOTH quality and economics.
 
     Do not build this before the Long-first proof is working.
 
+16D. **Editorial lane test** - after the Long-first production and the Blender
+    approach are working. Before narrowing the channel around one subcategory,
+    produce and compare at least three strong Longs from different
+    high-interest lanes (see Editorial hunting ground):
+    1. espionage / covert operation
+    2. business / scam / collapse
+    3. engineering disaster / impossible project
+
+    Use real YouTube performance to learn which territory deserves more focus.
+    Useful signals:
+    - impressions
+    - CTR
+    - early retention / first 30 seconds
+    - average view duration
+    - returning viewers
+    - subscribers gained relative to views
+
+    No winning lane is pre-selected. The result feeds the analytics loop (18)
+    and story selection (19).
+
 ### Later
 
 17. **Publishing workflow.** Initially: finished clean films → publishing queue /
@@ -366,12 +418,13 @@ therefore evaluate BOTH quality and economics.
     - where Long retention falls
     - whether Shorts convert viewers into Long viewers
     - which story types work repeatedly
+    - which editorial lanes deserve more focus (starting from the 16D lane test)
 
     Use analytics to improve editorial choices, not to create generic engagement slop.
 
 19. **Story-selection automation.** PB4 eventually discovers, verifies and selects
-    strong candidates itself, preserving the promise: TRUE HISTORICAL STORIES THAT
-    SOUND MADE UP. A candidate needs:
+    strong candidates itself from the whole Editorial hunting ground, preserving
+    the promise: TRUE HISTORICAL STORIES THAT SOUND MADE UP. A candidate needs:
     - an instantly understandable strange premise
     - reliable sources
     - strong causal progression and escalation
