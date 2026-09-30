@@ -122,9 +122,7 @@ quality across multiple fresh stories.
     Add no more QA before Film #4 unless it is required for (1) budget safety or
     (2) deterministic output-file correctness.
 
-### Next
-
-14. **Final-film QC** - Stage 14A proof completed; Stage 14B in progress.
+14. **Final-film QC** - COMPLETED.
 
     **Stage 14A - specialist proof** - COMPLETED. The broad single-reviewer
     proof failed: it echoed PB4's causal synthesis and treated distinct asset
@@ -143,8 +141,7 @@ quality across multiple fresh stories.
     L00 recurrence coherently. GPT-6 Astra with reasoning high is the visual
     Final-film QC candidate model. The proof is not integrated into production.
 
-    **Stage 14B - integration** - IN PROGRESS. Implemented and covered by
-    tests; not yet validated on a real production.
+    **Stage 14B - integration** - COMPLETED.
     - Final-film QC runs after the deterministic final-file validation of both
       renders. Once both files pass, a durable marker means Retry, restart and
       acceptance never motion or render them again.
@@ -161,8 +158,26 @@ quality across multiple fresh stories.
     - PASS, or Continue anyway, registers the Long + Short pair in one
       transaction; only then is the job done / Ready.
     - No automatic final-film repair in Stage 14B.
-    - Next gate: a controlled production-path validation before calling 14B
-      complete.
+
+    Controlled production-path validation - PASSED. The actual runJob path ran
+    against an isolated copy of Film #4:
+    - exactly 4 Final-film QC calls ran
+    - the known defects were caught: Long visual (whole-film repetition) and
+      Short factual ("cancelled in favor of the atomic bomb")
+    - each specialist result persisted independently
+    - the job stopped at awaiting_final with no Video rows
+    - public finalQa exposed only the approved compact issue shape
+    - Continue anyway resumed with zero provider calls and zero rerender
+    - Long + Short registered atomically and the job reached Ready
+    - tracked Final-film QC spend was exactly $1.70
+    - real Film #4 DB / media and the repo were untouched
+
+    Non-blocking observations:
+    - factual web search is enabled, but actual tool use is not observable or
+      guaranteed (the validation run made no searches)
+    - GPT-6 Astra visual calls can take around 1-2 minutes
+    - specialist issue wording may be too technical for the final user-facing
+      UX
 
     Areas still not checked after assembly, for later Stage 14 slices only if
     Films #5 / #6 show real defects there:
@@ -176,19 +191,21 @@ quality across multiple fresh stories.
 
     Prefer ONE useful finished-film QC layer over several overlapping systems.
 
+### Next
+
+15. **Finished-film review UX** - NEXT. A simple human-facing final review and
+    exception experience. Do not recreate a technical cockpit.
+
+    15A. **Films #5 and #6 acceptance.** At least two more genuinely different
+    fresh stories. The goal is repeatability: one successful Film #4 proves the
+    mechanism; three strong fresh films in a row begin to justify production automation.
+
 ### Later
 
 After Stage 14 validation:
 - Blender 2.5D visual identity proof
 - compare the same PastBriefly scene against current Runway motion
 - no integration decision until side-by-side review
-
-15. **Finished-film review UX.** A simple human-facing final review and exception
-    experience. Do not recreate a technical cockpit.
-
-    15A. **Films #5 and #6 acceptance.** At least two more genuinely different
-    fresh stories. The goal is repeatability: one successful Film #4 proves the
-    mechanism; three strong fresh films in a row begin to justify production automation.
 
 16. **Publishing workflow.** Initially: finished clean films → publishing queue /
     human approval. Automatic publishing comes later, only when explicitly approved
