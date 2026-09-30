@@ -62,9 +62,12 @@ export function stageIndex(job: StageJob, previous?: DisplayStage): number {
   return DISPLAY_STAGES.findIndex(([s]) => s === displayStage(job, previous));
 }
 
+// Once both films are rendered, finishing is the file check and Final-film QC:
+// still the last stage (the bar never jumps back), but not "Rendering".
 export function stageLabel(job: StageJob, previous?: DisplayStage): string {
   const stage = displayStage(job, previous);
   if (job.state === "queued" && stage === "research") return "Starting";
+  if (stage === "rendering" && job.step === "finishing") return "Checking final films";
   return DISPLAY_STAGES.find(([s]) => s === stage)![1];
 }
 
@@ -87,7 +90,7 @@ export function stageProgress(job: StageJob): number | null {
 
 // ---- Faces
 
-export type ProductionFace = "running" | "text" | "visuals" | "failed" | "done";
+export type ProductionFace = "running" | "text" | "visuals" | "final" | "failed" | "done";
 
 type FaceJob = Pick<Job, "state" | "review" | "preview" | "textQa" | "assetQa" | "directorQa" | "visualAutopilot" | "updatedAt">;
 
@@ -103,11 +106,14 @@ const pastGrace = (job: Pick<Job, "updatedAt">, now: number): boolean => {
 
 // Which face of the Production screen a job shows. At a gate the automatic
 // check running, or not yet begun, is still PB4 working; only a settled check
-// (or one that is plainly never coming) hands the gate to the user.
+// (or one that is plainly never coming) hands the gate to the user. The
+// finished-film gate is reached only after its checks completed, so it is the
+// user's at once.
 export function productionFace(job: FaceJob, now: number = Date.now()): ProductionFace {
   if (job.state === "failed") return "failed";
   if (job.state === "done") return "done";
   const face = gateFace(job);
+  if (face === "final") return "final";
   if (face === "text") return job.textQa?.status === "stopped" || (!job.textQa && pastGrace(job, now)) ? "text" : "running";
   if (face === "visuals") {
     const settled = job.assetQa?.status === "done" || !!job.directorQa?.long || !!job.directorQa?.short || job.visualAutopilot?.status === "failed";
@@ -120,9 +126,10 @@ export function productionFace(job: FaceJob, now: number = Date.now()): Producti
 // while that check is running, or away from a gate. The Production screen uses
 // it to keep a face it already handed over, whatever a later update does to
 // `updatedAt` (a manual revision, say).
-export function gateFace(job: FaceJob): "text" | "visuals" | null {
+export function gateFace(job: FaceJob): "text" | "visuals" | "final" | null {
   if (job.state === "awaiting_text" && job.review && job.textQa?.status !== "running") return "text";
   if (job.state === "awaiting_preview" && job.preview && job.assetQa?.status !== "running" && job.visualAutopilot?.status !== "running") return "visuals";
+  if (job.state === "awaiting_final") return "final";
   return null;
 }
 
@@ -132,13 +139,14 @@ function needsYouCount(job: Job): number {
   const face = productionFace(job);
   if (face === "text") return job.textQa?.status === "stopped" ? job.textQa.issues.length : 0;
   if (face === "visuals") return visualIssuesForJob(job).length;
+  if (face === "final") return job.finalQa?.issues.length ?? 0;
   return 0;
 }
 
 // The Story page's one-line production state for its active job.
 export function storyProductionLabel(job: Job): string {
   const face = productionFace(job);
-  if (face === "text" || face === "visuals") {
+  if (face === "text" || face === "visuals" || face === "final") {
     const n = needsYouCount(job);
     return n ? `Needs you · ${n} ${n === 1 ? "issue" : "issues"}` : "Needs you";
   }

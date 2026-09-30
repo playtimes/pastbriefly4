@@ -82,7 +82,7 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
 
   const { story, videos, activeJob, failedJob } = detail;
   const busy = activeJob && activeJob.state !== "done" && activeJob.state !== "failed";
-  const needsYou = !!activeJob && ["text", "visuals"].includes(productionFace(activeJob));
+  const needsYou = !!activeJob && ["text", "visuals", "final"].includes(productionFace(activeJob));
   const hasFilms = videos.length >= 2;
   const paragraphs = story.summary.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
 

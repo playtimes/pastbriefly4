@@ -14,6 +14,11 @@ export const PRICING = {
     // $0.02 per call (instructions, story line, summary) keep ~3x headroom.
     assetReviewCall: 0.02,
     assetReviewImage: 0.01,
+    // Final-film QC, per film: the factual audit (text model, web search, one
+    // film's narration and research) and the visual-family audit (GPT-6 Astra at
+    // high reasoning over every sampled frame). Conservative per-call estimates.
+    finalFactualReview: 0.1,
+    finalVisualReview: 0.75,
   },
   elevenlabs: {
     perThousandChars: 0.3,

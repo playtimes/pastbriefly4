@@ -39,6 +39,7 @@ export function estimateJob(story: Story): CostEstimate {
     { label: "Cinematic stills (OpenAI images)", usd: round(c.images * PRICING.openai.image), detail: `${c.images} images` },
     { label: "Selective motion (Runway Gen-4.5, 5s)", usd: round(c.motion * PRICING.runway.video5s), detail: `${c.motion} clips` },
     { label: "Visual planning (OpenAI)", usd: round(2 * PRICING.openai.visualPlan), detail: "coverage + edit" },
+    { label: "Final-film QC (OpenAI)", usd: round(2 * (PRICING.openai.finalFactualReview + PRICING.openai.finalVisualReview)), detail: "2 factual + 2 final visual reviews" },
     { label: "Quality reserve", usd: AUTOPILOT_QUALITY_RESERVE_USD, detail: "automatic checks and bounded repairs; unused reserve is not spent" },
   ];
   const total = round(lines.reduce((a, l) => a + l.usd, 0));

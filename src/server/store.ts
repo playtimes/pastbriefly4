@@ -157,7 +157,7 @@ export function getJob(id: string): JobRecord | null {
 
 export function activeJobForStory(storyId: string): JobRecord | null {
   const r = db
-    .prepare(`SELECT * FROM jobs WHERE story_id=? AND state IN ('queued','running','awaiting_text','awaiting_preview') ORDER BY created_at DESC LIMIT 1`)
+    .prepare(`SELECT * FROM jobs WHERE story_id=? AND state IN ('queued','running','awaiting_text','awaiting_preview','awaiting_final') ORDER BY created_at DESC LIMIT 1`)
     .get(storyId);
   return r ? rowToJob(r) : null;
 }
@@ -213,6 +213,12 @@ export function addVideo(v: Video): void {
        duration_sec=excluded.duration_sec, fps=excluded.fps, has_audio=excluded.has_audio`
   ).run(v.id, v.storyId, v.jobId, v.kind, v.path, v.width, v.height, v.durationSec, v.fps, v.hasAudio ? 1 : 0, v.createdAt);
 }
+
+// Register several videos (a job's finished Long + Short) in ONE transaction:
+// either every row is written or, if any insert throws, none is.
+export const addVideos = db.transaction((videos: Video[]): void => {
+  for (const v of videos) addVideo(v);
+});
 
 function rowToVideo(r: any): Video {
   return {

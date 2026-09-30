@@ -42,6 +42,12 @@ describe("estimateJob", () => {
     expect(lines).toEqual([{ label: "Visual planning (OpenAI)", usd: round(2 * PRICING.openai.visualPlan), detail: "coverage + edit" }]);
   });
 
+  test("includes the mandatory Final-film QC as its own $1.70 line: two factual and two final visual reviews", () => {
+    expect([PRICING.openai.finalFactualReview, PRICING.openai.finalVisualReview]).toEqual([0.1, 0.75]);
+    const lines = estimateJob(getStoryBySlug("pig-war")!).lines.filter((l) => /final-film/i.test(l.label));
+    expect(lines).toEqual([{ label: "Final-film QC (OpenAI)", usd: 1.7, detail: "2 factual + 2 final visual reviews" }]);
+  });
+
   test("includes a $1.50 quality reserve", () => {
     expect(AUTOPILOT_QUALITY_RESERVE_USD).toBe(1.5);
     const reserve = estimateJob(getStoryBySlug("pig-war")!).lines.filter((l) => l.label === "Quality reserve");

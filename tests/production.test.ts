@@ -1,7 +1,7 @@
 import { describe, test, expect, vi } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { DirectorQaRun, Job, PreviewFrame, Video, VisualPreview } from "../src/types.ts";
+import type { DirectorQaRun, FinalQaIssue, Job, PreviewFrame, Video, VisualPreview } from "../src/types.ts";
 
 // The Production screen's presentation: the six stages, honest progress, the
 // issue-first exception faces, the simple issue views, the visual issue mapper,
@@ -12,7 +12,7 @@ const stage = await import("../src/app/productionStage.ts");
 const { visualIssues, visualIssuesForJob, issueFrame, plain } = await import("../src/app/visualReview/visualIssues.ts");
 const { submitSequenceRevision } = await import("../src/app/visualReview/changeVisual.tsx");
 const { buildFilm, initialReview } = await import("../src/app/visualReview/model.ts");
-const { TextException, TextMore, VisualException, VisualMore, ReadyPanel, ProductionProgress, SECTION_TAB } = await import("../src/app/screens/Production.tsx");
+const { TextException, TextMore, VisualException, VisualMore, FinalException, ReadyPanel, ProductionProgress, SECTION_TAB } = await import("../src/app/screens/Production.tsx");
 const { VisualIssueView, VisualIssuePanel } = await import("../src/app/visualReview/IssueView.tsx");
 const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
 
@@ -126,6 +126,18 @@ describe("six production stages", () => {
     expect(stage.stageLabel(j("queued", "queued"))).toBe("Starting");
     expect(stage.stageLabel(j("queued", "queued", { textQa: { status: "passed" } }))).toBe("Recording narration");
     expect(stage.stageIndex(j("done", "finishing"))).toBe(6);
+  });
+
+  test("after the render, finishing reads Checking final films, still the last stage: the bar never jumps back", () => {
+    expect(stage.stageLabel(j("running", "rendering"))).toBe("Rendering");
+    for (const state of ["running", "queued"] as const) {
+      expect(stage.stageLabel(j(state, "finishing"))).toBe("Checking final films"); // queued: Retry or Continue anyway
+      expect(stage.stageIndex(j(state, "finishing"))).toBe(stage.stageIndex(j("running", "rendering")));
+    }
+    const html = renderToStaticMarkup(React.createElement(ProductionProgress, { job: j("running", "finishing") }));
+    expect(html).toContain("Checking final films…</h1>");
+    expect(html).toContain("Step 6 of 6<");
+    expect(html).not.toContain("Rendering…");
   });
 
   test("QA gates never show the previous step's finished count", () => {
@@ -610,6 +622,58 @@ describe("Ready", () => {
 
 // ---------------------------------------------------------------------------
 
+describe("Films need you", () => {
+  const issues: FinalQaIssue[] = [
+    { film: "long", area: "fact", reason: "Says the program ended for one reason; the sources give two.", text: "cancelled in favor of the atomic bomb" },
+    { film: "short", area: "visual", reason: "The same burning hangar keeps returning." },
+  ];
+  const finalJob = (over: Partial<Job> = {}) => job({ state: "awaiting_final", step: "finishing", preview: preview(), finalQa: { issues }, ...over });
+
+  test("awaiting_final is its own face at once, never Failed or a running stage", () => {
+    expect(stage.productionFace(finalJob())).toBe("final");
+    expect(stage.productionFace(finalJob({ updatedAt: new Date().toISOString() }))).toBe("final"); // no grace wait: its checks are complete
+    expect(stage.gateFace(finalJob())).toBe("final");
+    expect(stage.productionFace(job({ state: "running", step: "finishing" }))).toBe("running");
+  });
+
+  test("issue-first: a count, one numbered row per concern with Long / Short and Fact / Visual, and Continue anyway", () => {
+    const onContinue = vi.fn();
+    const p = { storyTitle: "The War Over a Pig", issues, onContinue, continuing: false };
+    const html = renderToStaticMarkup(React.createElement(FinalException, p));
+    expect(html).toContain("Films need you · The War Over a Pig");
+    expect(html).toContain("2 things need your attention</h1>");
+    expect(html).toMatch(/data-final-issue="long-fact"[^]*01[^]*Long · Fact[^]*Says the program ended for one reason; the sources give two\.[^]*cancelled in favor of the atomic bomb/);
+    expect(html).toMatch(/data-final-issue="short-visual"[^]*02[^]*Short · Visual[^]*The same burning hangar keeps returning\./);
+    expect(html.match(/data-final-issue=/g)).toHaveLength(2);
+    // The concern only: no laboratory, no fixes, no Failed.
+    for (const s of ["evidence", "contact", "famil", "score", "model", "Astra", "Debug", "Advanced", "Regenerate", "Change visual", "Retry", "Production stopped", "Failed"]) expect(html).not.toContain(s);
+    const [button] = buttons(React.createElement(FinalException, p), "Continue anyway");
+    expect(button.props.disabled).toBe(false);
+    button.props.onClick();
+    expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+
+  test("while Continue anyway runs the button is disabled and says so", () => {
+    const busy = { storyTitle: "", issues, onContinue: vi.fn(), continuing: true };
+    const [button] = buttons(React.createElement(FinalException, busy), "Continuing…");
+    expect(button.props.disabled).toBe(true);
+    expect(renderToStaticMarkup(React.createElement(FinalException, busy))).toContain(">Films need you<");
+    const one = renderToStaticMarkup(React.createElement(FinalException, { ...busy, issues: issues.slice(1), continuing: false }));
+    expect(one).toContain("1 thing needs your attention</h1>");
+  });
+
+  test("Ready only after a pass or Continue anyway: the waiting job follows its own gate and has no pair", () => {
+    const video = (id: string, jobId: string, kind: "long" | "short"): Video => ({ id, storyId: "s", jobId, kind, path: `stories/demo/${id}.mp4`, width: 1920, height: 1080, durationSec: 60, fps: 30, hasAudio: true, createdAt: "" });
+    const older = [video("v2", "old", "short"), video("v1", "old", "long")];
+    // An older finished pair never hides the active awaiting_final job.
+    expect(stage.productionTarget({ activeJob: { id: "j1" }, failedJob: null, videos: older })).toEqual({ jobId: "j1" });
+    expect(stage.latestCompletePair(older, "j1")).toBeNull();
+    expect(stage.productionFace(finalJob({ state: "done" }))).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe("Story page status", () => {
   test("running production reads as its stage; a stop reads as Needs you with its issue count", () => {
     expect(stage.storyProductionLabel(job({ state: "running", step: "scripts" }))).toBe("In production · Writing");
@@ -620,5 +684,13 @@ describe("Story page status", () => {
     expect(stage.storyProductionLabel(job({ state: "awaiting_text", review, textQa: textStop }))).toBe("Needs you · 2 issues");
     expect(stage.storyProductionLabel(job({ state: "awaiting_text", review }))).toBe("Needs you");
     expect(stage.storyProductionLabel(job({ state: "awaiting_preview", preview: preview(), directorQa: { long: complete({ clean: false, humanReview: [{ slotId: 3, reason: "x" }] }), short: complete() } }))).toBe("Needs you · 1 issue");
+  });
+
+  test("the finished-film gate reads Needs you with its issue count; checking the finished films reads as production", () => {
+    const issue = { film: "long" as const, area: "fact" as const, reason: "r" };
+    expect(stage.storyProductionLabel(job({ state: "awaiting_final", step: "finishing", finalQa: { issues: [issue, { ...issue, area: "visual" }] } }))).toBe("Needs you · 2 issues");
+    expect(stage.storyProductionLabel(job({ state: "awaiting_final", step: "finishing", finalQa: { issues: [issue] } }))).toBe("Needs you · 1 issue");
+    expect(stage.storyProductionLabel(job({ state: "awaiting_final", step: "finishing" }))).toBe("Needs you");
+    expect(stage.storyProductionLabel(job({ state: "running", step: "finishing" }))).toBe("In production · Checking final films");
   });
 });

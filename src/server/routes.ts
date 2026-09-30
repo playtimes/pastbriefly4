@@ -23,7 +23,7 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob } from "../production/generate.ts";
 
 const TEXT_QA_BUSY = "Automatic Text QA is running. Wait for it to finish.";
 const ASSET_QA_BUSY = "Automatic Asset QA is running. Wait for it to finish.";
@@ -68,7 +68,10 @@ function toPublic(j: JobRecord): Job {
   // "passed" while the approved job continues, like Text QA's "passed".
   const pilot = visualAutopilotState(j.id);
   const showPilot = pilot && (j.state === "awaiting_preview" ? pilot.status !== "passed" : pilot.status === "passed" && (j.state === "queued" || j.state === "running"));
-  const withQa = showPilot ? { ...withDirectorQa, visualAutopilot: pilot } : withDirectorQa;
+  const withPilot = showPilot ? { ...withDirectorQa, visualAutopilot: pilot } : withDirectorQa;
+  // The finished-film gate: only each concern's film, area, reason and fragment.
+  const finalQa = j.state === "awaiting_final" ? finalQaState(scratch) : undefined;
+  const withQa = finalQa ? { ...withPilot, finalQa } : withPilot;
   // Attach the review only at the text gate, so no other response leaks scratch.
   return j.state === "awaiting_text" ? { ...withQa, review: reviewFromJob(j) } : withQa;
 }
@@ -527,6 +530,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       console.error(`Director QA final verification failed job=${id} kind=${kind} error=${error}`);
       return reply.code(400).send({ error });
     }
+  });
+
+  // Continue anyway at the finished-film gate: accept the films as they are and
+  // resume the SAME job, which checks the finished files again and registers
+  // both videos. No provider call, no motion, no render. Only valid for an
+  // awaiting_final job; any other state gets the job back unchanged.
+  app.post("/api/jobs/:id/accept-final", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    if (job.state !== "awaiting_final") return { job: toPublic(job) };
+    const accepted = acceptFinalForJob(id);
+    enqueueJob(id);
+    return { job: toPublic(accepted) };
   });
 
   // Retry a failed job in place: reuse the same job id so completed (and paid)

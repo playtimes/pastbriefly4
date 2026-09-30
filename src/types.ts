@@ -54,7 +54,10 @@ export interface Story {
   activeJobStep?: JobStep | null;
 }
 
-export type JobState = "queued" | "running" | "awaiting_text" | "awaiting_preview" | "done" | "failed";
+// awaiting_final: both final mp4s exist and passed the file contract, all four
+// Final-film QC specialists answered, and at least one concrete issue remains.
+// The films are kept untouched and nothing is registered until a person decides.
+export type JobState = "queued" | "running" | "awaiting_text" | "awaiting_preview" | "awaiting_final" | "done" | "failed";
 
 export type JobStep =
   | "queued"
@@ -89,8 +92,23 @@ export interface Job {
   assetQa?: AssetQaState; // Pixel-aware Asset QA at the visual preview: its phase, then the latest result (persisted)
   directorQa?: DirectorQaRuns; // Run Director QA per film at the visual preview: its phase, then the latest result (persisted)
   visualAutopilot?: VisualAutopilotState; // the Visual Autopilot chain around the visual gate (server memory, never persisted)
+  finalQa?: FinalQaState; // the finished-film concerns, only while awaiting_final
   createdAt: string;
   updatedAt: string;
+}
+
+// ---- Final-film QC (the finished-film gate) ----
+// Only the concrete publishing concern reaches the browser: which film, fact or
+// visual, why, and for a fact the short narration fragment it is about. The
+// specialists' evidence stays in the job's private scratch.
+export interface FinalQaIssue {
+  film: "long" | "short";
+  area: "fact" | "visual";
+  reason: string;
+  text?: string;
+}
+export interface FinalQaState {
+  issues: FinalQaIssue[];
 }
 
 // ---- Automatic Director Text QA (the text gate autopilot) ----

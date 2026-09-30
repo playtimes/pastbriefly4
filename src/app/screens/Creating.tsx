@@ -8,17 +8,18 @@ import { buildFilm, regenKey } from "../visualReview/model.ts";
 import { visualIssues, type VisualIssue } from "../visualReview/visualIssues.ts";
 import { VisualIssuePanel } from "../visualReview/IssueView.tsx";
 import type { RegenDraft } from "../visualReview/Inspector.tsx";
-import { ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
+import { FinalException, ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
 import { directorFeedbackError, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection } from "../../types.ts";
 
 // The Production screen for one story's current job. Its faces follow the job:
-// Running, Text needs you, Visuals need you, Failed and Ready. A gate opens on
-// its issue list, then one issue at a time. PB4 runs its own checks; the user
-// only makes the creative calls.
+// Running, Text needs you, Visuals need you, Films need you, Failed and Ready.
+// A gate opens on its issue list, then one issue at a time. PB4 runs its own
+// checks; the user only makes the creative calls.
 export function Creating({ slug }: { slug: string }): React.ReactElement {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
   const [continuing, setContinuing] = useState(false);
+  const [acceptingFinal, setAcceptingFinal] = useState(false);
   const [approvingText, setApprovingText] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -107,6 +108,21 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
       setError(e.message);
     } finally {
       setContinuing(false);
+    }
+  }
+
+  // Accept the finished films as they are; the job goes back to queued and the
+  // poll loop above follows it to Ready.
+  async function acceptFinal(): Promise<void> {
+    if (!jobId.current) return;
+    setAcceptingFinal(true);
+    try {
+      const { job } = await api.acceptFinal(jobId.current);
+      show(job);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setAcceptingFinal(false);
     }
   }
 
@@ -216,8 +232,11 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   const gate = gateFace(job);
   const gateKey = `${job.id}:${job.state}`;
   if (face === "running" && gate && handedOver.current === gateKey) face = gate;
-  if (face === "text" || face === "visuals") handedOver.current = gateKey;
+  if (face === "text" || face === "visuals" || face === "final") handedOver.current = gateKey;
   if (face === "failed") return <Fail slug={slug} job={job} onRetry={retry} retrying={retrying} maxSpend={maxSpend} onApproveMore={approveMore} />;
+
+  // Films need you: the finished films' concerns, and Continue anyway.
+  if (face === "final") return <FinalException storyTitle={storyTitle} issues={job.finalQa?.issues ?? []} onContinue={acceptFinal} continuing={acceptingFinal} />;
 
   if (face === "done") {
     if (!ready || ready.jobId !== job.id) return <p className="text-muted">Preparing…</p>;

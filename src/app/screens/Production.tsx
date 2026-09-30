@@ -3,12 +3,12 @@ import { More, moreItem } from "../More.tsx";
 import { DISPLAY_STAGES, stageIndex, stageLabel, stageProgress, type CompletePair, type DisplayStage } from "../productionStage.ts";
 import type { VisualIssue } from "../visualReview/visualIssues.ts";
 import { Still } from "../visualReview/Still.tsx";
-import type { Job, TextQaSection, TextQaState, VideoKind } from "../../types.ts";
+import type { FinalQaIssue, Job, TextQaSection, TextQaState, VideoKind } from "../../types.ts";
 import type { ReviewTab } from "./Creating.tsx";
 
 // The plain faces of the Production screen (/story/:slug/creating): Running,
-// Text needs you, Visuals need you and Ready, plus their small More menus.
-// Hook-free: every handler is one Creating already owns.
+// Text needs you, Visuals need you, Films need you and Ready, plus their small
+// More menus. Hook-free: every handler is one Creating already owns.
 
 const kicker = "text-[11px] font-semibold tracking-[0.18em] uppercase text-muted";
 const attention = "text-[11px] font-semibold tracking-[0.18em] uppercase text-accent";
@@ -218,6 +218,47 @@ export function VisualMore(props: { onFilms: () => void; onContinue: () => void;
         {props.rebuilding ? "Starting again…" : "Redo all visuals"}
       </button>
     </More>
+  );
+}
+
+// ---------------------------------------------------------------- Films need you
+
+const FILM_LABEL: Record<FinalQaIssue["film"], string> = { long: "Long", short: "Short" };
+const AREA_LABEL: Record<FinalQaIssue["area"], string> = { fact: "Fact", visual: "Visual" };
+
+// Both films are rendered and checked, and something concrete is left: one row
+// per concern (which film, fact or visual, and why; for a fact, the words it is
+// about), and the one decision, Continue anyway.
+export function FinalException(props: { storyTitle: string; issues: FinalQaIssue[]; onContinue: () => void; continuing: boolean }): React.ReactElement {
+  const { issues } = props;
+  return (
+    <div className="flex flex-col gap-7 max-w-[760px]">
+      <div className="flex flex-col gap-2.5">
+        <p className={attention}>{props.storyTitle ? `Films need you · ${props.storyTitle}` : "Films need you"}</p>
+        <h1 className={title}>{issues.length ? things(issues.length) : "The finished films need a look"}</h1>
+      </div>
+      {issues.length > 0 && (
+        <ol aria-label="Film issues" className="flex flex-col border-t border-line">
+          {issues.map((i, n) => (
+            <li key={n} data-final-issue={`${i.film}-${i.area}`} className="grid grid-cols-[36px_minmax(0,1fr)] gap-x-4 items-start py-5 border-b border-line">
+              <span className="font-serif text-[24px] leading-none text-accent tabular-nums">{String(n + 1).padStart(2, "0")}</span>
+              <div className="flex flex-col gap-1.5 min-w-0">
+                <span className={kicker}>
+                  {FILM_LABEL[i.film]} · {AREA_LABEL[i.area]}
+                </span>
+                <span className="text-[15.5px] leading-[1.55] text-ink [text-wrap:pretty] break-words">{i.reason}</span>
+                {i.text && <span className="text-[14px] leading-[1.5] text-muted italic [text-wrap:pretty] break-words">“{i.text}”</span>}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
+        <button onClick={props.onContinue} disabled={props.continuing} data-action="accept-final" className="btn btn-primary">
+          {props.continuing ? "Continuing…" : "Continue anyway"}
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -2,9 +2,9 @@ import crypto from "node:crypto";
 import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { config } from "../server/config.ts";
 import { PRICING, assetReviewUsd, round, ttsUsd } from "../server/pricing.ts";
-import { getJob, getStory, upsertStory, updateJob, addVideo, setScripts, approvePreview, type JobRecord } from "../server/store.ts";
-import type { AssetQaIssue, AssetQaPhase, AssetQaStage, AssetQaState, DirectorQaRun, DirectorQaRuns, VisualAutopilotState, CoordinatedRepairReport, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent, DirectorVerifyReport, JobStep, SequenceCleanupReport, Story, TextQaPhase, TextQaReview, TextQaStage, TextQaState, TextQaVerify, Video } from "../types.ts";
-import { imageMimeType } from "../providers/openai.ts";
+import { getJob, getStory, upsertStory, updateJob, addVideos, setScripts, approvePreview, type JobRecord } from "../server/store.ts";
+import type { AssetQaIssue, AssetQaPhase, AssetQaStage, AssetQaState, DirectorQaRun, DirectorQaRuns, FinalQaState, VisualAutopilotState, CoordinatedRepairReport, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent, DirectorVerifyReport, JobStep, SequenceCleanupReport, Story, TextQaPhase, TextQaReview, TextQaStage, TextQaState, TextQaVerify, Video } from "../types.ts";
+import { imageMimeType, respondJson, ProviderOutputError } from "../providers/openai.ts";
 import {
   assetQaTargets,
   assetImageLabel,
@@ -81,8 +81,21 @@ import {
 } from "./visuals.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import type { Scripts } from "./scripts.ts";
-import { renderFilms, probeVideo } from "../render/renderVideo.ts";
+import { renderFilms, probeVideo, type Probe } from "../render/renderVideo.ts";
 import { validateFinalVideo } from "../render/finalCheck.ts";
+import type { RenderPlan } from "../render/types.ts";
+import {
+  FINAL_SPECIALISTS,
+  finalFilmResults,
+  finalQaIssues,
+  reviewFinalFactual,
+  reviewFinalVisual,
+  type FinalFilmInput,
+  type FinalFilmKind,
+  type FinalFilmQaRecord,
+  type FinalFilmReviewer,
+  type FinalSpecialist,
+} from "./finalFilmQa.ts";
 
 interface Scratch {
   research?: ResearchPackage;
@@ -104,6 +117,9 @@ interface Scratch {
   // Per film, the latest Run Director QA: its phase while it runs, then its
   // result. Valid only for the edit it checked: a later manual change clears it.
   directorQa?: DirectorQaRuns;
+  // Final-film QC of the finished pair: created once both mp4s passed the file
+  // contract (so they are never rendered again), then each specialist's result.
+  finalFilmQa?: FinalFilmQaRecord;
   spent?: number;
   renderPercent?: number; // whole-percent render progress across both films, only while rendering
 }
@@ -145,7 +161,7 @@ async function runScriptAudit(job: JobRecord, story: Story, research: ResearchPa
 // has looked at yet, which is where the worker starts Pixel Asset QA.
 export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean; autoApproveText?: boolean } = {}): Promise<"text_gate" | "preview_gate" | void> {
   const job = getJob(jobId);
-  if (!job || job.state === "done" || job.state === "failed") return;
+  if (!job || job.state === "done" || job.state === "failed" || job.state === "awaiting_final") return;
   const story = getStory(job.storyId);
   if (!story) return;
 
@@ -245,6 +261,11 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     // A plan stored by an older planner (e.g. a v1 shot list) is never reinterpreted.
     for (const [kind, shots] of films(scratch)) assertFilmGrammarPlan(kind, shots);
 
+    // Both final films already rendered and passed the file contract (a Retry, a
+    // restart or Continue anyway during Final-film QC): no media, motion or
+    // render work again. Resume at the finished files themselves.
+    if (scratch.finalFilmQa?.outputsValidated) return await finishFilms(job, story, scratch, renderPlans(story, scratch, narration, accent));
+
     // Master reference still - one OpenAI image per job. Generated once and reused
     // on resume/Continue: keyed off scratch, not hero.png existing (which may be a
     // discovery placeholder). Labelled as still work so a failure here reads as
@@ -335,11 +356,10 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     // 7. Render both films
     scratch.renderPercent = 0;
     step(jobId, "rendering", "Rendering the films", scratch);
-    const longPlan = buildRenderPlan("long", story, scratch.longShots!, narration.long, accent);
-    const shortPlan = buildRenderPlan("short", story, scratch.shortShots!, narration.short, accent);
+    const plans = renderPlans(story, scratch, narration, accent);
     await renderFilms(storyDir(story.slug), [
-      { plan: longPlan, compositionId: "LongVideo", outPath: inStory(story.slug, "renders/long.mp4") },
-      { plan: shortPlan, compositionId: "ShortVideo", outPath: inStory(story.slug, "renders/short.mp4") },
+      { plan: plans.long, compositionId: "LongVideo", outPath: inStory(story.slug, "renders/long.mp4") },
+      { plan: plans.short, compositionId: "ShortVideo", outPath: inStory(story.slug, "renders/short.mp4") },
     ], (fraction) => {
       // Persist only whole-percent changes, so the poll sees progress without a write per frame.
       const pct = Math.min(100, Math.floor(fraction * 100));
@@ -349,37 +369,146 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     });
     delete scratch.renderPercent;
 
-    // 8. Finish: probe both films and check each against the output contract, and
-    // only when BOTH pass register them. A broken file fails the job with nothing
-    // registered; the renders stay on disk for diagnosis.
-    step(jobId, "finishing", "Finishing", scratch);
-    const finals = ([["long", longPlan], ["short", shortPlan]] as const).map(([kind, plan]) => {
-      const rel = `renders/${kind}.mp4`;
-      return { kind, plan, rel, p: probeVideo(inStory(story.slug, rel)) };
-    });
-    for (const f of finals) validateFinalVideo(f.plan, f.p);
-    for (const { kind, rel, p } of finals) {
-      const video: Video = {
-        id: `${job.id}-${kind}`,
-        storyId: story.id,
-        jobId: job.id,
-        kind,
-        path: mediaRel(story.slug, rel),
-        width: p.width,
-        height: p.height,
-        durationSec: p.durationSec,
-        fps: p.fps,
-        hasAudio: p.hasAudio,
-        createdAt: now(),
-      };
-      addVideo(video);
-    }
-
-    updateJob(jobId, { state: "done", step: "finishing", message: "Finished", scratch });
+    // 8. Finish: the file contract, Final-film QC, then both videos together.
+    await finishFilms(job, story, scratch, plans);
   } catch (e: any) {
     updateJob(jobId, { state: "failed", error: e?.message || String(e), scratch });
     throw e;
   }
+}
+
+type RenderPlans = Record<FinalFilmKind, RenderPlan>;
+
+// Both films' render plans, rebuilt from the saved edit and narration: the same
+// plans rendered them, so a resume checks the finished files against them.
+function renderPlans(story: Story, scratch: Scratch, narration: { long: Narration; short: Narration }, accent: string): RenderPlans {
+  return {
+    long: buildRenderPlan("long", story, scratch.longShots!, narration.long, accent),
+    short: buildRenderPlan("short", story, scratch.shortShots!, narration.short, accent),
+  };
+}
+
+const FILM_NAME: Record<FinalFilmKind, string> = { long: "Long", short: "Short" };
+
+// The finish, also where a resumed job with validated finals starts:
+// 1. Probe BOTH finished mp4s and check each against the output contract. A
+//    missing or broken file fails the job with nothing registered; it is never
+//    rendered again here. Only when both pass is `outputsValidated` saved, before
+//    any paid Final-film QC call, so later resumes skip motion and render.
+// 2. Live only, until a person accepts the films: Final-film QC, all four
+//    specialists in order (Long factual, Long visual, Short factual, Short visual)
+//    even after a HUMAN_REVIEW, so the whole exception set is collected once. A
+//    specialist whose result is already saved is never asked again.
+// 3. Both films PASS (or Continue anyway): register the pair in ONE transaction,
+//    then done. Anything left for a person: awaiting_final, nothing registered,
+//    the finished files and the findings kept. Mock never calls a reviewer.
+async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans: RenderPlans): Promise<void> {
+  step(job.id, "finishing", "Checking final films", scratch);
+  const finals = (["long", "short"] as const).map((kind) => {
+    const rel = `renders/${kind}.mp4`;
+    const file = inStory(story.slug, rel);
+    let p: Probe;
+    try {
+      p = probeVideo(file);
+    } catch {
+      throw new Error(`Final file check failed for ${FILM_NAME[kind]}: the finished file is missing or unreadable.`);
+    }
+    return { kind, rel, file, p };
+  });
+  for (const f of finals) validateFinalVideo(plans[f.kind], f.p);
+  if (!scratch.finalFilmQa) {
+    scratch.finalFilmQa = { outputsValidated: true, long: {}, short: {} };
+    updateJob(job.id, { scratch });
+  }
+
+  const qa = scratch.finalFilmQa;
+  if (config.mode === "live" && !qa.accepted) {
+    for (const [kind, specialist] of FINAL_SPECIALISTS) {
+      if (qa[kind][specialist]) continue;
+      const f = finals.find((x) => x.kind === kind)!;
+      await finalSpecialist(job, scratch, finalFilmInput(story, scratch, kind, f.file, f.p.durationSec), kind, specialist);
+    }
+    const results = finalFilmResults(qa);
+    if (results.long?.decision !== "PASS" || results.short?.decision !== "PASS") {
+      updateJob(job.id, { state: "awaiting_final", step: "finishing", message: "Final films need review", scratch });
+      return;
+    }
+  }
+
+  addVideos(
+    finals.map(({ kind, rel, p }): Video => ({
+      id: `${job.id}-${kind}`,
+      storyId: story.id,
+      jobId: job.id,
+      kind,
+      path: mediaRel(story.slug, rel),
+      width: p.width,
+      height: p.height,
+      durationSec: p.durationSec,
+      fps: p.fps,
+      hasAudio: p.hasAudio,
+      createdAt: now(),
+    })),
+  );
+  updateJob(job.id, { state: "done", step: "finishing", message: "Finished", scratch });
+}
+
+// What one specialist reviews: this film's final narration, the saved research,
+// the finished mp4 and the saved final edit.
+function finalFilmInput(story: Story, scratch: Scratch, kind: FinalFilmKind, videoPath: string, durationSec: number): FinalFilmInput {
+  return { story, kind, script: scratch.scripts![kind], research: scratch.research!, videoPath, durationSec, shots: (kind === "long" ? scratch.longShots : scratch.shortShots)! };
+}
+
+// One Final-film QC specialist, with PB4's usual paid-call rules: preflighted
+// against the approved maximum, charged once the provider has answered. A valid
+// result and its charge are saved in ONE job update. An answer that then fails
+// validation, or whose output is not even JSON, is still charged (once) and
+// fails the job; every earlier result stays saved, so Retry asks only this
+// specialist again. A call that never answered (network, HTTP error, frame
+// sampling) is not charged.
+async function finalSpecialist(job: JobRecord, scratch: Scratch, input: FinalFilmInput, kind: FinalFilmKind, specialist: FinalSpecialist): Promise<void> {
+  const usd = specialist === "factual" ? PRICING.openai.finalFactualReview : PRICING.openai.finalVisualReview;
+  budget(job, usd, scratch);
+  let answered = false;
+  const reviewer: FinalFilmReviewer = async (opts) => {
+    try {
+      const raw = await respondJson(opts);
+      answered = true;
+      return raw;
+    } catch (e) {
+      if (e instanceof ProviderOutputError) answered = true; // a model response came back, unusable
+      throw e;
+    }
+  };
+  const qa = scratch.finalFilmQa!;
+  try {
+    if (specialist === "factual") qa[kind].factual = await reviewFinalFactual(input, reviewer);
+    else qa[kind].visual = await reviewFinalVisual(input, reviewer);
+  } catch (e) {
+    if (answered) record(job.id, usd, scratch);
+    throw e;
+  }
+  record(job.id, usd, scratch);
+}
+
+// The finished-film concerns a person sees while the job waits at awaiting_final.
+export function finalQaState(raw: Record<string, unknown>): FinalQaState | undefined {
+  const record = (raw as Scratch).finalFilmQa;
+  return record ? { issues: finalQaIssues(record) } : undefined;
+}
+
+// Continue anyway at the finished-film gate: the person accepts the films as
+// they are. The findings stay in private scratch; the SAME job is requeued and
+// resumes at the finished files, so no provider call, motion or render happens:
+// the files are checked again and the pair is registered.
+export function acceptFinalForJob(jobId: string): JobRecord {
+  const job = getJob(jobId);
+  if (!job) throw new Error("Job not found.");
+  const scratch = job.scratch as Scratch;
+  if (job.state !== "awaiting_final" || !scratch.finalFilmQa) throw new Error("Only finished films waiting for review can be accepted.");
+  scratch.finalFilmQa = { ...scratch.finalFilmQa, accepted: true };
+  updateJob(jobId, { scratch, state: "queued", message: "Queued", error: null });
+  return getJob(jobId)!;
 }
 
 function films(s: Scratch): Array<["long" | "short", PlannedShot[]]> {

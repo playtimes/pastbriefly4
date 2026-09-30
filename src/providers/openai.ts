@@ -26,6 +26,14 @@ function readOutputText(resp: any): string {
   return parts.join("");
 }
 
+// OpenAI answered successfully, but its output text was missing or not JSON:
+// the model response exists (and is billed), yet nothing usable came back.
+// Callers that account per answered call can tell it apart from a failed
+// request; to everyone else it is an ordinary Error with the same message.
+export class ProviderOutputError extends Error {
+  readonly providerResponseReceived = true;
+}
+
 // One labelled image for a vision call: the saved file's bytes, read by the caller.
 export interface InputImage {
   label: string;
@@ -36,6 +44,8 @@ export interface InputImage {
 // One structured-JSON Responses call, optionally with web search. With `images`,
 // the input becomes one user message: the text, then each image preceded by its
 // own label, sent inline at high detail (the pixels are what is reviewed).
+// `model` and `reasoning` override the configured text model for this one call
+// only; without them the request is exactly the configured default.
 export async function respondJson<T>(opts: {
   instructions: string;
   input: string;
@@ -43,6 +53,8 @@ export async function respondJson<T>(opts: {
   schema: Record<string, unknown>;
   webSearch?: boolean;
   images?: InputImage[];
+  model?: string;
+  reasoning?: { effort: "low" | "medium" | "high" };
 }): Promise<T> {
   const input = opts.images?.length
     ? [
@@ -59,12 +71,13 @@ export async function respondJson<T>(opts: {
       ]
     : opts.input;
   const body: Record<string, unknown> = {
-    model: config.openai.model,
+    model: opts.model ?? config.openai.model,
     instructions: opts.instructions,
     input,
     text: { format: { type: "json_schema", name: opts.schemaName, strict: true, schema: opts.schema } },
   };
   if (opts.webSearch) body.tools = [{ type: "web_search" }];
+  if (opts.reasoning) body.reasoning = opts.reasoning;
 
   const res = await fetch(`${API}/responses`, {
     method: "POST",
@@ -76,7 +89,7 @@ export async function respondJson<T>(opts: {
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new Error(`OpenAI returned non-JSON output: ${text.slice(0, 200)}`);
+    throw new ProviderOutputError(`OpenAI returned non-JSON output: ${text.slice(0, 200)}`);
   }
 }
 

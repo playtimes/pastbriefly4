@@ -124,7 +124,7 @@ quality across multiple fresh stories.
 
 ### Next
 
-14. **Final-film QC** - Stage 14A proof completed; Stage 14B next.
+14. **Final-film QC** - Stage 14A proof completed; Stage 14B in progress.
 
     **Stage 14A - specialist proof** - COMPLETED. The broad single-reviewer
     proof failed: it echoed PB4's causal synthesis and treated distinct asset
@@ -143,9 +143,26 @@ quality across multiple fresh stories.
     L00 recurrence coherently. GPT-6 Astra with reasoning high is the visual
     Final-film QC candidate model. The proof is not integrated into production.
 
-    **Stage 14B - integration** - NEXT. Integrate the proven Final-film QC
-    between finished-render validation and Ready, then validate it before
-    treating it as a production gate.
+    **Stage 14B - integration** - IN PROGRESS. Implemented and covered by
+    tests; not yet validated on a real production.
+    - Final-film QC runs after the deterministic final-file validation of both
+      renders. Once both files pass, a durable marker means Retry, restart and
+      acceptance never motion or render them again.
+    - Four specialists per live production (Long factual, Long visual, Short
+      factual, Short visual), all run even after a HUMAN_REVIEW. Each result is
+      saved with its charge as soon as it exists, so a resume starts at the
+      first missing specialist. Mock mode calls none of them.
+    - The factual specialist keeps the configured text model with web search;
+      the visual specialist uses GPT-6 Astra at reasoning high for that call
+      only.
+    - HUMAN_REVIEW becomes awaiting_final / Films need you, with only film,
+      area, reason and a narration fragment made public. The one decision is
+      Continue anyway.
+    - PASS, or Continue anyway, registers the Long + Short pair in one
+      transaction; only then is the job done / Ready.
+    - No automatic final-film repair in Stage 14B.
+    - Next gate: a controlled production-path validation before calling 14B
+      complete.
 
     Areas still not checked after assembly, for later Stage 14 slices only if
     Films #5 / #6 show real defects there:

@@ -78,6 +78,7 @@ export const api = {
   approveText: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-text`),
   reviseText: (jobId: string, feedback: string) => post<{ job: Job }>(`/api/jobs/${jobId}/revise-text`, { feedback }),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
+  acceptFinal: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/accept-final`),
   rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),
   regenerateStill: (jobId: string, kind: "long" | "short", slot: number, directorFeedback?: string) =>
     post<{ job: Job }>(`/api/jobs/${jobId}/regenerate-still`, directorFeedback ? { kind, slot, directorFeedback } : { kind, slot }),

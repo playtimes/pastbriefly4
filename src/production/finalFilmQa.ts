@@ -1,13 +1,13 @@
 import { respondJson } from "../providers/openai.ts";
-import { sampledFrames } from "../render/contactSheet.ts";
-import type { Story } from "../types.ts";
+import { sampledFrames, type SampledFrame } from "../render/contactSheet.ts";
+import type { FinalQaIssue, Story } from "../types.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import { plainDashes, splitSentences } from "./text.ts";
 import type { PlannedShot } from "./visuals.ts";
 
 // ---------------------------------------------------------------------------
-// Final-film QC (Stage 14A2 proof): a read-only review of ONE finished film by
-// two specialists, combined locally:
+// Final-film QC: a read-only review of ONE finished film by two specialists,
+// combined locally:
 // - FACTUAL AUDIT: the final narration against the sources, with web search
 //   enabled, and an explicit check of every sentence that uses high-risk causal
 //   wording. PB4's own research is context, never causal authority. No image.
@@ -15,9 +15,12 @@ import type { PlannedShot } from "./visuals.ts";
 //   its own image with its own label (cell, time, slot, asset, presentation),
 //   plus exact sampled reuse and asset-use evidence. It first observes every
 //   cell, then lists the visual motifs that repeat (they may overlap; asset ids
-//   are not visual families), then decides. No web.
+//   are not visual families), then decides. No web. It runs on
+//   FINAL_VISUAL_QA_MODEL at high reasoning effort; the factual audit keeps the
+//   configured text model.
 // Exactly two reviewer calls per film, no summarizer call, no retry. It answers
-// PASS or HUMAN_REVIEW and repairs nothing. Not wired into production yet.
+// PASS or HUMAN_REVIEW and repairs nothing. Production (Stage 14B) calls each
+// specialist on its own, so every result is saved as soon as it exists.
 // It does not judge motion, audio, pronunciation, subtitles or cut timing:
 // sampled still frames cannot show them.
 //
@@ -549,23 +552,27 @@ export function combineFinalFilmQa(factual: FactualAudit, visual: VisualAudit): 
   };
 }
 
-export interface FinalFilmReview extends FinalFilmQaResult {
-  // The two specialist answers behind the combined result, for the proof runner.
-  specialists: { causalClaims: CausalClaim[]; factual: FactualAudit; visual: VisualAudit };
-}
+// ---------------------------------------------------------------------------
+// The specialist entry points. Each is exactly one reviewer call, no retry; a
+// failed or malformed answer throws, so nothing silently passes.
+// ---------------------------------------------------------------------------
 
-// One film, exactly two calls, no retry: the frames are sampled once (from the
-// final mp4, never kept) before any paid call; then the factual audit (text
-// only, web search on) and the visual-family audit (every sampled frame as its
-// own labelled image, no web search). A failed or malformed answer throws:
-// nothing silently passes.
-export async function reviewFinalFilm(input: FinalFilmInput, reviewer: FinalFilmReviewer = respondJson): Promise<FinalFilmReview> {
+// The visual specialist's own model, for that one call only: every other PB4
+// OpenAI call keeps the configured text model.
+export const FINAL_VISUAL_QA_MODEL = "gpt-6-astra";
+export const FINAL_VISUAL_QA_REASONING = { effort: "high" } as const;
+
+function assertReviewable(input: FinalFilmInput): void {
   if (!input.script.trim()) throw new Error("Final-film QC: the film has no narration.");
   if (!input.shots.length) throw new Error("Final-film QC: the film has no edit.");
-  const claims = causalClaims(input.script);
-  const frames = sampledFrames(input.videoPath, input.kind);
+}
 
-  const factual = readFactualAudit(
+// The factual audit: the final narration only (no image), with web search on,
+// on the configured text model.
+export async function reviewFinalFactual(input: FinalFilmInput, reviewer: FinalFilmReviewer = respondJson): Promise<FactualAudit> {
+  assertReviewable(input);
+  const claims = causalClaims(input.script);
+  return readFactualAudit(
     await reviewer({
       instructions: FACTUAL_AUDIT_INSTRUCTIONS,
       input: factualPayload(input, claims),
@@ -575,18 +582,88 @@ export async function reviewFinalFilm(input: FinalFilmInput, reviewer: FinalFilm
     }),
     claims.map((c) => c.text),
   );
+}
 
-  const visual = readVisualAudit(
+// The visual-family audit: every sampled frame of the final mp4 as its own
+// labelled image, no web search. `frames` are sampled here unless given; they
+// are never kept.
+export async function reviewFinalVisual(input: FinalFilmInput, reviewer: FinalFilmReviewer = respondJson, frames?: SampledFrame[]): Promise<VisualAudit> {
+  assertReviewable(input);
+  const sampled = frames ?? sampledFrames(input.videoPath, input.kind);
+  return readVisualAudit(
     await reviewer({
       instructions: VISUAL_AUDIT_INSTRUCTIONS,
-      input: visualPayload(input, frames.map((f) => f.timeSec)),
+      input: visualPayload(input, sampled.map((f) => f.timeSec)),
       schemaName: "final_film_visual_audit",
       schema: VISUAL_AUDIT_SCHEMA,
-      images: frames.map((f) => ({ label: frameLabel(input.shots, f.cell, f.timeSec), data: f.jpeg, mimeType: "image/jpeg" })),
+      images: sampled.map((f) => ({ label: frameLabel(input.shots, f.cell, f.timeSec), data: f.jpeg, mimeType: "image/jpeg" })),
+      model: FINAL_VISUAL_QA_MODEL,
+      reasoning: FINAL_VISUAL_QA_REASONING,
     }),
-    frames.length,
+    sampled.length,
     input.shots.map((s) => s.assetId),
   );
+}
 
-  return { ...combineFinalFilmQa(factual, visual), specialists: { causalClaims: claims, factual, visual } };
+export interface FinalFilmReview extends FinalFilmQaResult {
+  // The two specialist answers behind the combined result, for the proof runner.
+  specialists: { causalClaims: CausalClaim[]; factual: FactualAudit; visual: VisualAudit };
+}
+
+// One film, both specialists, exactly two calls: the frames are sampled once
+// (from the final mp4, never kept) before any paid call, then the factual audit,
+// then the visual-family audit.
+export async function reviewFinalFilm(input: FinalFilmInput, reviewer: FinalFilmReviewer = respondJson): Promise<FinalFilmReview> {
+  assertReviewable(input);
+  const frames = sampledFrames(input.videoPath, input.kind);
+  const factual = await reviewFinalFactual(input, reviewer);
+  const visual = await reviewFinalVisual(input, reviewer, frames);
+  return { ...combineFinalFilmQa(factual, visual), specialists: { causalClaims: causalClaims(input.script), factual, visual } };
+}
+
+// ---------------------------------------------------------------------------
+// Production record (private job scratch) and its small public reading.
+// ---------------------------------------------------------------------------
+
+export type FinalFilmKind = "long" | "short";
+export type FinalSpecialist = "factual" | "visual";
+
+// Saved under the job's scratch as `finalFilmQa`. `outputsValidated` is the
+// durable marker that BOTH final mp4s exist and passed the file contract, so
+// nothing renders them again. Each specialist result is saved as soon as it
+// exists; `accepted` is the person's Continue anyway. No prompt or image bytes.
+export interface FinalFilmQaRecord {
+  outputsValidated: true;
+  accepted?: true;
+  long: { factual?: FactualAudit; visual?: VisualAudit };
+  short: { factual?: FactualAudit; visual?: VisualAudit };
+}
+
+// The four specialists, in the order production runs them.
+export const FINAL_SPECIALISTS: [FinalFilmKind, FinalSpecialist][] = [
+  ["long", "factual"],
+  ["long", "visual"],
+  ["short", "factual"],
+  ["short", "visual"],
+];
+
+// Each film's combined result, once both of its specialists have answered.
+export function finalFilmResults(record: FinalFilmQaRecord): Partial<Record<FinalFilmKind, FinalFilmQaResult>> {
+  const out: Partial<Record<FinalFilmKind, FinalFilmQaResult>> = {};
+  for (const film of ["long", "short"] as const) {
+    const { factual, visual } = record[film];
+    if (factual && visual) out[film] = combineFinalFilmQa(factual, visual);
+  }
+  return out;
+}
+
+// What a person is shown: the concrete concern per film and area, and for a fact
+// the short narration fragment. Never checks, evidence, cells, families,
+// summaries or models.
+export function finalQaIssues(record: FinalFilmQaRecord): FinalQaIssue[] {
+  const results = finalFilmResults(record);
+  return (["long", "short"] as const).flatMap((film) => [
+    ...(results[film]?.factualIssues ?? []).map((i): FinalQaIssue => ({ film, area: "fact", reason: i.reason, text: i.text })),
+    ...(results[film]?.visualIssues ?? []).map((i): FinalQaIssue => ({ film, area: "visual", reason: i.reason })),
+  ]);
 }

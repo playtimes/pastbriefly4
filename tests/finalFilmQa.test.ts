@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
-// Final-film QC (Stage 14A2 proof): causal-risk extraction, the two specialist
+// Final-film QC: causal-risk extraction, the two specialist
 // audits and their strict readers, the local combination and the asset-use
 // evidence, with an injected reviewer. The contact sheet is built with the real
 // ffmpeg from a tiny synthetic film (and counted). No provider is ever called:
@@ -40,6 +40,10 @@ vi.mock("../src/render/contactSheet.ts", async (orig) => {
 
 const {
   reviewFinalFilm,
+  reviewFinalFactual,
+  reviewFinalVisual,
+  finalQaIssues,
+  FINAL_VISUAL_QA_MODEL,
   causalClaims,
   narrationSentences,
   readFactualAudit,
@@ -537,6 +541,36 @@ describe("combined result", () => {
     };
     await expect(reviewFinalFilm(input(), failing)).rejects.toThrow("provider down");
   }, 60000);
+
+  test("Stage 14B entry points: each specialist is exactly one call; only the visual one overrides the model, to GPT-6 Astra at high reasoning", async () => {
+    const { calls, reviewer } = recorder({ factual: FACTUAL_REVIEW, visual: SHORT_PASS });
+    samplings.length = 0;
+    const factual = await reviewFinalFactual(input(), reviewer);
+    expect(calls.map((c) => c.schemaName)).toEqual(["final_film_factual_audit"]);
+    expect(samplings).toEqual([]); // the factual audit never touches the film
+    expect([calls[0].model, calls[0].reasoning, calls[0].webSearch]).toEqual([undefined, undefined, true]);
+    expect(factual.decision).toBe("HUMAN_REVIEW");
+
+    const visual = await reviewFinalVisual(input(), reviewer);
+    expect(calls.map((c) => c.schemaName)).toEqual(["final_film_factual_audit", "final_film_visual_audit"]);
+    expect(samplings).toHaveLength(1);
+    expect([calls[1].model, calls[1].reasoning, calls[1].webSearch]).toEqual([FINAL_VISUAL_QA_MODEL, { effort: "high" }, undefined]);
+    expect(FINAL_VISUAL_QA_MODEL).toBe("gpt-6-astra");
+    expect(config.openai.model).not.toBe(FINAL_VISUAL_QA_MODEL);
+    expect(visual.decision).toBe("PASS");
+  }, 60000);
+
+  test("the public issues: film, area, reason and a fact's fragment only, Long before Short; an unfinished film adds nothing", () => {
+    const f = (raw: unknown): FactualAudit => readFactualAudit(raw, [FILM4_SENTENCE]);
+    const v = (raw: unknown): VisualAudit => readVisualAudit(raw, 12, []);
+    const record = { outputsValidated: true as const, long: { factual: f(FACTUAL_REVIEW), visual: v(SHORT_PASS) }, short: { factual: f(FACTUAL_PASS), visual: v(SHORT_REVIEW) } };
+    expect(finalQaIssues(record)).toEqual([
+      { film: "long", area: "fact", ...FACTUAL_ISSUE },
+      { film: "short", area: "visual", reason: "Burning hangar returns across the film." },
+    ]);
+    expect(finalQaIssues({ ...record, short: { factual: f(FACTUAL_PASS) } }).map((i) => i.film)).toEqual(["long"]);
+    expect(finalQaIssues({ outputsValidated: true, long: { factual: f(FACTUAL_PASS), visual: v(SHORT_PASS) }, short: {} })).toEqual([]);
+  });
 });
 
 describe("exact sampled reuse", () => {
