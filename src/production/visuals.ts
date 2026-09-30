@@ -1068,7 +1068,16 @@ export function archiveHolds(slots: EditSlot[], ids: unknown[], presentations: P
 // except an allowed archive hold (archiveHolds).
 // allowAdjacentRepeats skips only that last check, so planVisuals can tell an
 // answer whose only defect is a hidden hold (repairable) from any other failure.
-export function validateEdit(kind: "long" | "short", slots: EditSlot[], raw: unknown, presentations: Presentation[], allowAdjacentRepeats = false): EditorAssignment[] {
+// ignoreRepeatsAt skips it only at those slot ids: candidate screening for a joint
+// repair, never a final check (see sequenceSlotChoices).
+export function validateEdit(
+  kind: "long" | "short",
+  slots: EditSlot[],
+  raw: unknown,
+  presentations: Presentation[],
+  allowAdjacentRepeats = false,
+  ignoreRepeatsAt: ReadonlySet<number> = new Set(),
+): EditorAssignment[] {
   const last = slots.length - 1;
   const reject = (reason: string): never => {
     throw new VisualPlanError(`Invalid edit plan: ${kind} ${reason}.`);
@@ -1102,7 +1111,7 @@ export function validateEdit(kind: "long" | "short", slots: EditSlot[], raw: unk
     }
     // The same presentation on two adjacent slots is a hidden hold, not a cut,
     // unless it is an allowed archive hold.
-    if (!allowAdjacentRepeats && slot.id > 0 && bySlot.get(slot.id - 1)!.presentationId === a.presentationId && !holds.has(slot.id)) {
+    if (!allowAdjacentRepeats && !ignoreRepeatsAt.has(slot.id) && slot.id > 0 && bySlot.get(slot.id - 1)!.presentationId === a.presentationId && !holds.has(slot.id)) {
       return reject(`${label}: presentationId "${a.presentationId}" repeats slot ${slot.id - 1}; adjacent slots must not show the identical presentation`);
     }
     return { slotId: slot.id, presentationId: a.presentationId, motionPriority: a.motionPriority as number };
@@ -1402,6 +1411,12 @@ export { NO_LEGAL_ALTERNATIVE } from "../types.ts";
 // final save runs it again. Conservative on purpose: a choice that is only legal
 // together with other changes is not offered. The slot's current presentation is
 // no change, so it is never offered. A slot can end up with no choices at all.
+// `jointTargets` is only for the post-acquisition archive-hold repair, whose edit
+// is invalid exactly because those targets must all change together: while one
+// target is screened, the existing adjacent repeat at each OTHER target is not
+// held against it (unless the screened change touches that pair). The screened
+// target itself and every other rule stay strict, and the final save of the
+// combined answer is fully strict. Without it (every other caller) nothing changes.
 export function sequenceSlotChoices(
   kind: "long" | "short",
   slots: EditSlot[],
@@ -1410,12 +1425,14 @@ export function sequenceSlotChoices(
   locked: Map<number, string>,
   story?: Story,
   retained: RetainedPresentation[] = [],
+  jointTargets: number[] = [],
 ): Map<number, string[]> {
   const current = storedEdit(shots);
   if (story) resolveReuse(story, kind, reassembleStoredEdit(shots, current, retained)); // every owner still is on disk
   const choices = new Map<number, string[]>();
   for (const slot of slots) {
     if (locked.has(slot.id)) continue;
+    const siblings = new Set(jointTargets.filter((t) => t !== slot.id && t - 1 !== slot.id));
     choices.set(
       slot.id,
       presentations
@@ -1424,7 +1441,7 @@ export function sequenceSlotChoices(
           if (id === current[slot.id].presentationId) return false;
           const trial = current.map((e) => (e.slotId === slot.id ? { slotId: e.slotId, presentationId: id, motionPriority: 0 } : e));
           try {
-            assertFilmGrammarPlan(kind, reassembleStoredEdit(shots, validateEdit(kind, slots, trial, presentations), retained));
+            assertFilmGrammarPlan(kind, reassembleStoredEdit(shots, validateEdit(kind, slots, trial, presentations, false, siblings), retained));
             return true;
           } catch {
             return false;

@@ -785,6 +785,7 @@ async function reviseStoredSequence(
   targets?: number[],
   coordinated?: SequenceRevisionInput["coordinated"],
   ctx: QaRunContext = {},
+  joint = false, // the archive-hold repair: every target must change, together (see sequenceSlotChoices)
 ): Promise<{ job: JobRecord; changed: number[]; unresolved: SequenceUnresolved[]; choices: Map<number, string[]> }> {
   const { job, story, scratch, shots, slots, pool, presentations } = film;
   const locked = new Map<number, string>();
@@ -797,7 +798,10 @@ async function reviseStoredSequence(
   // may take any presentation of the current film; the final checks decide.
   const choices = coordinated
     ? new Map(slots.filter((s) => !locked.has(s.id)).map((s) => [s.id, presentations.map((p) => p.id)] as [number, string[]]))
-    : sequenceSlotChoices(kind, slots, shots, presentations, locked, story, pool);
+    : sequenceSlotChoices(kind, slots, shots, presentations, locked, story, pool, joint ? targets : []);
+  // A joint repair that cannot change every target could never succeed: no call.
+  const stuck = joint ? (targets ?? []).filter((t) => !choices.get(t)?.length) : [];
+  if (stuck.length) return { job, changed: [], unresolved: stuck.map((slotId) => ({ slotId, reason: NO_LEGAL_ALTERNATIVE })), choices };
   if (![...choices.values()].some((ids) => ids.length)) {
     if (targets) return { job, changed: [], unresolved: targets.map((slotId) => ({ slotId, reason: NO_LEGAL_ALTERNATIVE })), choices };
     throw new Error("No unlocked slot has a legal alternative existing presentation, so the sequence cannot change.");
@@ -895,13 +899,14 @@ async function repairBrokenArchiveHolds(jobId: string, kind: "long" | "short", r
     `The archive material planned for slot${broken.length === 1 ? "" : "s"} ${broken.map(pad).join(", ")} could not be found, so that image is now a generated reconstruction, which may not be held across two adjacent slots.`,
     `Target only these slots: ${broken.map(pad).join(", ")}.`,
     "",
-    "For each target choose an existing legal presentation that matches its narration.",
+    "Every target slot must change. For each target choose an existing legal presentation that matches its narration.",
     "",
     "KEEP ALL OTHER SLOTS.",
   ].join("\n");
   let r: Awaited<ReturnType<typeof reviseStoredSequence>>;
   try {
-    r = await reviseStoredSequence(film, kind, feedback, reviser, broken);
+    // All broken holds in ONE call, screened jointly; the saved result is fully strict.
+    r = await reviseStoredSequence(film, kind, feedback, reviser, broken, undefined, {}, true);
   } catch (e: any) {
     return failed(e?.message || "repair failed");
   }

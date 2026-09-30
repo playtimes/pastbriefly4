@@ -14,14 +14,16 @@ process.env.PB4_DATA_DIR = path.join(tmp, "data");
 process.env.PB4_MEDIA_DIR = path.join(tmp, "media");
 
 // planted: the archive files of the planted assets; failPlanted: their search finds nothing.
-const h = vi.hoisted(() => ({ calls: [] as any[], keep: false, failPlanted: false, planted: new Set<string>(), archive: 0, images: 0, hash: 0 }));
+// partial: the Editor changes every offered target but the last (a combination that
+// is not valid together).
+const h = vi.hoisted(() => ({ calls: [] as any[], keep: false, partial: false, failPlanted: false, planted: new Set<string>(), archive: 0, images: 0, hash: 0 }));
 vi.mock("../src/providers/openai.ts", () => ({
   respondJson: vi.fn(async (o: any) => {
     if (o.schemaName !== "sequence_revision") throw new Error(`unexpected provider call ${o.schemaName}`);
     h.calls.push(o);
     // The Editor: every offered target takes its first legal choice, or keeps it.
-    const keys = o.schema.properties.changes.properties;
-    return { changes: Object.fromEntries(Object.entries(keys).map(([id, p]: any) => [id, h.keep ? null : p.enum[0]])), unresolved: [] };
+    const keys = Object.entries(o.schema.properties.changes.properties);
+    return { changes: Object.fromEntries(keys.map(([id, p]: any, i) => [id, h.keep || (h.partial && i === keys.length - 1) ? null : p.enum[0]])), unresolved: [] };
   }),
   imageMimeType: () => "image/png",
   generateImageFile: vi.fn(async (o: any) => {
@@ -62,6 +64,7 @@ beforeAll(async () => {
 beforeEach(() => {
   h.calls = [];
   h.keep = false;
+  h.partial = false;
   h.failPlanted = false;
   h.planted = new Set();
   h.archive = 0;
@@ -251,6 +254,205 @@ describe("post-acquisition edit integrity: a broken archive hold", () => {
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0].input).toContain("FILM: SHORT");
     expect(shots(second.job.id).map(pres)).toEqual(planned.plans.long.map(pres));
+  });
+});
+
+// Film #5 (Project Azorian): three planned archive holds side by side, A A | B B |
+// C C, all falling back. Each later slot is a target, and while one is screened
+// the other two are still broken, so one-slot screening against the current edit
+// finds nothing. The repair screens them jointly and repairs all in ONE call.
+const HOLD_ASSETS = { long: ["L90", "L91", "L92"], short: ["S90", "S91", "S92"] };
+function plantHolds(list: Shot[], kind: Kind, count = 3): number {
+  const span = 2 * count;
+  const inRun = (i: number, j: number) => j >= i && j < i + span;
+  // A slot can take a planted asset when it is a reuse, or owns an asset that is
+  // also used outside the run (that use then owns it instead). No motion slot.
+  const free = (i: number, j: number) => !list[j].wantsMotion && (list[j].edit === "reuse" || list.some((s, x) => !inRun(i, x) && s.edit === "reuse" && s.assetShot === j));
+  const n = list.findIndex((_, i) => {
+    if (i <= 2 || i + span >= list.length - 3) return false;
+    for (let k = 0; k < span; k++) if (!free(i, i + k)) return false;
+    for (let k = 0; k < count; k++) if (list[i + 2 * k + 1].endSec - list[i + 2 * k].startSec > v.ARCHIVE_HOLD_MAX_SEC) return false;
+    return true;
+  });
+  if (n < 0) throw new Error(`no run of ${span} slots to plant ${count} holds in`);
+  for (let k = 0; k < span; k++) {
+    const j = n + k;
+    if (list[j].edit !== "new") continue;
+    const uses = list.filter((s, x) => !inRun(n, x) && s.edit === "reuse" && s.assetShot === j);
+    const heir = uses[0];
+    for (const s of uses) s.assetShot = heir.index;
+    heir.edit = "new";
+    delete heir.assetShot;
+  }
+  for (let k = 0; k < count; k++) {
+    const at = n + 2 * k;
+    const X = HOLD_ASSETS[kind][k];
+    const asset = { assetId: X, presentation: "base" as const, framing: "wide" as const, truth: "archive" as const, archiveQuery: `archive query ${X}`, prompt: `archive prompt ${X}`, purpose: `archive ${X}`, mustShow: [`subject ${X}`], mustNotShow: [], motion: "hold" as const, wantsMotion: false, motionPriority: 0 };
+    h.planted.add(`archive/${kind}-${String(at).padStart(2, "0")}.jpg`);
+    const owner: Shot = { ...list[at], ...asset, edit: "new" };
+    const reuse: Shot = { ...list[at + 1], ...asset, edit: "reuse", assetShot: at };
+    for (const s of [owner, reuse]) delete s.focus;
+    delete owner.assetShot;
+    list[at] = owner;
+    list[at + 1] = reuse;
+  }
+  return n;
+}
+// Only the targets may change (and no motion slot), as in the repair.
+function targetLocks(list: Shot[], targets: number[]): Map<number, string> {
+  const locked = new Map<number, string>();
+  for (const s of list) if (!targets.includes(s.index) || s.wantsMotion) locked.set(s.index, "locked");
+  return locked;
+}
+const longSlots = () => v.planSlots("long", paulBunyanScripts.long, planned.narration.long);
+
+describe("post-acquisition edit integrity: several broken archive holds are repaired together", () => {
+  test("A-D. the Azorian shape: exactly three broken holds; one-slot screening finds nothing, joint screening finds choices for all three", async () => {
+    let n = -1;
+    const { job } = seed((plans) => {
+      n = plantHolds(plans.long, "long");
+      legalAsPlanned(plans.long, "long"); // three legal archive holds as planned
+    });
+    h.failPlanted = true;
+    h.keep = true; // the Editor keeps everything, so the acquired (broken) edit stays stored
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(runJob(job.id)).rejects.toThrow(ARCHIVE_HOLD_REPAIR_FAILED);
+    logged.mockRestore();
+    const list = shots(job.id);
+    const targets = [n + 1, n + 3, n + 5];
+    // A. the acquired edit is strictly invalid.
+    expect(() => strictlyValid(job.id, "long")).toThrow(new RegExp(`slot ${n + 1} .*repeats slot ${n}`));
+    // B. its only defects are exactly the three broken holds.
+    const edit = v.storedEdit(list);
+    expect(v.adjacentRepeatTargets(edit)).toEqual(targets);
+    for (const t of targets) expect(list[t]).toMatchObject({ presentation: "base", truth: "reconstruction", archiveQuery: expect.any(String) });
+    expect(() => v.validateEdit("long", longSlots(), edit, v.storedPresentations(list), true)).not.toThrow();
+    const pres4 = v.storedPresentations(list);
+    const locked = targetLocks(list, targets);
+    // C. the ordinary one-slot screening against the fully broken edit offers nothing.
+    const ordinary = v.sequenceSlotChoices("long", longSlots(), list, pres4, locked);
+    expect(targets.map((t) => ordinary.get(t))).toEqual([[], [], []]);
+    // D. joint screening: every target has real choices, and each is still strict about itself.
+    const joint = v.sequenceSlotChoices("long", longSlots(), list, pres4, locked, undefined, [], targets);
+    for (const t of targets) {
+      const ids = joint.get(t)!;
+      expect(ids.length).toBeGreaterThan(0);
+      expect(ids).not.toContain(pres(list[t])); // no change is not a choice
+      expect(ids).not.toContain(pres(list[t - 1])); // its own repeat stays forbidden
+      expect(ids).not.toContain(pres(list[t + 1]));
+    }
+    // The call it made (then kept everything) offered all three targets together.
+    expect(h.calls).toHaveLength(1);
+    expect(Object.keys(h.calls[0].schema.properties.changes.properties)).toEqual(targets.map(String));
+  });
+
+  test("E-I. ONE call receives all three targets; the combined edit is strictly valid, every target changed, saved atomically", async () => {
+    let n = -1;
+    const { job } = seed((plans) => void (n = plantHolds(plans.long, "long")));
+    const before = [...planned.plans.long];
+    h.failPlanted = true;
+    expect(await runJob(job.id)).toBe("preview_gate");
+    const targets = [n + 1, n + 3, n + 5];
+    // E. one call, all three targets, with the structural repair wording.
+    expect(h.calls).toHaveLength(1);
+    const offered = h.calls[0].schema.properties.changes.properties;
+    expect(Object.keys(offered)).toEqual(targets.map(String));
+    expect(h.calls[0].input).toContain("STRUCTURAL EDIT REPAIR");
+    expect(h.calls[0].input).toContain("Every target slot must change.");
+    const list = shots(job.id);
+    // F, H. each target took one of its offered existing presentations; each changed.
+    for (const t of targets) {
+      expect(offered[String(t)].enum).toContain(pres(list[t]));
+      expect(pres(list[t])).not.toBe(pres(list[t - 1]));
+      expect(pres(list[t])).not.toBe(HOLD_ASSETS.long[(t - n - 1) / 2] + ":base");
+    }
+    // Every other slot is exactly as acquired.
+    list.forEach((s, i) => !targets.includes(i) && expect(pres(s)).toBe(i >= n && i < n + 6 ? HOLD_ASSETS.long[Math.floor((i - n) / 2)] + ":base" : pres(before[i])));
+    // G. the combined edit passes the ordinary strict check, with no exemption.
+    expect(() => strictlyValid(job.id, "long")).not.toThrow();
+    expect(v.adjacentRepeatTargets(v.storedEdit(list))).toEqual([]);
+    // I. saved as one: the job waits at the preview, charged one planning call.
+    const j = getJob(job.id)!;
+    expect([j.state, j.previewApproved]).toEqual(["awaiting_preview", false]);
+    expect(j.spent).toBeCloseTo(1 + imageSpend() + PRICING.openai.visualPlan);
+  });
+
+  test("a combination that is not valid together: one call, charged once, strict validation rejects it, nothing saved", async () => {
+    let n = -1;
+    const { job } = seed((plans) => void (n = plantHolds(plans.long, "long")));
+    h.failPlanted = true;
+    h.partial = true; // two targets change, the third keeps its broken hold
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(runJob(job.id)).rejects.toThrow(ARCHIVE_HOLD_REPAIR_FAILED);
+      expect(logged).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`kind=long: .*slot ${n + 5} .*repeats slot ${n + 4}`)));
+    } finally {
+      logged.mockRestore();
+    }
+    expect(h.calls).toHaveLength(1);
+    const j = getJob(job.id)!;
+    expect(j.error).toBe(ARCHIVE_HOLD_REPAIR_FAILED);
+    expect(j.preview).toBeNull();
+    expect(j.spent).toBeCloseTo(1 + imageSpend() + PRICING.openai.visualPlan);
+    // No partial edit: all three holds are exactly as acquired.
+    const list = shots(job.id);
+    for (let k = 0; k < 6; k++) expect(pres(list[n + k])).toBe(HOLD_ASSETS.long[Math.floor(k / 2)] + ":base");
+  });
+
+  test("a target that can never change: no call, no charge, the edit unchanged, the job stops safely", async () => {
+    let n = -1;
+    const { job } = seed((plans) => {
+      n = plantHolds(plans.long, "long");
+      plans.long[n + 3].wantsMotion = true; // a motion slot is never changed by a repair
+    });
+    h.failPlanted = true;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(runJob(job.id)).rejects.toThrow(ARCHIVE_HOLD_REPAIR_FAILED);
+    logged.mockRestore();
+    expect(h.calls).toEqual([]);
+    const j = getJob(job.id)!;
+    expect(j.spent).toBeCloseTo(1 + imageSpend()); // no repair charge
+    expect(j.preview).toBeNull();
+    const list = shots(job.id);
+    for (let k = 0; k < 6; k++) expect(pres(list[n + k])).toBe(HOLD_ASSETS.long[Math.floor(k / 2)] + ":base");
+  });
+
+  test("joint screening on a tiny film: a target with genuinely no replacement has none; the other stays strict about itself", () => {
+    // A A | B B on four slots with only those two presentations.
+    const base = structuredClone(planned.plans.long.slice(0, 4));
+    const make = (s: Shot, assetId: string, edit: "new" | "reuse", assetShot?: number): Shot => {
+      const out: Shot = { ...s, assetId, presentation: "base", truth: "reconstruction", archiveQuery: `q ${assetId}`, edit, wantsMotion: false, motionPriority: 0 };
+      delete out.focus;
+      if (assetShot === undefined) delete out.assetShot;
+      else out.assetShot = assetShot;
+      return out;
+    };
+    const tiny = [make(base[0], "L90", "new"), make(base[1], "L90", "reuse", 0), make(base[2], "L91", "new"), make(base[3], "L91", "reuse", 2)];
+    const slots = longSlots().slice(0, 4);
+    const p = v.storedPresentations(tiny);
+    const locked = targetLocks(tiny, [1, 3]);
+    const joint = v.sequenceSlotChoices("long", slots, tiny, p, locked, undefined, [], [1, 3]);
+    // Slot 1 could only take L91:base, which repeats slot 2: no choice. Slot 3 may take L90:base.
+    expect(Object.fromEntries(joint)).toEqual({ 1: [], 3: ["L90:base"] });
+    // The ordinary screening offers neither.
+    expect(Object.fromEntries(v.sequenceSlotChoices("long", slots, tiny, p, locked))).toEqual({ 1: [], 3: [] });
+  });
+
+  test("the Film #4 single hold is unchanged, and ordinary one-slot screening of a valid edit is identical with or without the joint option", async () => {
+    let n = -1;
+    const { job } = seed((plans) => void (n = plantHold(plans.long, "long")));
+    h.failPlanted = true;
+    expect(await runJob(job.id)).toBe("preview_gate");
+    expect(h.calls).toHaveLength(1);
+    expect(Object.keys(h.calls[0].schema.properties.changes.properties)).toEqual([String(n + 1)]);
+    expect(() => strictlyValid(job.id, "long")).not.toThrow();
+    // Ordinary callers pass no joint targets: the same choices as before for every slot.
+    const list = shots(job.id);
+    const p = v.storedPresentations(list);
+    const locked = new Map(list.filter((s) => s.wantsMotion).map((s) => [s.index, "motion"] as [number, string]));
+    const ordinary = v.sequenceSlotChoices("long", longSlots(), list, p, locked);
+    expect(v.sequenceSlotChoices("long", longSlots(), list, p, locked, undefined, [], [])).toEqual(ordinary);
+    expect([...ordinary.values()].some((ids) => ids.length)).toBe(true);
   });
 });
 
