@@ -2436,13 +2436,15 @@ function graphicPrompt(world: StoryWorld, story: Story, purpose: string, mustSho
 }
 
 // Candidate queries for one archive shot, ordered specific-to-broad so a narrow
-// miss can still find real material before we reconstruct: event identifiers /
-// proper nouns first, then the moment query, then title+year, then place+year.
-// A bare place-only query is deliberately omitted - it returns unrelated modern
-// location photography. Deduped and order-preserving.
+// miss can still find real material before we reconstruct: the shot's own short
+// anchor query first (Commons search needs every word, so a long descriptive
+// query often finds nothing), then event identifiers / proper nouns, then the
+// moment query, then title+year, then place+year. A bare place-only query is
+// deliberately omitted - it returns unrelated modern location photography.
+// Deduped and order-preserving.
 export function archiveQueries(story: Story, specific: string): string[] {
   const idents = eventIdentifiers(story).slice(0, 4).join(" ");
-  const candidates = [idents, specific, `${story.title} ${story.year}`, `${story.place} ${story.year}`];
+  const candidates = [anchorQuery(specific), idents, specific, `${story.title} ${story.year}`, `${story.place} ${story.year}`];
   const out: string[] = [];
   for (const c of candidates) {
     const q = c.trim();
@@ -2451,22 +2453,67 @@ export function archiveQueries(story: Story, specific: string): string[] {
   return out;
 }
 
+// The shot's short search: its first run of adjacent strong anchors, at most
+// three ("Hughes Glomar Explorer", "K-129 Golf", "Howard Hughes"). Only a run that
+// names the subject on its own, as fetchArchive judges it (two anchors or a
+// numbered identifier): a single plain anchor ("Surabaya") is a place-style
+// search. Empty otherwise.
+export function anchorQuery(query: string | undefined): string {
+  const q = unhyphen(query ?? "");
+  const found = archiveAnchors(q)
+    .map((a) => ({ a, at: q.indexOf(a) }))
+    .filter((x) => x.at >= 0)
+    .sort((x, y) => x.at - y.at);
+  if (!found.length) return "";
+  const run = [found[0]];
+  for (const x of found.slice(1)) {
+    const prev = run[run.length - 1];
+    if (run.length === 3 || !/^\s+$/.test(q.slice(prev.at + prev.a.length, x.at))) break;
+    run.push(x);
+  }
+  return run.length >= 2 || /\d/.test(run[0].a) ? run.map((x) => x.a).join(" ") : "";
+}
+
 const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 const wordsOf = (s: string): string[] => (s.match(/[A-Za-z0-9]+/g) ?? []).map((t) => t.toLowerCase());
 
-// Distinctive proper nouns and identifiers (vessel/callsign-style tokens like
-// "U 137" or "A-12") drawn generically from the story's own words - title, hook
-// and moments - never from the bare place. Place tokens are excluded so a generic
-// photo of the same city cannot look relevant. These anchor both the first
-// archive query and the relevance check.
+// Unicode hyphens (a non-breaking "K‑129") read as a plain hyphen, so an
+// identifier is found however the research typed it.
+const unhyphen = (s: string): string => s.replace(/[‐-―−]/g, "-");
+const ROMAN = /^[IVXLCDM]+$/;
+
+// Title Case text ("The CIA Tried to Raise a Soviet Submarine") capitalises verbs
+// and nouns alike, so its capitals say nothing about proper nouns.
+function titleCased(s: string): boolean {
+  const long = s.match(/\b[A-Za-z][A-Za-z']{3,}\b/g) ?? [];
+  return long.length >= 2 && long.filter((w) => /^[A-Z]/.test(w)).length / long.length >= 0.7;
+}
+
+// Distinctive identifiers (vessel/callsign-style tokens like "U 137", "A-12" or
+// "K-129"), acronyms ("CIA") and proper nouns drawn generically from the story's
+// own words - title, hook and moments - never from the bare place. A proper noun
+// is a capitalised word inside a sentence of ordinary prose (not its first word,
+// not Title Case text), ranked by how often the story names it. Place tokens are
+// excluded so a generic photo of the same city cannot look relevant. These
+// anchor both an archive query and the relevance check.
 export function eventIdentifiers(story: Story): string[] {
-  const text = [story.title, story.hook, ...story.moments.map((m) => `${m.title} ${m.detail}`)].join(" ");
+  const segments = [story.title, story.hook, ...story.moments.flatMap((m) => [m.title, m.detail])].map((s) => unhyphen(s ?? ""));
+  const text = segments.join(" ");
   const placeTokens = new Set(wordsOf(story.place));
-  const proper = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
   const idents = (text.match(/\b[A-Za-z]{1,4}[-\s]?\d{1,4}\b/g) ?? []).filter((m) => identifierPrefix(m.match(/^[A-Za-z]+/)![0]));
+  const acronyms = (text.match(/\b[A-Z]{3,6}\b/g) ?? []).filter((a) => !ROMAN.test(a));
+  const named = new Map<string, number>();
+  for (const seg of segments.filter((s) => !titleCased(s))) {
+    for (const sentence of seg.split(/(?<=[.!?;:])\s+/)) {
+      (sentence.match(/\b[A-Za-z][A-Za-z']*\b/g) ?? []).forEach((w, i) => {
+        if (i > 0 && /^[A-Z][a-z]{2,}$/.test(w)) named.set(w, (named.get(w) ?? 0) + 1);
+      });
+    }
+  }
+  const proper = [...named].sort((a, b) => b[1] - a[1]).map(([w]) => w); // stable: first mention wins a tie
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const raw of [...idents, ...proper]) {
+  for (const raw of [...idents, ...acronyms, ...proper]) {
     const clean = raw.trim();
     const key = norm(clean);
     if (key.length < 3 || seen.has(key)) continue;
@@ -2519,7 +2566,7 @@ const GENERIC_ANCHOR = new Set([
 // category words. An empty list means nothing distinctive could be derived, and
 // the story-level relevance check alone applies (the previous behaviour).
 export function archiveAnchors(query: string | undefined): string[] {
-  const q = query ?? "";
+  const q = unhyphen(query ?? "");
   const idents = (q.match(/\b[A-Za-z]{1,4}[-\s]?\d{1,4}\b/g) ?? []).filter((m) => {
     const letters = m.match(/^[A-Za-z]+/)![0];
     return identifierPrefix(letters) && !GENERIC_ANCHOR.has(letters.toLowerCase());
@@ -2583,6 +2630,43 @@ ${note}
 Preserve everything the correction does not affect. Do not treat this note as permission to invent new historical details, change the shot's narrative purpose, change the recurring subject, change the period or location, add unrelated objects or people, or redesign the composition unnecessarily.`;
 }
 
+// One owner asset's archive search: every query of archiveQueries, specific to
+// broad, stopping at the first file fetchArchive accepts (which writes it to
+// archive/<film>-<owner slot>.jpg). Every candidate, whichever query found it,
+// must also match this shot's own anchors and must not be bytes another asset
+// already owns. Nothing is generated and the shot is not changed.
+async function searchArchive(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger): Promise<{ path: string; credit: string } | null> {
+  if (!shot.archiveQuery) return null;
+  const archiveRel = `archive/${kind}-${String(shot.index).padStart(2, "0")}.jpg`;
+  const dest = inStory(story.slug, archiveRel);
+  const relevance = relevanceTerms(story);
+  const owner = archiveOwner(kind, shot);
+  const opts = {
+    anchors: archiveAnchors(shot.archiveQuery),
+    isDuplicate: (hash: string) => ledger.has(hash) && ledger.get(hash) !== owner,
+  };
+  for (const q of archiveQueries(story, shot.archiveQuery)) {
+    const got = await fetchArchive(q, dest, relevance, opts).catch((e: any) => {
+      console.warn(`[archive] query "${q}" errored: ${e?.message || e}`);
+      return null;
+    });
+    if (got) {
+      if (got.sha256) ledger.set(got.sha256, owner);
+      return { path: archiveRel, credit: got.credit };
+    }
+  }
+  return null;
+}
+
+// The final visual repair's archive-only second search for an owner asset that
+// was planned as archive and fell back to a reconstruction (archiveQuery kept).
+// Live only. It never generates or changes anything but the archive file it
+// writes: the caller reviews that file and decides whether to bind it.
+export async function recoverArchiveStill(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger): Promise<{ path: string; credit: string } | null> {
+  if (config.mode !== "live" || shot.edit !== "new") return null;
+  return searchArchive(story, kind, shot, ledger);
+}
+
 // A first acquisition names the still after the owner slot. A regeneration passes
 // `stillPath`, the asset's existing stored still: the file is the asset's
 // identity, so it is replaced in place even after a sequence revision moved
@@ -2604,30 +2688,9 @@ export async function acquireStill(
 
   if (shot.truth === "archive") {
     if (config.mode === "live" && shot.archiveQuery) {
-      const archiveRel = `archive/${kind}-${String(shot.index).padStart(2, "0")}.jpg`;
-      const dest = inStory(story.slug, archiveRel);
-      // Try the moment-specific query first, then progressively broader ones. A
-      // single narrow query (place + year + subject words) often returns nothing,
-      // which is why every archive shot was falling back to reconstruction.
-      // Every candidate, whichever query found it, must also match this shot's own
-      // anchors and must not be bytes another asset already owns.
-      const relevance = relevanceTerms(story);
-      const owner = archiveOwner(kind, shot);
-      const opts = {
-        anchors: archiveAnchors(shot.archiveQuery),
-        isDuplicate: (hash: string) => ledger.has(hash) && ledger.get(hash) !== owner,
-      };
-      let got = null;
-      for (const q of archiveQueries(story, shot.archiveQuery)) {
-        got = await fetchArchive(q, dest, relevance, opts).catch((e: any) => {
-          console.warn(`[archive] query "${q}" errored: ${e?.message || e}`);
-          return null;
-        });
-        if (got) break;
-      }
+      const got = await searchArchive(story, kind, shot, ledger);
       if (got) {
-        if (got.sha256) ledger.set(got.sha256, owner);
-        shot.path = archiveRel;
+        shot.path = got.path;
         shot.mediaType = "image";
         shot.source = got.credit;
         shot.wantsMotion = false;

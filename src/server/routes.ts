@@ -23,7 +23,7 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob, resumeFinalVisualRepairForJob } from "../production/generate.ts";
 
 const TEXT_QA_BUSY = "Automatic Text QA is running. Wait for it to finish.";
 const ASSET_QA_BUSY = "Automatic Asset QA is running. Wait for it to finish.";
@@ -544,6 +544,25 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const accepted = acceptFinalForJob(id);
     enqueueJob(id);
     return { job: toPublic(accepted) };
+  });
+
+  // Run the ONE automatic final visual archive repair on a job that reached the
+  // finished-film gate before that repair existed. No UI: an explicit, authorized
+  // call only. Optional approvedMax raises the ceiling first (never past the max);
+  // optional kind repairs that one film and leaves the other untouched.
+  const finalVisualRepair = z.object({ approvedMax: z.number().positive().optional(), kind: z.enum(["long", "short"]).optional() });
+  app.post("/api/jobs/:id/final-visual-repair", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!getJob(id)) return reply.code(404).send({ error: "Job not found" });
+    const parsed = finalVisualRepair.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'approvedMax must be a positive number and kind "long" or "short".' });
+    try {
+      const job = resumeFinalVisualRepairForJob(id, parsed.data.approvedMax, parsed.data.kind);
+      enqueueJob(id);
+      return { job: toPublic(job) };
+    } catch (e: any) {
+      return reply.code(400).send({ error: e?.message || "This job cannot be repaired." });
+    }
   });
 
   // Retry a failed job in place: reuse the same job id so completed (and paid)

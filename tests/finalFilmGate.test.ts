@@ -62,6 +62,12 @@ vi.mock("../src/production/mockAssets.ts", async (orig) => {
   };
 });
 
+// Never Commons: a final visual repair here would only search archive, and finds none.
+vi.mock("../src/production/wikimedia.ts", async (orig) => ({
+  ...(await orig<typeof import("../src/production/wikimedia.ts")>()),
+  fetchArchive: vi.fn(async () => null),
+}));
+
 vi.mock("../src/render/contactSheet.ts", async (orig) => ({
   ...(await orig<typeof import("../src/render/contactSheet.ts")>()),
   sampledFrames: (videoPath: string, kind: "long" | "short") => {

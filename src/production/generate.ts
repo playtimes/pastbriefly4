@@ -28,6 +28,9 @@ type AssetQaResult = Extract<AssetQaState, { status: "done" }>;
 // (a manual revision, or a QA step called on its own) invalidates the film's result.
 interface QaRunContext {
   qaRun?: boolean;
+  // The final visual repair: a saved revision keeps the job's state, and graphics
+  // are out of bounds (a graphic slot is locked, a graphic is never offered).
+  final?: boolean;
 }
 import { buildFilm } from "../app/visualReview/model.ts";
 import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type CleanupPattern } from "../app/visualReview/board.ts";
@@ -40,6 +43,7 @@ import { plainDashes } from "./text.ts";
 import {
   planVisuals,
   acquireStill,
+  recoverArchiveStill,
   seedArchiveLedger,
   ensureMaster,
   acquireMotion,
@@ -88,6 +92,8 @@ import {
   FINAL_SPECIALISTS,
   finalFilmResults,
   finalQaIssues,
+  issueAssets,
+  cellSlots,
   reviewFinalFactual,
   reviewFinalVisual,
   type FinalFilmInput,
@@ -95,7 +101,10 @@ import {
   type FinalFilmQaRecord,
   type FinalFilmReviewer,
   type FinalSpecialist,
+  type FinalVisualRepair,
+  type VisualAudit,
 } from "./finalFilmQa.ts";
+import { cellTimes } from "../render/contactSheet.ts";
 
 interface Scratch {
   research?: ResearchPackage;
@@ -404,6 +413,13 @@ const FILM_NAME: Record<FinalFilmKind, string> = { long: "Long", short: "Short" 
 //    the finished files and the findings kept. Mock never calls a reviewer.
 async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans: RenderPlans): Promise<void> {
   step(job.id, "finishing", "Checking final films", scratch);
+  // A recovered archive already bound but not yet rendered (a restart during the
+  // final visual repair): render that film first, so its file matches its edit.
+  const pending = scratch.finalFilmQa?.visualRepair?.rerender;
+  if (pending?.length) {
+    await renderRepaired(job, story, scratch, pending);
+    plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category));
+  }
   const finals = (["long", "short"] as const).map((kind) => {
     const rel = `renders/${kind}.mp4`;
     const file = inStory(story.slug, rel);
@@ -430,6 +446,19 @@ async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans
     }
     const results = finalFilmResults(qa);
     if (results.long?.decision !== "PASS" || results.short?.decision !== "PASS") {
+      // The one automatic recovery for a visual HUMAN_REVIEW caused by failed
+      // archive acquisition; then the changed film is checked again from the top.
+      const durations = { long: finals[0].p.durationSec, short: finals[1].p.durationSec };
+      const repair = finalVisualRepairPlan(scratch, durations);
+      if (repair && round((scratch.spent ?? 0) + repair.maxUsd) > job.approvedMax + 1e-9) {
+        console.warn(`Final visual repair skipped job=${job.id}: it may cost up to $${repair.maxUsd.toFixed(2)}, beyond the approved maximum.`);
+      } else if (repair) {
+        const changed = await repairFinalVisuals(job, story, scratch, repair, durations);
+        if (changed.length) {
+          await renderRepaired(job, story, scratch, changed);
+          return finishFilms(job, story, scratch, renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category)));
+        }
+      }
       updateJob(job.id, { state: "awaiting_final", step: "finishing", message: "Final films need review", scratch });
       return;
     }
@@ -508,6 +537,351 @@ export function acceptFinalForJob(jobId: string): JobRecord {
   if (job.state !== "awaiting_final" || !scratch.finalFilmQa) throw new Error("Only finished films waiting for review can be accepted.");
   scratch.finalFilmQa = { ...scratch.finalFilmQa, accepted: true };
   updateJob(jobId, { scratch, state: "queued", message: "Queued", error: null });
+  return getJob(jobId)!;
+}
+
+// ---------------------------------------------------------------------------
+// Final visual repair: ONE bounded attempt after a finished-film visual
+// HUMAN_REVIEW. First the flagged assets that were planned as archive but fell
+// back to generated reconstructions get one more archive search; then each
+// flagged film gets at most ONE existing-media sequence revision of the issue's
+// remaining slots, checked once by the existing Director verification.
+// ---------------------------------------------------------------------------
+
+const filmShots = (s: Scratch, kind: FinalFilmKind): PlannedShot[] => (kind === "long" ? s.longShots : s.shortShots) ?? [];
+
+// The owner shots a film's final visual HUMAN_REVIEW implicates that fell back
+// from archive. The issue's own cells map to the slots they sampled (cellTimes
+// and the saved edit, never the reason text); an asset qualifies when its owner
+// was planned as archive (archiveQuery kept), is now a reconstruction on its
+// generated still, and every use shows its base (an archive has no crops).
+function archiveFallbacksInIssues(scratch: Scratch, kind: FinalFilmKind, durationSec: number): PlannedShot[] {
+  const visual = scratch.finalFilmQa?.[kind].visual;
+  if (visual?.decision !== "HUMAN_REVIEW") return [];
+  const shots = filmShots(scratch, kind);
+  const ids = issueAssets(shots, cellTimes(durationSec, kind), visual.issues.flatMap((i) => i.cells));
+  return ids.flatMap((id) => {
+    const owner = shots.find((s) => s.assetId === id && s.edit === "new");
+    const uses = shots.filter((s) => s.assetId === id);
+    return owner?.archiveQuery && owner.truth === "reconstruction" && owner.path?.startsWith("images/") && uses.every((s) => s.presentation === "base") ? [owner] : [];
+  });
+}
+
+interface RepetitionTarget {
+  slot: number;
+  cells: number[];
+  families: string[]; // the audit's repeated families that include these cells
+  seen: string[]; // the audit's own observation of these cells
+}
+
+// The slots a visual issue's cells sampled that a sequence revision may move:
+// from the structured cells only (cellSlots), never the reason text; not a
+// motion slot (a revision never changes one), not an information graphic (it is
+// intentional, not interchangeable b-roll), not an asset the archive recovery
+// just replaced, and never two adjacent slots (the later is left as it is), so
+// individually legal moves cannot form a new adjacent repeat together.
+function repetitionTargets(shots: PlannedShot[], audit: VisualAudit, durationSec: number, kind: FinalFilmKind, recovered: Set<string>): RepetitionTarget[] {
+  const cells = [...new Set(audit.issues.flatMap((i) => i.cells))].sort((a, b) => a - b);
+  const bySlot = new Map<number, number[]>();
+  for (const c of cellSlots(shots, cellTimes(durationSec, kind), cells)) {
+    const shot = shots.find((s) => s.index === c.slot);
+    if (!shot || shot.wantsMotion || shot.truth === "graphic" || recovered.has(c.assetId)) continue;
+    bySlot.set(c.slot, [...(bySlot.get(c.slot) ?? []), c.cell]);
+  }
+  const out: RepetitionTarget[] = [];
+  for (const [slot, mine] of [...bySlot].sort((a, b) => a[0] - b[0])) {
+    if (out.at(-1)?.slot === slot - 1) continue;
+    out.push({
+      slot,
+      cells: mine,
+      families: audit.families.filter((f) => f.cells.some((c) => mine.includes(c))).map((f) => f.name),
+      seen: audit.cellObservations.filter((o) => mine.includes(o.cell)).map((o) => o.description),
+    });
+  }
+  return out;
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+// The one revision's Director feedback, from the audit's structured evidence.
+function repetitionFeedback(targets: RepetitionTarget[]): string {
+  return [
+    "FINAL WHOLE-FILM REPETITION REPAIR",
+    "",
+    "The finished film keeps returning to the same pictures. Move each target slot to a less-used existing presentation that genuinely supports that slot's narration, and do not return to the repeated visual family named for it. Do not move several targets to the same new picture: that only creates a new repetition.",
+    "",
+    ...targets.map((t) => `- Slot ${pad2(t.slot)}: repeated family ${t.families.map((f) => `"${f}"`).join(", ") || "(the flagged repetition)"}; the finished film shows: ${t.seen.join(" / ") || "(no observation)"}`),
+    "",
+    `Target only these slots: ${targets.map((t) => pad2(t.slot)).join(", ")}.`,
+    "",
+    "KEEP ALL OTHER SLOTS.",
+  ].join("\n");
+}
+
+export interface FinalVisualRepairPlan {
+  films: { film: FinalFilmKind; assets: string[]; sequence: boolean }[];
+  maxUsd: number; // Pixel QA batches, one revision + one verification, one new visual audit, per film
+}
+
+// Whether the findings are the repairable class: live, not accepted, never
+// attempted, BOTH factual audits PASS, and a visual HUMAN_REVIEW whose cells show
+// archive fallbacks or movable slots. null otherwise. `durations` are the
+// reviewed files' own. `only` (or a saved repairOnly) limits it to that film. The
+// cost is the worst case, preflighted before anything.
+function finalVisualRepairPlan(scratch: Scratch, durations: Record<FinalFilmKind, number>, only = scratch.finalFilmQa?.repairOnly): FinalVisualRepairPlan | null {
+  const qa = scratch.finalFilmQa;
+  if (config.mode !== "live" || !qa || qa.accepted || qa.visualRepair) return null;
+  if (qa.long.factual?.decision !== "PASS" || qa.short.factual?.decision !== "PASS" || !qa.long.visual || !qa.short.visual) return null;
+  const films = (["long", "short"] as const)
+    .filter((film) => (!only || film === only) && qa[film].visual!.decision === "HUMAN_REVIEW")
+    .map((film) => ({
+      film,
+      assets: archiveFallbacksInIssues(scratch, film, durations[film]).map((s) => s.assetId),
+      sequence: repetitionTargets(filmShots(scratch, film), qa[film].visual!, durations[film], film, new Set()).length > 0,
+    }))
+    .filter((f) => f.assets.length || f.sequence);
+  if (!films.length) return null;
+  const perFilm = (f: FinalVisualRepairPlan["films"][number]) =>
+    chunk(f.assets).reduce((s, b) => s + assetReviewUsd(b.length), 0) + (f.sequence ? 2 * PRICING.openai.visualPlan : 0) + PRICING.openai.finalVisualReview;
+  return { films, maxUsd: round(films.reduce((sum, f) => sum + perFilm(f), 0)) };
+}
+
+// An asset's recovered archive replaces its reconstruction in every use: the
+// owner shows the archive file, truth and credit follow, and any motion made from
+// the reconstruction is unbound (archive never moves). Reuses follow the owner
+// through resolveReuse.
+function bindArchive(shots: PlannedShot[], assetId: string, path: string, credit: string): void {
+  for (const s of shots) {
+    if (s.assetId !== assetId) continue;
+    s.truth = "archive";
+    s.source = credit;
+    s.mediaType = "image";
+    s.wantsMotion = false;
+    s.motionPriority = 0;
+    delete s.motionPath;
+    if (s.edit === "new") s.path = path;
+  }
+}
+
+// The whole attempt: saved first (so it never runs twice, even after a restart),
+// then the archive stage, then one sequence stage per flagged film. Returns the
+// films whose pictures changed, to re-render and audit again (empty: none).
+async function repairFinalVisuals(job: JobRecord, story: Story, scratch: Scratch, plan: FinalVisualRepairPlan, durations: Record<FinalFilmKind, number>): Promise<FinalFilmKind[]> {
+  const qa = scratch.finalFilmQa!;
+  const audits = { long: qa.long.visual!, short: qa.short.visual! }; // the findings being repaired
+  const repair: FinalVisualRepair = { attempted: true, tried: [], recovered: [], rejected: [] };
+  qa.visualRepair = repair;
+  step(job.id, "finishing", "Repairing repeated visuals", scratch);
+  const changed = new Set(await recoverFinalArchive(job, story, scratch, plan, repair));
+  for (const f of plan.films) {
+    if (f.sequence && (await diversifyFinalSequence(job, story, scratch, f.film, audits[f.film], durations[f.film], repair))) changed.add(f.film);
+  }
+  return (["long", "short"] as const).filter((k) => changed.has(k));
+}
+
+// The archive stage. Each implicated asset gets ONE more archive search (archive
+// only: nothing is generated and no motion is made). A found file must pass the
+// existing Pixel Asset QA review (read only: an archive can only PASS or go to a
+// person) before it replaces anything; otherwise it is deleted and the
+// reconstruction stays. The accepted assets are bound on a copy of the film's
+// edit, which must pass the usual reuse, Film Grammar and strict edit checks;
+// then the edit, that film's invalidated visual audit and its pending render are
+// saved together. Returns the films it changed.
+async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratch, plan: FinalVisualRepairPlan, repair: FinalVisualRepair, reviewer: AssetReviewer = openAiAssetReview): Promise<FinalFilmKind[]> {
+  const qa = scratch.finalFilmQa!;
+  const ledger = seedArchiveLedger(story, films(scratch));
+  const found: { film: FinalFilmKind; assetId: string; path: string; credit: string }[] = [];
+  for (const { film, assets } of plan.films) {
+    for (const assetId of assets) {
+      const owner = filmShots(scratch, film).find((s) => s.assetId === assetId && s.edit === "new")!;
+      repair.tried.push({ film, assetId });
+      const got = await recoverArchiveStill(story, film, owner, ledger);
+      if (got) found.push({ film, assetId, ...got });
+    }
+  }
+  const reject = (f: (typeof found)[number], reason: string) => {
+    repair.rejected.push({ film: f.film, assetId: f.assetId, reason });
+    rmSync(inStory(story.slug, f.path), { force: true }); // only the file this search wrote
+  };
+
+  const changed: FinalFilmKind[] = [];
+  for (const film of ["long", "short"] as const) {
+    const mine = found.filter((f) => f.film === film);
+    if (!mine.length) continue;
+    const next = structuredClone(filmShots(scratch, film));
+    for (const f of mine) bindArchive(next, f.assetId, f.path, f.credit);
+    resolveReuse(story, film, next);
+
+    // The existing pixel review of the recovered stills, preflighted and charged as usual.
+    const passed = new Set<string>();
+    const targets = assetQaTargets(film, next).filter((t) => mine.some((f) => f.assetId === t.assetId));
+    for (const batch of chunk(targets)) {
+      const usd = assetReviewUsd(batch.length);
+      budget(job, usd, scratch);
+      let verdicts: ReturnType<typeof readAssetQa>["verdicts"] | undefined;
+      try {
+        const images = batch.map((t) => ({ label: assetImageLabel(t), data: readFileSync(inStory(story.slug, t.path)), mimeType: imageMimeType(t.path) }));
+        const raw = await reviewer({ story, kind: film, targets: batch, images });
+        record(job.id, usd, scratch);
+        verdicts = readAssetQa(batch, raw).verdicts;
+      } catch (e: any) {
+        console.error(`Final visual repair: Asset QA failed job=${job.id} film=${film} error=${e?.message || e}`);
+      }
+      for (const t of batch) {
+        const v = verdicts?.get(t.assetId);
+        if (v?.decision === "PASS") passed.add(t.assetId);
+        else reject(mine.find((f) => f.assetId === t.assetId)!, v?.reason || "Asset QA could not review the recovered archive.");
+      }
+    }
+    if (!passed.size) continue;
+
+    // Only the accepted assets change; the edit must still pass every existing check.
+    const final = structuredClone(filmShots(scratch, film));
+    for (const f of mine.filter((m) => passed.has(m.assetId))) bindArchive(final, f.assetId, f.path, f.credit);
+    try {
+      resolveReuse(story, film, final);
+      assertFilmGrammarPlan(film, final);
+      validateEdit(film, planSlots(film, scratch.scripts![film], scratch.narration![film]!), storedEdit(final), storedPresentations(final));
+    } catch (e: any) {
+      for (const f of mine.filter((m) => passed.has(m.assetId))) reject(f, `The recovered archive does not fit the saved edit: ${e?.message || e}`);
+      continue;
+    }
+    if (film === "long") scratch.longShots = final;
+    else scratch.shortShots = final;
+    for (const f of mine.filter((m) => passed.has(m.assetId))) repair.recovered.push({ film, assetId: f.assetId, source: f.credit });
+    delete qa[film].visual; // it described the old pictures
+    changed.push(film);
+  }
+  if (changed.length) repair.rerender = changed;
+  updateJob(job.id, { scratch, ...(changed.length ? { preview: buildPreview(story, scratch.longShots!, scratch.shortShots!) } : {}) });
+  return changed;
+}
+
+// What a saved sequence revision changed in the job, copied into the finish's
+// scratch (whose final QA record stays the one this attempt is writing).
+function syncRevision(scratch: Scratch, jobId: string): void {
+  const saved = getJob(jobId)!.scratch as Scratch;
+  scratch.longShots = saved.longShots;
+  scratch.shortShots = saved.shortShots;
+  scratch.retainedPresentations = saved.retainedPresentations;
+  scratch.directorQa = saved.directorQa;
+  scratch.spent = saved.spent;
+}
+
+// The sequence stage for ONE film: the issue's remaining slots (repetitionTargets)
+// go to the EXISTING targeted sequence revision, once: every other slot and every
+// motion slot locked, only individually legal existing presentations offered, no
+// call when none is, and the ordinary strict checks before anything is saved.
+// A saved change is then checked ONCE by the existing Director verification; if
+// it flags a changed slot, or cannot answer, the previous edit is put back. The
+// film is marked for re-render (its visual audit cleared) BEFORE the call, so a
+// restart never keeps a stale file; with no change that mark is undone. Returns
+// whether the film's edit changed.
+async function diversifyFinalSequence(
+  job: JobRecord,
+  story: Story,
+  scratch: Scratch,
+  film: FinalFilmKind,
+  audit: VisualAudit,
+  durationSec: number,
+  repair: FinalVisualRepair,
+  reviser: SequenceReviser = openAiSequenceRevision,
+  verifier: DirectorQaReviewer = openAiDirectorVerify,
+): Promise<boolean> {
+  const qa = scratch.finalFilmQa!;
+  const recovered = new Set(repair.recovered.filter((r) => r.film === film).map((r) => r.assetId));
+  const targets = repetitionTargets(filmShots(scratch, film), audit, durationSec, film, recovered);
+  const entry = { film, targets: targets.map((t) => t.slot), changed: [] as number[], outcome: "" };
+  repair.sequence = [...(repair.sequence ?? []), entry];
+  if (!targets.length) {
+    entry.outcome = "No flagged slot can move.";
+    updateJob(job.id, { scratch });
+    return false;
+  }
+  const pendingBefore = !!repair.rerender?.includes(film);
+  const auditBefore = qa[film].visual;
+  const before = structuredClone(filmShots(scratch, film));
+  repair.rerender = [...new Set([...(repair.rerender ?? []), film])];
+  delete qa[film].visual;
+  updateJob(job.id, { scratch });
+
+  let kept = false;
+  try {
+    const r = await reviseStoredSequence(storedFilm(job.id, film, false), film, repetitionFeedback(targets), reviser, entry.targets, undefined, { final: true });
+    syncRevision(scratch, job.id);
+    entry.changed = r.changed;
+    if (!r.changed.length) entry.outcome = r.unresolved.length ? `No change: ${r.unresolved.map((u) => `${pad2(u.slotId)} ${u.reason}`).join("; ")}` : "No change.";
+    else {
+      const usd = PRICING.openai.visualPlan;
+      budget(job, usd, scratch);
+      let flagged: number[] | null = null;
+      try {
+        const saved = storedFilm(job.id, film, false);
+        const raw = await verifier(qaInput(saved, film));
+        record(job.id, usd, scratch);
+        flagged = readDirectorVerify(film, saved.shots, raw).humanReview.map((f) => f.slotId).filter((s) => r.changed.includes(s));
+      } catch (e: any) {
+        entry.outcome = `Director verification failed: ${e?.message || e}`;
+      }
+      if (flagged && !flagged.length) {
+        kept = true;
+        entry.outcome = "Changed and verified.";
+      } else if (flagged) entry.outcome = `Director verification flagged slot ${flagged.map(pad2).join(", ")}; the previous edit is kept.`;
+    }
+  } catch (e: any) {
+    syncRevision(scratch, job.id); // a failed answer is still charged
+    entry.outcome = `Revision not applied: ${e?.message || e}`;
+  }
+  if (!kept) {
+    if (film === "long") scratch.longShots = before;
+    else scratch.shortShots = before;
+    if (!pendingBefore) {
+      if (auditBefore) qa[film].visual = auditBefore;
+      repair.rerender = repair.rerender!.filter((k) => k !== film);
+      if (!repair.rerender.length) delete repair.rerender;
+    }
+  }
+  updateJob(job.id, { scratch, preview: buildPreview(story, scratch.longShots!, scratch.shortShots!) });
+  return kept;
+}
+
+// Re-render only the films whose pictures the repair changed; the finish then
+// checks every file against the contract again. Local work, never charged.
+async function renderRepaired(job: JobRecord, story: Story, scratch: Scratch, kinds: FinalFilmKind[]): Promise<void> {
+  step(job.id, "finishing", "Rendering the repaired film", scratch);
+  const plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category));
+  await renderFilms(
+    storyDir(story.slug),
+    kinds.map((kind) => ({ plan: plans[kind], compositionId: kind === "long" ? "LongVideo" : "ShortVideo", outPath: inStory(story.slug, `renders/${kind}.mp4`) })),
+  );
+  delete scratch.finalFilmQa!.visualRepair!.rerender;
+  updateJob(job.id, { scratch });
+}
+
+// A job that reached the finished-film gate before this repair existed: run the
+// same ONE recovery on it now, when its findings are the repairable class and
+// the approved maximum (optionally raised here, never past the ceiling) covers
+// its worst case. `kind` limits it to that one film (saved as repairOnly, so the
+// other film is never touched; the job may still wait on that film's findings).
+// Requeues the SAME job; the worker resumes at the finished files.
+export function resumeFinalVisualRepairForJob(jobId: string, approvedMax?: number, kind?: FinalFilmKind): JobRecord {
+  const job = getJob(jobId);
+  if (!job) throw new Error("Job not found.");
+  const story = getStory(job.storyId);
+  if (!story) throw new Error("Story not found.");
+  const scratch = job.scratch as Scratch;
+  if (job.state !== "awaiting_final" || !scratch.finalFilmQa) throw new Error("Only finished films waiting for review can be repaired.");
+  const duration = (k: FinalFilmKind) => probeVideo(inStory(story.slug, `renders/${k}.mp4`)).durationSec;
+  const plan = finalVisualRepairPlan(scratch, { long: duration("long"), short: duration("short") }, kind);
+  if (!plan) throw new Error(kind ? `The finished ${FILM_NAME[kind]} has no automatic visual repair available.` : "These finished films have no automatic archive repair available.");
+  const max = approvedMax === undefined ? job.approvedMax : round(approvedMax);
+  if (!Number.isFinite(max)) throw new Error("The approved maximum must be a number.");
+  if (max + 1e-9 < job.approvedMax) throw new Error(`New approved maximum $${max.toFixed(2)} is below the current $${job.approvedMax.toFixed(2)}.`);
+  if (max > config.maxSpendUsd + 1e-9) throw new Error(`New approved maximum $${max.toFixed(2)} exceeds the ceiling $${config.maxSpendUsd.toFixed(2)}.`);
+  const need = round((scratch.spent ?? 0) + plan.maxUsd);
+  if (need > max + 1e-9) throw new Error(`The repair may cost up to $${plan.maxUsd.toFixed(2)}, which needs an approved maximum of at least $${need.toFixed(2)}.`);
+  if (kind) scratch.finalFilmQa = { ...scratch.finalFilmQa, repairOnly: kind };
+  updateJob(jobId, { approvedMax: max, state: "queued", message: "Queued", error: null, ...(kind ? { scratch } : {}) });
   return getJob(jobId)!;
 }
 
@@ -769,6 +1143,7 @@ function storedFilm(jobId: string, kind: "long" | "short", atGate = true) {
 }
 
 const MOTION_LOCK = "a motion slot keeps its visual; changing it needs a visual rebuild";
+const GRAPHIC_LOCK = "an information graphic is intentional and keeps its place in the final repair";
 
 // The bounded revision itself: one Editor repair call over the stored film. With
 // `targets`, every other slot is locked, so only those slots can change (Director
@@ -792,6 +1167,7 @@ async function reviseStoredSequence(
   if (targets) for (const s of slots) if (!targets.includes(s.id)) locked.set(s.id, coordinated ? "outside the coordinated window" : "not a Director QA repair target");
   if (!targets) for (const id of keptSlots(feedback, slots.length)) locked.set(id, "the Director asked to keep this slot");
   for (const s of shots) if (s.wantsMotion) locked.set(s.index, MOTION_LOCK);
+  if (ctx.final) for (const s of shots) if (s.truth === "graphic") locked.set(s.index, GRAPHIC_LOCK);
   if (locked.size >= slots.length) throw new Error("Every slot is locked, so nothing can change.");
   // Normally only presentations the existing checks accept as a one-slot change
   // are offered. In coordinated mode the window's slots move together, so each
@@ -799,6 +1175,10 @@ async function reviseStoredSequence(
   const choices = coordinated
     ? new Map(slots.filter((s) => !locked.has(s.id)).map((s) => [s.id, presentations.map((p) => p.id)] as [number, string[]]))
     : sequenceSlotChoices(kind, slots, shots, presentations, locked, story, pool, joint ? targets : []);
+  if (ctx.final) {
+    const graphic = new Set(presentations.filter((p) => p.truth === "graphic").map((p) => p.id));
+    for (const [id, ids] of choices) choices.set(id, ids.filter((p) => !graphic.has(p)));
+  }
   // A joint repair that cannot change every target could never succeed: no call.
   const stuck = joint ? (targets ?? []).filter((t) => !choices.get(t)?.length) : [];
   if (stuck.length) return { job, changed: [], unresolved: stuck.map((slotId) => ({ slotId, reason: NO_LEGAL_ALTERNATIVE })), choices };
@@ -828,7 +1208,7 @@ async function reviseStoredSequence(
     scratch.directorQa = other;
   }
   const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
-  updateJob(job.id, { scratch, spent: scratch.spent ?? 0, preview, state: "awaiting_preview", previewApproved: false, error: null });
+  updateJob(job.id, ctx.final ? { scratch, spent: scratch.spent ?? 0, preview } : { scratch, spent: scratch.spent ?? 0, preview, state: "awaiting_preview", previewApproved: false, error: null });
   return { job: getJob(job.id)!, changed: revised.changed, unresolved: revised.unresolved, choices };
 }
 

@@ -209,6 +209,18 @@ quality across multiple fresh stories.
     Each film runs through real Autopilot behavior; the human steps in only for
     genuine exceptions.
 
+    Film #5 (Project Azorian) exposed:
+    - Commons query recall failure: 0 of 6 archives found, from Title Case story
+      identifiers, over-long shot queries and PDF-dominated results. Fixed with
+      an anchor-first short query, image-only search, better identifiers and
+      paced, identified requests.
+    - the need for ONE bounded final visual repair: after a visual
+      HUMAN_REVIEW, flagged archive fallbacks get one more archive search and
+      the existing Pixel Asset QA; the flagged remaining slots get at most one
+      existing-media sequence revision per film, checked once by the existing
+      Director verification; then only the changed film is re-rendered and
+      audited once more. It never repeats.
+
 ### Later
 
 After Stage 14 validation:

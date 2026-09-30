@@ -67,9 +67,16 @@ export interface SampledFrame {
 // each equal slice), each as its own JPEG. One ffmpeg call seeks each sample as
 // its own input and writes one small JPEG per sample into a private temporary
 // folder outside story media; the folder is removed on success and on failure.
-export function sampledFrames(videoPath: string, kind: "long" | "short", tmpRoot = os.tmpdir()): SampledFrame[] {
+// The time of every sampled cell of one film of this duration, in cell order
+// (cell n is times[n - 1]): what sampledFrames samples, so a cell a reviewer
+// names maps back to exactly the frame it saw.
+export function cellTimes(durationSec: number, kind: "long" | "short"): number[] {
   const grid = CONTACT_SHEET[kind];
-  const times = sampleTimes(probeVideo(videoPath).durationSec, grid.cols * grid.rows);
+  return sampleTimes(durationSec, grid.cols * grid.rows);
+}
+
+export function sampledFrames(videoPath: string, kind: "long" | "short", tmpRoot = os.tmpdir()): SampledFrame[] {
+  const times = cellTimes(probeVideo(videoPath).durationSec, kind);
   const dir = mkdtempSync(path.join(tmpRoot, "pb4-frames-"));
   try {
     const inputs = times.flatMap((t) => ["-threads", "1", "-ss", t.toFixed(3), "-i", videoPath]);

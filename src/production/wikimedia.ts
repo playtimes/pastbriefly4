@@ -28,6 +28,20 @@ export interface ArchiveOptions {
 
 const OK_LICENSE = /^(cc0|cc[ -]by(?![ -]?nc|[ -]?nd)|public domain|pd-|no restrictions)/i;
 
+// Wikimedia asks automated clients to identify themselves and not to burst.
+export const COMMONS_USER_AGENT = "PastBriefly/4 (historical documentary production; Wikimedia Commons archive search)";
+const HEADERS = { "User-Agent": COMMONS_USER_AGENT };
+
+// A fixed gap between Commons searches (PB4_COMMONS_GAP_MS, default 1s; the
+// tests set 0). No retry and no backoff: a refused search is simply no result.
+export const commonsPacing = { gapMs: Number(process.env.PB4_COMMONS_GAP_MS ?? 1000) };
+let lastSearchAt = 0;
+async function pace(): Promise<void> {
+  const wait = lastSearchAt + commonsPacing.gapMs - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastSearchAt = Date.now();
+}
+
 const nrm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 // Text metadata Wikimedia gives us for one result, flattened for matching.
@@ -64,7 +78,7 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
   api.search = new URLSearchParams({
     action: "query",
     generator: "search",
-    gsrsearch: query,
+    gsrsearch: `${query} filetype:bitmap`, // photos and scans only: PDFs and documents never crowd them out
     gsrnamespace: "6",
     gsrlimit: "8",
     prop: "imageinfo",
@@ -74,12 +88,21 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
     origin: "*",
   }).toString();
 
-  const res = await fetch(api, { signal: AbortSignal.timeout(15000) });
+  await pace();
+  const res = await fetch(api, { headers: HEADERS, signal: AbortSignal.timeout(15000) });
   if (!res.ok) {
-    console.warn(`[archive] search HTTP ${res.status} for "${query}"`);
+    console.warn(`[archive] search failed: HTTP ${res.status}${res.status === 429 ? " (rate limited)" : ""} for "${query}"; not a zero-result search`);
     return null;
   }
-  const pages: any[] = Object.values((await res.json())?.query?.pages ?? {});
+  let data: any;
+  try {
+    data = await res.json();
+  } catch {
+    console.warn(`[archive] search failed: non-JSON response (likely rate limited) for "${query}"; not a zero-result search`);
+    return null;
+  }
+  const pages: any[] = Object.values(data?.query?.pages ?? {});
+  if (!pages.length) console.log(`[archive] "${query}": 0 results`);
 
   let badMime = 0;
   let badLicense = 0;
@@ -124,7 +147,7 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
     let bytes: Buffer;
     try {
       assertPublicUrl(assetUrl);
-      const media = await fetch(assetUrl, { signal: AbortSignal.timeout(20000) });
+      const media = await fetch(assetUrl, { headers: HEADERS, signal: AbortSignal.timeout(20000) });
       if (!media.ok) continue;
       bytes = Buffer.from(await media.arrayBuffer());
     } catch {
@@ -137,7 +160,7 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
       continue;
     }
     await writeFile(outPath, bytes);
-    const credit = stripHtml(meta.Artist?.value || meta.Credit?.value || "Wikimedia Commons");
+    const credit = commonsCredit(meta.Artist?.value || meta.Credit?.value || "Wikimedia Commons");
     console.log(`[archive] accepted: ${page.title}${matched ? ` (matched "${matched}", query "${query}")` : ` (query "${query}")`}`);
     return { sourcePage: info.descriptionurl || "", assetUrl, credit: `${credit} · ${license}`, license, localPath: outPath, sha256 };
   }
@@ -145,6 +168,20 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
   return null;
 }
 
-function stripHtml(s: string): string {
-  return s.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 80);
+// The author text of a Commons Artist / Credit field. Commons templates can render
+// the same text in consecutive elements ("<span>Unknown author</span><span>Unknown
+// author</span>"), which would read "Unknown authorUnknown author" once the tags
+// go: an element repeating the one right before it is dropped. Nothing is added or
+// inferred, and plain text (a name that repeats a word) is left as it is.
+export function commonsCredit(html: string): string {
+  const parts = html.split(/<[^>]*>/);
+  let last = "";
+  const kept = parts.filter((p) => {
+    const t = p.replace(/\s+/g, " ").trim();
+    if (!t) return true;
+    const repeat = t === last;
+    last = t;
+    return !repeat;
+  });
+  return kept.join("").replace(/\s+/g, " ").trim().slice(0, 80);
 }

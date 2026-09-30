@@ -98,6 +98,20 @@ function onScreen(shots: FinalShot[], t: number): FinalShot | undefined {
   return ordered.find((s) => t >= s.startSec && t < s.endSec) ?? ordered[ordered.length - 1];
 }
 
+// The slot and asset each named cell sampled. `times` are the film's cell times
+// (cellTimes), so a cell maps to exactly the frame the reviewer saw.
+export function cellSlots(shots: FinalShot[], times: number[], cells: number[]): { cell: number; slot: number; assetId: string }[] {
+  return cells.flatMap((cell) => {
+    const s = cell >= 1 && cell <= times.length ? onScreen(shots, times[cell - 1]) : undefined;
+    return s ? [{ cell, slot: s.index, assetId: s.assetId }] : [];
+  });
+}
+
+// The assets a visual issue's cells show, once each, in cell order.
+export function issueAssets(shots: FinalShot[], times: number[], cells: number[]): string[] {
+  return [...new Set(cellSlots(shots, times, cells).map((c) => c.assetId))];
+}
+
 export interface SampledReuse {
   assetId: string; // one saved picture
   cells: { cell: number; presentation: FinalShot["presentation"] }[];
@@ -637,6 +651,24 @@ export interface FinalFilmQaRecord {
   accepted?: true;
   long: { factual?: FactualAudit; visual?: VisualAudit };
   short: { factual?: FactualAudit; visual?: VisualAudit };
+  visualRepair?: FinalVisualRepair;
+  // An explicit resume of an awaiting_final job may limit the repair to one film;
+  // the other film's edit, file and results are then never touched.
+  repairOnly?: FinalFilmKind;
+}
+
+// The ONE automatic final visual repair a job may get after a visual
+// HUMAN_REVIEW (see generate.ts): archive recovery, then at most one existing-
+// media sequence revision per flagged film. Saved before any work starts, so it
+// never runs twice. `rerender` lists films whose edit changed (or may have) but
+// whose file is not rendered yet; a restart renders them first.
+export interface FinalVisualRepair {
+  attempted: true;
+  tried: { film: FinalFilmKind; assetId: string }[];
+  recovered: { film: FinalFilmKind; assetId: string; source: string }[];
+  rejected: { film: FinalFilmKind; assetId: string; reason: string }[];
+  sequence?: { film: FinalFilmKind; targets: number[]; changed: number[]; outcome: string }[];
+  rerender?: FinalFilmKind[];
 }
 
 // The four specialists, in the order production runs them.
