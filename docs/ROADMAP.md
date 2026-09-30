@@ -191,14 +191,23 @@ quality across multiple fresh stories.
 
     Prefer ONE useful finished-film QC layer over several overlapping systems.
 
+15. **Finished-film review UX** - COMPLETED. A simple human-facing final review and
+    exception experience. Do not recreate a technical cockpit.
+    - awaiting_final lets the user watch the actual unregistered Long / Short
+      renders.
+    - Concerns are grouped by film with plain Fact / Visual presentation.
+    - Stored engine reasons remain unchanged behind "Why PB4 stopped".
+    - Continue anyway keeps pair-level acceptance semantics.
+    - Isolated Film #4 UI review passed.
+    - No repair machinery was added.
+
 ### Next
 
-15. **Finished-film review UX** - NEXT. A simple human-facing final review and
-    exception experience. Do not recreate a technical cockpit.
-
-    15A. **Films #5 and #6 acceptance.** At least two more genuinely different
+15A. **Films #5 and #6 acceptance** - NEXT. At least two more genuinely different
     fresh stories. The goal is repeatability: one successful Film #4 proves the
     mechanism; three strong fresh films in a row begin to justify production automation.
+    Each film runs through real Autopilot behavior; the human steps in only for
+    genuine exceptions.
 
 ### Later
 

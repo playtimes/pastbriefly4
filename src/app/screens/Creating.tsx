@@ -8,8 +8,8 @@ import { buildFilm, regenKey } from "../visualReview/model.ts";
 import { visualIssues, type VisualIssue } from "../visualReview/visualIssues.ts";
 import { VisualIssuePanel } from "../visualReview/IssueView.tsx";
 import type { RegenDraft } from "../visualReview/Inspector.tsx";
-import { FinalException, ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
-import { directorFeedbackError, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection } from "../../types.ts";
+import { FinalException, FinalFilmReview, ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
+import { directorFeedbackError, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection, type VideoKind } from "../../types.ts";
 
 // The Production screen for one story's current job. Its faces follow the job:
 // Running, Text needs you, Visuals need you, Films need you, Failed and Ready.
@@ -34,6 +34,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   // Where the user is inside a gate (null: the issue summary).
   const [textView, setTextView] = useState<TextView | null>(null);
   const [visualView, setVisualView] = useState<VisualView | null>(null);
+  const [finalView, setFinalView] = useState<VideoKind | null>(null);
   // The finished Long + Short pair the done job rendered (the Ready face).
   const [ready, setReady] = useState<CompletePair | null>(null);
   const jobId = useRef<string | null>(null);
@@ -97,6 +98,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   useEffect(() => {
     setTextView(null);
     setVisualView(null);
+    setFinalView(null);
   }, [job?.state]);
 
   async function cont(): Promise<void> {
@@ -235,8 +237,14 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   if (face === "text" || face === "visuals" || face === "final") handedOver.current = gateKey;
   if (face === "failed") return <Fail slug={slug} job={job} onRetry={retry} retrying={retrying} maxSpend={maxSpend} onApproveMore={approveMore} />;
 
-  // Films need you: the finished films' concerns, and Continue anyway.
-  if (face === "final") return <FinalException storyTitle={storyTitle} issues={job.finalQa?.issues ?? []} onContinue={acceptFinal} continuing={acceptingFinal} />;
+  // Films need you: the concerns grouped by film, then one finished film at a
+  // time. Only local state: watching never touches the job. Continue anyway
+  // accepts both films.
+  if (face === "final") {
+    const issues = job.finalQa?.issues ?? [];
+    if (finalView) return <FinalFilmReview slug={slug} film={finalView} issues={issues} onFilm={setFinalView} onBack={() => setFinalView(null)} onContinue={acceptFinal} continuing={acceptingFinal} />;
+    return <FinalException storyTitle={storyTitle} issues={issues} onReview={setFinalView} onContinue={acceptFinal} continuing={acceptingFinal} />;
+  }
 
   if (face === "done") {
     if (!ready || ready.jobId !== job.id) return <p className="text-muted">Preparing…</p>;

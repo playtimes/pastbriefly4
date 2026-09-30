@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, mediaUrl, type StoryDetail } from "../api.ts";
 import { navigate } from "../App.tsx";
+import { FilmPlayer } from "../FilmPlayer.tsx";
 import type { Video, VideoKind } from "../../types.ts";
 
 function fmtDuration(sec: number): string {
@@ -104,23 +105,7 @@ export function Videos({ slug, film = "long" }: { slug: string; film?: VideoKind
       {active && (
         <>
           <div className="mt-[30px]">
-            {active.kind === "short" ? (
-              <div className="flex justify-center">
-                <video
-                  key={active.id}
-                  src={mediaUrl(active.path)}
-                  controls
-                  className="aspect-[9/16] w-[360px] max-w-full rounded-[20px] border border-line bg-black object-contain"
-                />
-              </div>
-            ) : (
-              <video
-                key={active.id}
-                src={mediaUrl(active.path)}
-                controls
-                className="aspect-video w-full rounded-[16px] border border-line bg-black object-contain"
-              />
-            )}
+            <FilmPlayer key={active.id} kind={active.kind} src={mediaUrl(active.path)} />
           </div>
 
           {/* Resolution + duration metadata, with the Download action. */}

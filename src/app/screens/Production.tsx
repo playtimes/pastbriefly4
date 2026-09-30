@@ -1,4 +1,6 @@
 import React from "react";
+import { mediaUrl } from "../api.ts";
+import { FilmPlayer } from "../FilmPlayer.tsx";
 import { More, moreItem } from "../More.tsx";
 import { DISPLAY_STAGES, stageIndex, stageLabel, stageProgress, type CompletePair, type DisplayStage } from "../productionStage.ts";
 import type { VisualIssue } from "../visualReview/visualIssues.ts";
@@ -223,38 +225,132 @@ export function VisualMore(props: { onFilms: () => void; onContinue: () => void;
 
 // ---------------------------------------------------------------- Films need you
 
-const FILM_LABEL: Record<FinalQaIssue["film"], string> = { long: "Long", short: "Short" };
+const FILMS: VideoKind[] = ["long", "short"];
+const FILM_LABEL: Record<VideoKind, string> = { long: "Long", short: "Short" };
+const FILM_NAME: Record<VideoKind, string> = { long: "Long documentary", short: "Short" };
 const AREA_LABEL: Record<FinalQaIssue["area"], string> = { fact: "Fact", visual: "Visual" };
+// Presentation copy only: the stored reason is shown as it is, beneath it.
+const AREA_HEADLINE: Record<FinalQaIssue["area"], string> = {
+  fact: "This claim may be stronger than the evidence.",
+  visual: "This film may feel visually repetitive.",
+};
 
-// Both films are rendered and checked, and something concrete is left: one row
-// per concern (which film, fact or visual, and why; for a fact, the words it is
-// about), and the one decision, Continue anyway.
-export function FinalException(props: { storyTitle: string; issues: FinalQaIssue[]; onContinue: () => void; continuing: boolean }): React.ReactElement {
+// The finished render at the final gate. It is not a Video row until the films
+// are accepted, so it is addressed by its fixed place in the story's media.
+export const finalRenderUrl = (slug: string, film: VideoKind): string => mediaUrl(`stories/${slug}/renders/${film}.mp4`);
+
+const concerns = (n: number): string => (n === 1 ? "1 concern" : `${n} concerns`);
+const quiet = "btn btn-ghost min-h-11";
+
+// One concern: a plain headline, the narration it is about (facts), and PB4's
+// own reason folded away. The disclosure is the browser's own: opening it is
+// local to the page and touches nothing else.
+function FinalConcern({ issue, label }: { issue: FinalQaIssue; label: string }): React.ReactElement {
+  return (
+    <li data-final-issue={`${issue.film}-${issue.area}`} className="flex flex-col gap-2 py-4 border-b border-line last:border-b-0 min-w-0">
+      <span className={kicker}>{label}</span>
+      <span className="text-[15.5px] leading-[1.55] text-ink font-medium [text-wrap:pretty]">{AREA_HEADLINE[issue.area]}</span>
+      {issue.text && <q className="font-serif text-[19px] leading-[1.4] text-ink [text-wrap:pretty] break-words">{issue.text}</q>}
+      <details data-final-detail className="text-[13.5px]">
+        <summary className="list-none [&::-webkit-details-marker]:hidden cursor-pointer w-fit text-dim hover:text-ink">Why PB4 stopped</summary>
+        <p data-final-reason className="mt-2 leading-[1.55] text-muted [text-wrap:pretty] break-words">
+          {issue.reason}
+        </p>
+      </details>
+    </li>
+  );
+}
+
+// Both films are rendered and checked, and something concrete is left. The
+// concerns are grouped by film, each group with one way in: watch that film.
+// Continue anyway accepts both films as they are and stays quiet here.
+export function FinalException(props: { storyTitle: string; issues: FinalQaIssue[]; onReview: (film: VideoKind) => void; onContinue: () => void; continuing: boolean }): React.ReactElement {
   const { issues } = props;
+  const groups = FILMS.map((film) => [film, issues.filter((i) => i.film === film)] as const).filter(([, list]) => list.length > 0);
   return (
     <div className="flex flex-col gap-7 max-w-[760px]">
       <div className="flex flex-col gap-2.5">
         <p className={attention}>{props.storyTitle ? `Films need you · ${props.storyTitle}` : "Films need you"}</p>
         <h1 className={title}>{issues.length ? things(issues.length) : "The finished films need a look"}</h1>
       </div>
-      {issues.length > 0 && (
-        <ol aria-label="Film issues" className="flex flex-col border-t border-line">
-          {issues.map((i, n) => (
-            <li key={n} data-final-issue={`${i.film}-${i.area}`} className="grid grid-cols-[36px_minmax(0,1fr)] gap-x-4 items-start py-5 border-b border-line">
-              <span className="font-serif text-[24px] leading-none text-accent tabular-nums">{String(n + 1).padStart(2, "0")}</span>
-              <div className="flex flex-col gap-1.5 min-w-0">
-                <span className={kicker}>
-                  {FILM_LABEL[i.film]} · {AREA_LABEL[i.area]}
-                </span>
-                <span className="text-[15.5px] leading-[1.55] text-ink [text-wrap:pretty] break-words">{i.reason}</span>
-                {i.text && <span className="text-[14px] leading-[1.5] text-muted italic [text-wrap:pretty] break-words">“{i.text}”</span>}
+      {groups.length > 0 && (
+        <div aria-label="Film issues" className="flex flex-col gap-4">
+          {groups.map(([film, list]) => (
+            <section key={film} data-final-film={film} className="flex flex-col gap-1 rounded-[16px] border border-line bg-panel p-5 md:p-6">
+              <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 pb-2">
+                <div className="flex flex-col gap-1">
+                  <h2 className="font-serif text-[22px] leading-none text-ink">{FILM_NAME[film]}</h2>
+                  <span className="text-[13.5px] text-muted">{concerns(list.length)}</span>
+                </div>
+                <button onClick={() => props.onReview(film)} className={rowButton}>
+                  Review {FILM_LABEL[film]}
+                </button>
               </div>
-            </li>
+              <ul className="flex flex-col border-t border-line">
+                {list.map((i, n) => (
+                  <FinalConcern key={n} issue={i} label={`${FILM_LABEL[i.film]} · ${AREA_LABEL[i.area]}`} />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ol>
+        </div>
       )}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
-        <button onClick={props.onContinue} disabled={props.continuing} data-action="accept-final" className="btn btn-primary">
+        <button onClick={props.onContinue} disabled={props.continuing} data-action="accept-final" className={groups.length ? quiet : "btn btn-primary"}>
+          {props.continuing ? "Continuing…" : "Continue anyway"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One finished film, before it is accepted: the actual render, what PB4 noticed
+// about this film only, and the same pair-level Continue anyway. Watching,
+// switching and going back change nothing on the server.
+export function FinalFilmReview(props: {
+  slug: string;
+  film: VideoKind;
+  issues: FinalQaIssue[];
+  onFilm: (film: VideoKind) => void;
+  onBack: () => void;
+  onContinue: () => void;
+  continuing: boolean;
+}): React.ReactElement {
+  const { film, issues } = props;
+  const mine = issues.filter((i) => i.film === film);
+  const both = FILMS.every((f) => issues.some((i) => i.film === f));
+  return (
+    <div className="flex flex-col gap-7 max-w-[1040px]">
+      <div className="flex flex-col gap-4">
+        <button onClick={props.onBack} className="inline-flex w-fit items-center gap-2 text-[14px] text-[#cabfb0] transition hover:text-accent">
+          <span className="text-[15px] leading-none">←</span> Back to issues
+        </button>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <h1 className={title}>{FILM_NAME[film]}</h1>
+          {both && (
+            <div className="inline-flex rounded-full border border-line bg-[#15100e] p-[5px]">
+              {FILMS.map((f) => (
+                <button key={f} onClick={() => props.onFilm(f)} aria-pressed={f === film} className={`h-10 rounded-full px-[22px] text-[14px] font-semibold transition ${f === film ? "bg-accent text-white" : "text-[#8f8579] hover:text-ink"}`}>
+                  {FILM_NAME[f]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <FilmPlayer key={film} kind={film} src={finalRenderUrl(props.slug, film)} />
+      {mine.length > 0 && (
+        <section className="flex flex-col max-w-[760px]">
+          <p className={kicker}>PB4 noticed</p>
+          <ul className="flex flex-col">
+            {mine.map((i, n) => (
+              <FinalConcern key={n} issue={i} label={AREA_LABEL[i.area]} />
+            ))}
+          </ul>
+        </section>
+      )}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-line pt-5 max-w-[760px]">
+        <button onClick={props.onContinue} disabled={props.continuing} data-action="accept-final" className={quiet}>
           {props.continuing ? "Continuing…" : "Continue anyway"}
         </button>
       </div>

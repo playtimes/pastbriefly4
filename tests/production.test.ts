@@ -12,7 +12,7 @@ const stage = await import("../src/app/productionStage.ts");
 const { visualIssues, visualIssuesForJob, issueFrame, plain } = await import("../src/app/visualReview/visualIssues.ts");
 const { submitSequenceRevision } = await import("../src/app/visualReview/changeVisual.tsx");
 const { buildFilm, initialReview } = await import("../src/app/visualReview/model.ts");
-const { TextException, TextMore, VisualException, VisualMore, FinalException, ReadyPanel, ProductionProgress, SECTION_TAB } = await import("../src/app/screens/Production.tsx");
+const { TextException, TextMore, VisualException, VisualMore, FinalException, FinalFilmReview, finalRenderUrl, ReadyPanel, ProductionProgress, SECTION_TAB } = await import("../src/app/screens/Production.tsx");
 const { VisualIssueView, VisualIssuePanel } = await import("../src/app/visualReview/IssueView.tsx");
 const { VisualReview, ReviewView } = await import("../src/app/visualReview/VisualReview.tsx");
 
@@ -636,30 +636,217 @@ describe("Films need you", () => {
     expect(stage.productionFace(job({ state: "running", step: "finishing" }))).toBe("running");
   });
 
-  test("issue-first: a count, one numbered row per concern with Long / Short and Fact / Visual, and Continue anyway", () => {
-    const onContinue = vi.fn();
-    const p = { storyTitle: "The War Over a Pig", issues, onContinue, continuing: false };
+  // A raw engine reason in its lab wording: shown as it is, never the headline.
+  const labReason = "The Flames and smoke family appears in sampled cells 1-3, 5 and 7-18 behind distinct activities.";
+  const three: FinalQaIssue[] = [
+    { film: "long", area: "fact", reason: "Says the program ended for one reason; the sources give two.", text: "cancelled in favor of the atomic bomb" },
+    { film: "long", area: "visual", reason: labReason },
+    { film: "short", area: "visual", reason: "The same burning hangar keeps returning." },
+  ];
+  const summary = (over: Record<string, unknown> = {}) => ({ storyTitle: "The War Over a Pig", issues: three, onReview: vi.fn(), onContinue: vi.fn(), continuing: false, ...over });
+  const review = (over: Record<string, unknown> = {}) => ({ slug: "bat-bomb", film: "long" as const, issues: three, onFilm: vi.fn(), onBack: vi.fn(), onContinue: vi.fn(), continuing: false, ...over });
+  const FACT = "This claim may be stronger than the evidence.";
+  const VISUAL = "This film may feel visually repetitive.";
+
+  test("the summary groups concerns by film, with ONE Review action per affected film", () => {
+    const p = summary();
     const html = renderToStaticMarkup(React.createElement(FinalException, p));
     expect(html).toContain("Films need you · The War Over a Pig");
-    expect(html).toContain("2 things need your attention</h1>");
-    expect(html).toMatch(/data-final-issue="long-fact"[^]*01[^]*Long · Fact[^]*Says the program ended for one reason; the sources give two\.[^]*cancelled in favor of the atomic bomb/);
-    expect(html).toMatch(/data-final-issue="short-visual"[^]*02[^]*Short · Visual[^]*The same burning hangar keeps returning\./);
-    expect(html.match(/data-final-issue=/g)).toHaveLength(2);
-    // The concern only: no laboratory, no fixes, no Failed.
-    for (const s of ["evidence", "contact", "famil", "score", "model", "Astra", "Debug", "Advanced", "Regenerate", "Change visual", "Retry", "Production stopped", "Failed"]) expect(html).not.toContain(s);
-    const [button] = buttons(React.createElement(FinalException, p), "Continue anyway");
-    expect(button.props.disabled).toBe(false);
-    button.props.onClick();
-    expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(html).toContain("3 things need your attention</h1>");
+    expect(html.match(/data-final-film=/g)).toHaveLength(2);
+    expect(html).toMatch(/data-final-film="long"[^]*Long documentary[^]*2 concerns[^]*Review Long[^]*data-final-issue="long-fact"[^]*data-final-issue="long-visual"[^]*data-final-film="short"[^]*>Short<[^]*1 concern[^]*Review Short[^]*data-final-issue="short-visual"/);
+    expect(buttons(React.createElement(FinalException, p), "Review Long")).toHaveLength(1);
+    expect(buttons(React.createElement(FinalException, p), "Review Short")).toHaveLength(1);
+    buttons(React.createElement(FinalException, p), "Review Long")[0].props.onClick();
+    buttons(React.createElement(FinalException, p), "Review Short")[0].props.onClick();
+    expect(p.onReview.mock.calls).toEqual([["long"], ["short"]]);
+    // Only the film with concerns offers its review.
+    const shortOnly = summary({ issues: three.slice(2) });
+    expect(buttons(React.createElement(FinalException, shortOnly), "Review Long")).toHaveLength(0);
+    expect(buttons(React.createElement(FinalException, shortOnly), "Review Short")).toHaveLength(1);
+    expect(renderToStaticMarkup(React.createElement(FinalException, shortOnly))).not.toContain("Long documentary");
   });
 
-  test("while Continue anyway runs the button is disabled and says so", () => {
-    const busy = { storyTitle: "", issues, onContinue: vi.fn(), continuing: true };
-    const [button] = buttons(React.createElement(FinalException, busy), "Continuing…");
-    expect(button.props.disabled).toBe(true);
+  test("a fact concern reads Long · Fact, the human headline, the narration words, then the stored reason", () => {
+    const html = renderToStaticMarkup(React.createElement(FinalException, summary()));
+    expect(html).toMatch(new RegExp(`data-final-issue="long-fact"[^]*Long · Fact[^]*${FACT.replace(/\./g, "\\.")}[^]*<q[^>]*>cancelled in favor of the atomic bomb</q>[^]*data-final-reason[^>]*>Says the program ended for one reason; the sources give two\\.<`));
+  });
+
+  test("a visual concern reads Visual, the repetition headline, then the stored reason exactly as PB4 wrote it", () => {
+    const html = renderToStaticMarkup(React.createElement(FinalException, summary()));
+    expect(html).toMatch(new RegExp(`data-final-issue="long-visual"[^]*Long · Visual[^]*${VISUAL.replace(/\./g, "\\.")}[^]*data-final-reason[^>]*>${labReason.replace(/\./g, "\\.")}<`));
+    expect(html).toMatch(new RegExp(`data-final-issue="short-visual"[^]*Short · Visual[^]*${VISUAL.replace(/\./g, "\\.")}[^]*>The same burning hangar keeps returning\\.<`));
+    // The reason is never rewritten, and the headlines are presentation copy only.
+    expect(three[1].reason).toBe(labReason);
+    expect(html.match(new RegExp(FACT.replace(/\./g, "\\."), "g"))).toHaveLength(1);
+    expect(html.match(new RegExp(VISUAL.replace(/\./g, "\\."), "g"))).toHaveLength(2);
+    // Outside the stored reasons and the two headlines: no laboratory, no fixes, no Failed.
+    const surface = [...three.map((i) => i.reason), FACT].reduce((h, s) => h.split(s).join(""), html);
+    for (const s of ["evidence", "http", "contact", "famil", "cells", "score", "severity", "confidence", "model", "Astra", "QC", "HUMAN_REVIEW", "Audit", "Specialist", "Debug", "Advanced", "Regenerate", "Change visual", "Fix", "Retry", "Production stopped", "Failed"]) expect(surface).not.toContain(s);
+  });
+
+  // Every concern, on the summary and in each film review: label, headline, the
+  // quote (facts), then the stored reason folded behind Why PB4 stopped.
+  const concernsOf = (html: string) => html.split(/<li data-final-issue=/).slice(1).map((c) => c.slice(0, c.indexOf("</li>")));
+  const views = () => [
+    renderToStaticMarkup(React.createElement(FinalException, summary())),
+    renderToStaticMarkup(React.createElement(FinalFilmReview, review())),
+    renderToStaticMarkup(React.createElement(FinalFilmReview, review({ film: "short" }))),
+  ];
+
+  test("the stored reason is hidden by default behind a closed Why PB4 stopped disclosure", () => {
+    for (const html of views()) {
+      const list = concernsOf(html);
+      expect(list.length).toBeGreaterThan(0);
+      for (const c of list) {
+        const at = c.indexOf("<details");
+        expect(at).toBeGreaterThan(0);
+        expect(c.slice(at)).toMatch(/^<details data-final-detail="true" class="[^"]*"><summary [^>]*>Why PB4 stopped<\/summary><p data-final-reason/);
+        expect(c.slice(at, c.indexOf(">", at))).not.toContain(" open");
+        // Nothing of the reason sits outside the closed disclosure.
+        expect(c.slice(0, at)).not.toContain("data-final-reason");
+      }
+    }
+  });
+
+  test("the disclosure holds the exact stored reason, byte for byte", () => {
+    const tree = expand(React.createElement(FinalException, summary()));
+    const reasons: string[] = [];
+    const walk = (n: any) => {
+      if (Array.isArray(n)) return n.forEach(walk);
+      if (!n || typeof n !== "object") return;
+      if (n.props?.["data-final-reason"]) reasons.push(n.props.children);
+      walk(n.props?.children);
+    };
+    walk(tree);
+    expect(reasons).toEqual(three.map((i) => i.reason));
+    expect(reasons[1]).toBe(labReason);
+  });
+
+  test("a fact reads label, headline, then the quote, then the folded reason; a visual reads label, headline, folded reason", () => {
+    for (const html of views()) {
+      for (const c of concernsOf(html)) {
+        const head = c.indexOf(c.includes('fact"') ? FACT : VISUAL);
+        expect(head).toBeGreaterThan(c.indexOf("uppercase"));
+        const quote = c.indexOf("<q");
+        if (c.startsWith('"long-fact"')) expect(quote).toBeGreaterThan(head);
+        else expect(quote).toBe(-1);
+        expect(c.indexOf("<details")).toBeGreaterThan(Math.max(head, quote));
+      }
+    }
+  });
+
+  test("opening or closing the disclosure is the browser's own: no handler, no request, no job change", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const j = finalJob();
+      const before = JSON.stringify(j);
+      const disclosures: any[] = [];
+      const walk = (n: any) => {
+        if (Array.isArray(n)) return n.forEach(walk);
+        if (!n || typeof n !== "object") return;
+        if (n.type === "details" && n.props?.["data-final-detail"]) disclosures.push(n);
+        walk(n.props?.children);
+      };
+      walk(expand(React.createElement(FinalException, summary({ issues: j.finalQa!.issues }))));
+      walk(expand(React.createElement(FinalFilmReview, review({ issues: j.finalQa!.issues }))));
+      expect(disclosures).toHaveLength(3);
+      for (const d of disclosures) {
+        expect(Object.keys(d.props).filter((k) => k.startsWith("on"))).toEqual([]);
+        expect("open" in d.props).toBe(false);
+        const summaryEl = [d.props.children].flat().find((c: any) => c?.type === "summary");
+        expect(Object.keys(summaryEl.props).filter((k) => k.startsWith("on"))).toEqual([]);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(j)).toBe(before);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("Continue anyway is secondary on the summary, calls once, and shows it is running", () => {
+    const p = summary();
+    const [button] = buttons(React.createElement(FinalException, p), "Continue anyway");
+    expect(button.props.className).toContain("btn-ghost");
+    expect(button.props.className).not.toContain("btn-primary");
+    expect(buttons(React.createElement(FinalException, p), "Review Long")[0].props.className).toContain("btn-primary");
+    expect(button.props.disabled).toBe(false);
+    button.props.onClick();
+    expect(p.onContinue).toHaveBeenCalledTimes(1);
+    const busy = summary({ storyTitle: "", continuing: true });
+    const [running] = buttons(React.createElement(FinalException, busy), "Continuing…");
+    expect(running.props.disabled).toBe(true);
     expect(renderToStaticMarkup(React.createElement(FinalException, busy))).toContain(">Films need you<");
-    const one = renderToStaticMarkup(React.createElement(FinalException, { ...busy, issues: issues.slice(1), continuing: false }));
-    expect(one).toContain("1 thing needs your attention</h1>");
+    expect(renderToStaticMarkup(React.createElement(FinalException, summary({ issues: three.slice(2) })))).toContain("1 thing needs your attention</h1>");
+  });
+
+  test("Review Long plays the actual Long render at 16:9 with only the Long's concerns", () => {
+    const html = renderToStaticMarkup(React.createElement(FinalFilmReview, review()));
+    expect(html).toMatch(/<video src="\/media\/stories\/bat-bomb\/renders\/long\.mp4" controls="" class="aspect-video w-full /);
+    expect(html.match(/<video/g)).toHaveLength(1);
+    expect(html).toContain("Back to issues");
+    expect(html).toContain("Long documentary</h1>");
+    expect(html).toMatch(new RegExp(`PB4 noticed[^]*data-final-issue="long-fact"[^]*>Fact<[^]*${FACT.replace(/\./g, "\\.")}[^]*<q[^>]*>cancelled in favor of the atomic bomb</q>[^]*data-final-issue="long-visual"[^]*>Visual<[^]*${VISUAL.replace(/\./g, "\\.")}`));
+    expect(html).not.toContain("short-visual");
+    expect(html).not.toContain("The same burning hangar");
+    // A decision view, not the library: no download, publishing, sources or versions.
+    for (const s of ["download", "Download", "Publish", "Sources", "Previous versions", "01", "02"]) expect(html).not.toContain(s);
+  });
+
+  test("Review Short plays the actual Short render as a centered 9:16 with only the Short's concerns", () => {
+    const html = renderToStaticMarkup(React.createElement(FinalFilmReview, review({ film: "short" })));
+    expect(html).toMatch(/<div class="flex justify-center"><video src="\/media\/stories\/bat-bomb\/renders\/short\.mp4" controls="" class="aspect-\[9\/16\] /);
+    expect(html).toContain("Short</h1>");
+    expect(html).toContain('data-final-issue="short-visual"');
+    expect(html).not.toContain("long-fact");
+    expect(html).not.toContain("long-visual");
+    expect(finalRenderUrl("bat-bomb", "short")).toBe("/media/stories/bat-bomb/renders/short.mp4");
+  });
+
+  test("with concerns on both films the review switches between them; with one film it does not offer a switch", () => {
+    const p = review();
+    const pills = (props: any, label: string) => buttons(React.createElement(FinalFilmReview, props), label);
+    expect(pills(p, "Short")).toHaveLength(1);
+    expect(pills(p, "Long documentary")[0].props["aria-pressed"]).toBe(true);
+    pills(p, "Short")[0].props.onClick();
+    pills(p, "Long documentary")[0].props.onClick();
+    expect(p.onFilm.mock.calls).toEqual([["short"], ["long"]]);
+    const shortOnly = review({ film: "short", issues: three.slice(2) });
+    expect(pills(shortOnly, "Long documentary")).toHaveLength(0);
+  });
+
+  test("watching, switching and Back to issues are local: no request, and the job is untouched", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const j = finalJob();
+      const before = JSON.stringify(j);
+      const p = review({ issues: j.finalQa!.issues });
+      renderToStaticMarkup(React.createElement(FinalFilmReview, p));
+      buttons(React.createElement(FinalFilmReview, p), /Back to issues/)[0].props.onClick();
+      buttons(React.createElement(FinalFilmReview, p), "Short")[0].props.onClick();
+      expect(p.onBack).toHaveBeenCalledTimes(1);
+      expect(p.onFilm).toHaveBeenCalledWith("short");
+      expect(p.onContinue).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(j)).toBe(before);
+      expect(stage.productionFace(j)).toBe("final");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("Continue anyway inside the film review is the same pair-level decision: one call, secondary, no per-film accept", () => {
+    const p = review();
+    const [button] = buttons(React.createElement(FinalFilmReview, p), "Continue anyway");
+    expect(button.props.className).toContain("btn-ghost");
+    expect(button.props["data-action"]).toBe("accept-final");
+    button.props.onClick();
+    expect(p.onContinue).toHaveBeenCalledTimes(1);
+    expect(p.onContinue).toHaveBeenCalledWith(); // no film argument: both films are accepted together
+    expect(buttons(React.createElement(FinalFilmReview, p), /Accept|Long only|Short only/)).toHaveLength(0);
+    expect(buttons(React.createElement(FinalFilmReview, review({ continuing: true })), "Continuing…")[0].props.disabled).toBe(true);
   });
 
   test("Ready only after a pass or Continue anyway: the waiting job follows its own gate and has no pair", () => {
@@ -669,6 +856,10 @@ describe("Films need you", () => {
     expect(stage.productionTarget({ activeJob: { id: "j1" }, failedJob: null, videos: older })).toEqual({ jobId: "j1" });
     expect(stage.latestCompletePair(older, "j1")).toBeNull();
     expect(stage.productionFace(finalJob({ state: "done" }))).toBe("done");
+    // Previewing the unregistered render adds no Video: the waiting job still has no pair.
+    renderToStaticMarkup(React.createElement(FinalFilmReview, { slug: "demo", film: "long", issues, onFilm: vi.fn(), onBack: vi.fn(), onContinue: vi.fn(), continuing: false }));
+    expect(stage.latestCompletePair(older, "j1")).toBeNull();
+    expect(older).toHaveLength(2);
   });
 });
 
