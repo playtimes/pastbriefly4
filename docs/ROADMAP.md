@@ -77,9 +77,19 @@ quality across multiple fresh stories.
     - realistic Autopilot QA budget reserve
     - deterministic final-file sanity contract
 
-### Next
+13. **Film #4 - real Autopilot acceptance** - COMPLETED.
 
-13. **Film #4 - real Autopilot acceptance.**
+    Result:
+    - Production completed end to end.
+    - The publishability criteria below were not met unchanged: the final
+      narration stated a causal claim more strongly than the evidence (the Short
+      said Project X-Ray was cancelled "in favor of the atomic bomb"), and the
+      assembled Long kept returning to the same few visual families.
+    - Both defects escaped every earlier QA stage, which checks the ingredients
+      before assembly rather than the finished film.
+    - The production hardening discovered during the run is complete.
+
+    Original brief:
 
     Use a completely new story that PB4 was not calibrated around. Normal interaction:
 
@@ -112,21 +122,49 @@ quality across multiple fresh stories.
     Add no more QA before Film #4 unless it is required for (1) budget safety or
     (2) deterministic output-file correctness.
 
-### After Film #4
+### Next
 
-14. **Final-film QC.** Expected to be the next major QA layer, but its design
-    must come from the defects Film #4 actually shows. Areas not yet fully
-    checked after assembly:
+14. **Final-film QC** - Stage 14A proof completed; Stage 14B next.
+
+    **Stage 14A - specialist proof** - COMPLETED. The broad single-reviewer
+    proof failed: it echoed PB4's causal synthesis and treated distinct asset
+    ids as visual variety. A separate factual audit caught Film #4 Short's
+    "cancelled in favor of the atomic bomb" causal compression. The dense
+    contact-sheet visual input produced unreliable cell observations, even when
+    its verdict was right.
+
+    Stage 14A3 replaced that input with 24 / 12 individually labelled sampled
+    frames, plus exact sampled-reuse and whole-film asset-use evidence. This
+    solved the visual grounding problem. GPT-4.1 remained too permissive on the
+    Long's final visual judgment. A controlled identical-payload evaluation
+    with GPT-6 Astra at reasoning high passed: it returned grounded
+    HUMAN_REVIEW for the Long's whole-film repetition (19 accurate cell
+    observations, 5 reasonable/ambiguous, 0 materially wrong) and handled the
+    L00 recurrence coherently. GPT-6 Astra with reasoning high is the visual
+    Final-film QC candidate model. The proof is not integrated into production.
+
+    **Stage 14B - integration** - NEXT. Integrate the proven Final-film QC
+    between finished-render validation and Ready, then validate it before
+    treating it as a production gate.
+
+    Areas still not checked after assembly, for later Stage 14 slices only if
+    Films #5 / #6 show real defects there:
     - generated Runway motion
     - TTS pronunciation, glitches and delivery problems
     - subtitle behaviour in the finished film
     - awkward cuts visible only in playback
     - pacing across complete sections
     - the interaction of motion, stills, narration and subtitles
-    - final-film visual and audio defects
+    - final-film audio defects
 
-    Prefer ONE useful finished-film QC layer over several overlapping systems if
-    it can reliably cover these. Do not design it prematurely.
+    Prefer ONE useful finished-film QC layer over several overlapping systems.
+
+### Later
+
+After Stage 14 validation:
+- Blender 2.5D visual identity proof
+- compare the same PastBriefly scene against current Runway motion
+- no integration decision until side-by-side review
 
 15. **Finished-film review UX.** A simple human-facing final review and exception
     experience. Do not recreate a technical cockpit.
