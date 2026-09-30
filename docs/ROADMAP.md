@@ -7,34 +7,103 @@ current. If this file and chat history disagree, this file wins.
 
 **TRUE HISTORICAL STORIES THAT SOUND MADE UP.**
 
-- The Long film is the main product.
-- The Short supports discovery and distribution.
+Story is the product. PastBriefly is **LONG-FIRST**.
+
+- The Long film is the primary product.
+- Shorts remain important for discovery and distribution, but they are
+  downstream products of the finished Long, not produced in parallel with it.
 
 The goal is not maximum automation as quickly as possible. The goal is
 **quality high enough that automation becomes safe.**
 
-Current target workflow:
+The old parallel model (research → Long + Short produced together → finished
+pair) is no longer the target direction.
+
+Target production model:
 
 ```
-Human chooses story
-→ Generate
-→ PB4 researches, writes, creates and checks the films
-→ PB4 interrupts only for a genuine human decision
-→ finished Long + Short
+Story
+→ research + verification
+→ Long script
+→ Long narration
+→ documentary visual plan
+→ archive / deterministic visuals / selective generation
+→ Long edit
+→ Long final QC
+→ finished Long
+→ derive 1-3 Shorts from the finished Long
+   (reuse Long research, media and scenes;
+    vertical-specific recut / minimal extra media)
+→ Short QC
 ```
 
 Later target:
 
 ```
 PB4 selects strong stories
-→ produces them unattended
+→ produces the Long unattended
 → performs final-film QC
+→ derives Shorts from the finished Long
 → sends clean films to a publishing queue
 → human only handles genuine exceptions / final policy decisions
 ```
 
 Do not publish automatically until the production system has proven repeatable
 quality across multiple fresh stories.
+
+## Visual direction
+
+PB4 should increasingly behave like an **automated documentary editor**, not an
+image / video generator.
+
+Preferred visual hierarchy:
+
+1. **Real historical / documentary media first** - archives, museums,
+   government / institutional collections, public-domain / properly licensed
+   photography and footage.
+2. **Deterministic visuals** - Blender 2.5D historical scenes, maps, diagrams,
+   document treatments, controlled camera movement, lighting / atmosphere,
+   reusable environments.
+3. **Generated stills** only where useful / necessary.
+4. **Generative video** selectively, for exceptional hero moments, not as the
+   default motion backend.
+
+Remotion may remain the assembly / render layer.
+
+## Current backend decision
+
+The current image / Runway-heavy visual backend is **FROZEN**. Film #5 showed
+it has reached diminishing returns: rearranging a homogeneous visual pool
+cannot create genuine visual richness. Do not continue speculative hardening
+of it and do not add another repair layer for it.
+
+Keep the useful machinery already built:
+- discovery
+- research
+- factual verification
+- script QA
+- narration
+- archive acquisition
+- Pixel Asset QA
+- sequence QA
+- final-film QC
+- final visual self-repair
+- spend / resume / provenance safety
+
+## Cost principle
+
+Lesson from Film #5: a ~$10-13 film is not automatically too expensive if it
+reliably produces a premium publishable Long. The problem is spending that
+amount and still getting a Long we would not publish. The Blender proof must
+therefore evaluate BOTH quality and economics.
+
+## Publishing during the reset
+
+- Publish already-good existing films / Shorts while the Blender work happens.
+- Do not wait for Blender before publishing usable inventory.
+- Do NOT start another expensive full film on the frozen backend.
+- Production (publishing existing inventory) and R&D can proceed in parallel.
+- Automatic publishing is NOT approved.
 
 ## Product and engine rules
 
@@ -48,6 +117,8 @@ quality across multiple fresh stories.
 - Do not build new QA layers merely because they sound useful.
 - Every new stage must remove a demonstrated production failure or a meaningful human burden.
 - Human review is exception-based, not mandatory inspection.
+- The user operates the story and creative decisions; PB4 operates the machinery.
+- KISS: no speculative architecture.
 
 ## Roadmap
 
@@ -201,38 +272,95 @@ quality across multiple fresh stories.
     - Isolated Film #4 UI review passed.
     - No repair machinery was added.
 
+15A. **Film #5: Project Azorian** - COMPLETED as an R&D / acceptance result,
+    not the start of another repair cycle. (Originally planned as "Films #5 and
+    #6 acceptance"; Film #6 is now deferred until after the Blender proof, 16B.)
+
+    What it proved:
+    - Final-film QC works and catches meaningful whole-film repetition.
+    - Commons query recall had a real defect: 0 of 6 archives found, from Title
+      Case story identifiers, over-long shot queries and PDF-dominated
+      results. Improved with an anchor-first short query, image-only search,
+      better identifiers and paced, identified requests.
+    - One bounded final visual self-repair was implemented safely: after a
+      visual HUMAN_REVIEW, flagged archive fallbacks get one more archive
+      search and the existing Pixel Asset QA; the remaining flagged non-motion,
+      non-graphic slots get at most one existing-media sequence revision per
+      film, checked once by the existing Director verification; only the
+      changed film is re-rendered and audited once more. It never repeats.
+    - The real Long-only repair used its one allowed attempt. Both recovered
+      archives were rejected by Pixel QA; the sequence revision moved all 10
+      flagged slots and passed Director verification.
+    - Spend ended at $12.15 / $12.53.
+    - The repair removed the original repeated families but created new
+      repetition by redistributing the same limited visual pool. The new Long
+      visual audit still returned HUMAN_REVIEW.
+    - No second repair is allowed or desired. Do NOT add another repair layer
+      for this backend.
+    - The current image / Runway-heavy visual backend has reached diminishing
+      returns (see Current backend decision).
+
+    Project Azorian remains awaiting_final. It is NOT publishable / Ready as a
+    production-system result. The Short may be used separately as channel
+    inventory by human decision; that is not a production-system acceptance
+    claim.
+
 ### Next
 
-15A. **Films #5 and #6 acceptance** - NEXT. At least two more genuinely different
-    fresh stories. The goal is repeatability: one successful Film #4 proves the
-    mechanism; three strong fresh films in a row begin to justify production automation.
-    Each film runs through real Autopilot behavior; the human steps in only for
-    genuine exceptions.
+16A. **Long-first production reset** - NEXT (design). Document / design the
+    smallest changes required for PB4 to produce the Long first and derive
+    Shorts only after the Long is finished. Design only; no implementation yet.
 
-    Film #5 (Project Azorian) exposed:
-    - Commons query recall failure: 0 of 6 archives found, from Title Case story
-      identifiers, over-long shot queries and PDF-dominated results. Fixed with
-      an anchor-first short query, image-only search, better identifiers and
-      paced, identified requests.
-    - the need for ONE bounded final visual repair: after a visual
-      HUMAN_REVIEW, flagged archive fallbacks get one more archive search and
-      the existing Pixel Asset QA; the flagged remaining slots get at most one
-      existing-media sequence revision per film, checked once by the existing
-      Director verification; then only the changed film is re-rendered and
-      audited once more. It never repeats.
+16B. **Blender 2.5D visual proof** - NEXT (the next real build / proof). Film #6
+    must NOT happen before this proof.
+
+    Use a PastBriefly historical scene, preferably Project Azorian / Glomar
+    Explorer, because its visual weaknesses are already known. Create a
+    controlled side-by-side proof of roughly 15-20 seconds:
+    - current PB4 still treatment
+    - current Runway motion treatment
+    - Blender 2.5D treatment
+
+    The Blender treatment should test:
+    - depth-separated foreground / midground / background
+    - deterministic camera movement
+    - lighting
+    - atmosphere
+    - simple geometry where useful
+    - several distinct compositions from one underlying scene
+    - 16:9 Long-first composition
+    - vertical-safe / reusable framing potential for later Shorts
+
+    Judge:
+    - visual quality
+    - distinctiveness / channel identity
+    - production time
+    - repeatability
+    - cost (see Cost principle)
+    - whether one scene can yield several genuinely different shots
+
+    No Blender integration decision until the side-by-side proof is reviewed.
+
+16C. **Long → Short derivation** - after 16B. Only once the Long-first visual
+    approach works:
+
+    ```
+    finished Long
+    → identify the strongest self-contained moments
+    → derive 1-3 Shorts
+    → reuse Long research / assets / scenes
+    → add minimal vertical-specific media only when needed
+    ```
+
+    Do not build this before the Long-first proof is working.
 
 ### Later
 
-After Stage 14 validation:
-- Blender 2.5D visual identity proof
-- compare the same PastBriefly scene against current Runway motion
-- no integration decision until side-by-side review
-
-16. **Publishing workflow.** Initially: finished clean films → publishing queue /
+17. **Publishing workflow.** Initially: finished clean films → publishing queue /
     human approval. Automatic publishing comes later, only when explicitly approved
     and when the production system has demonstrated repeatable quality.
 
-17. **Analytics loop.** Use real YouTube performance to learn:
+18. **Analytics loop.** Use real YouTube performance to learn:
     - which premises earn clicks
     - which hooks retain viewers
     - where Long retention falls
@@ -241,7 +369,7 @@ After Stage 14 validation:
 
     Use analytics to improve editorial choices, not to create generic engagement slop.
 
-18. **Story-selection automation.** PB4 eventually discovers, verifies and selects
+19. **Story-selection automation.** PB4 eventually discovers, verifies and selects
     strong candidates itself, preserving the promise: TRUE HISTORICAL STORIES THAT
     SOUND MADE UP. A candidate needs:
     - an instantly understandable strange premise
@@ -251,11 +379,12 @@ After Stage 14 validation:
     - enough material for a good Long without padding
     - a Short with its own payoff
 
-19. **Mostly unattended PastBriefly.**
+20. **Mostly unattended PastBriefly.**
 
     ```
-    story discovery / selection → research → writing → media → automated QA
-    → final-film QC → render → publishing queue → analytics feedback
+    story discovery / selection → research → Long writing → Long media
+    → automated QA → Long render → Long final-film QC
+    → derived Shorts → Short QC → publishing queue → analytics feedback
     ```
 
     Human involvement is limited to:
@@ -281,9 +410,13 @@ The existing pre-render QA is considered **sufficient for Film #4**.
 - **Autopilot:** advances only when Asset QA, Long QA and Short QA are all clean;
   otherwise it stops for the human.
 
-**Known limitation:** the system mainly checks the ingredients BEFORE final motion
-and render. The finished movie itself does not yet receive intelligent playback QC
-(see step 14).
+**After render:** Final-film QC (step 14) now reviews each finished film: a
+factual audit and a whole-film visual audit (sampled frames, repetition
+evidence), with at most one bounded final visual self-repair (step 15A).
+
+**Known limitation:** finished-film QC does not yet check generated motion, TTS
+delivery, subtitles in playback, awkward cuts, pacing or audio defects (see the
+list under step 14).
 
 ## Known later hardening: restart durability
 
@@ -305,10 +438,16 @@ remove them merely for tidiness.
 ```
 inspect actual result
 → identify demonstrated problem
-→ choose smallest useful fix
-→ verify
-→ freeze again
-→ produce another real film
+→ discuss / choose the smallest next decision
+→ human approves
+→ scoped implementation task
+→ inspect / verify
+→ stop at the next human gate
 ```
 
-Avoid large speculative refactors. No autonomous architecture expansion.
+- The repo is the durable source of truth; chat / memory is continuity, not
+  authority.
+- KISS. Avoid large speculative refactors. No autonomous architecture expansion.
+- The user operates the story / creative decisions; PB4 operates the machinery.
+- Human review is exception-based.
+- Film Grammar stays frozen unless a genuine blocker proves otherwise.
