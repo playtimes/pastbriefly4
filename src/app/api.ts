@@ -80,6 +80,7 @@ export const api = {
   generate: (id: string, approvedMax: number) => post<{ job: Job; duplicate: boolean }>(`/api/stories/${id}/generate`, { approvedMax }),
   approveText: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/approve-text`),
   reviseText: (jobId: string, feedback: string) => post<{ job: Job }>(`/api/jobs/${jobId}/revise-text`, { feedback }),
+  researchMore: (jobId: string, feedback: string) => post<{ job: Job }>(`/api/jobs/${jobId}/research-more`, { feedback }),
   continue: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/continue`),
   acceptFinal: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/accept-final`),
   rebuildVisuals: (jobId: string) => post<{ job: Job }>(`/api/jobs/${jobId}/rebuild-visuals`),

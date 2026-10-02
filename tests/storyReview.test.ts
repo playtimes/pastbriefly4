@@ -419,3 +419,35 @@ describe("a Long-first draft (Stage 16A): no Short anywhere in the review", () =
     expect(pair).toContain("6. Does the Short preserve the strongest version of the premise?\n7. Does the story have enough depth for the Long without artificial padding?\n8. Give a final decision:");
   });
 });
+
+describe("Research more (the text gate's request for deeper evidence)", () => {
+  const controls = (over: Record<string, unknown> = {}) => ({ open: false, feedback: "", running: false, notice: null, onOpen: vi.fn(), onCancel: vi.fn(), onFeedback: vi.fn(), onSubmit: vi.fn(), ...over });
+
+  test("the whole story offers three choices: Revise story, Research more, Continue production", () => {
+    const out = renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false, onRevise: vi.fn(), onResearchMore: vi.fn() }));
+    for (const b of ["Revise story", "Research more", "Continue production"]) expect(out).toMatch(new RegExp(`>${b}</button>`));
+    // Without the action wired, nothing new appears.
+    expect(renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false, onRevise: vi.fn() }))).not.toContain("Research more");
+  });
+
+  test("its form asks what evidence is missing; while it runs every other text-gate action waits", () => {
+    const open = html("story", { revise: controls(), research: controls({ open: true, feedback: "Find the evacuation order." }) });
+    expect(open).toContain('aria-label="Research more"');
+    expect(open).toContain("Say what evidence is missing");
+    expect(open).toMatch(/<button[^>]*disabled=""[^>]*>Revise story<\/button>/); // one form at a time
+
+    const running = html("story", { revise: controls(), research: controls({ open: true, feedback: "Find the evacuation order.", running: true }) });
+    expect(running).toContain("Researching…");
+    expect(running).toMatch(/<button[^>]*disabled=""[^>]*>Revise story<\/button>/);
+    expect(running).toMatch(/<button[^>]*disabled=""[^>]*>Continue production<\/button>/);
+  });
+
+  test("a failure keeps the current draft; a success says the research was refreshed", () => {
+    const failed = html("story", { research: controls({ open: true, feedback: "x", notice: { kind: "failed", message: "OpenAI responses 500" } }) });
+    expect(failed).toContain("Research failed");
+    expect(failed).toContain("The current research and draft were not changed.");
+    const done = html("story", { research: controls({ notice: { kind: "applied" } }) });
+    expect(done).toContain("Research refreshed");
+    expect(done).not.toContain("Revision applied");
+  });
+});

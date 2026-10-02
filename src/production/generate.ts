@@ -37,7 +37,7 @@ import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type 
 import { now } from "../server/db.ts";
 import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
 import { recordArchiveReview, retainedArchiveInventory } from "./archiveRetention.ts";
-import { researchStory } from "./research.ts";
+import { researchStory, researchStoryMore } from "./research.ts";
 import { writeScript, auditScripts, auditLongScript, reviseStoryText, reviseLongText, reviewStoryDraft, reviewLongDraft, verifyStoryDraft, verifyLongDraft, textQaCallsProvider, type LongDraft, type RevisedText, type RevisedLongText } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
 import { plainDashes } from "./text.ts";
@@ -1093,6 +1093,67 @@ export async function reviseTextForJob(jobId: string, feedback: string): Promise
   }
 }
 
+// Jobs with a Research more in flight. The job stays awaiting_text while it runs,
+// so the routes refuse Approve, Revise and another Research more, and Text QA
+// never starts on the draft being replaced.
+const researchingMore = new Set<string>();
+export function isResearchingMore(jobId: string): boolean {
+  return researchingMore.has(jobId);
+}
+
+// At the text gate, the Director's "the story is good, the evidence is too
+// thin": one targeted research refresh of the CURRENT verified package
+// (researchStoryMore: expansion, the integrity audit and the final verification,
+// charged as one research package exactly like the initial research), then the
+// job's film scripts written again from the NEW research by the normal writer
+// and audited by the normal fidelity audit (a Long-first job: the Long alone).
+// Paid calls are preflighted and charged as usual, but the text itself is
+// replaced all at once, only when every step succeeded: research, scripts and
+// draft parts in the job, the story's editorial fields (its title and hook are
+// kept), and its stored scripts. Any failure leaves the current draft, research
+// and Text QA result exactly as they were. The job stays awaiting_text and
+// unapproved; the route then checks the new draft with Text QA.
+export async function researchMoreForJob(jobId: string, feedback: string): Promise<JobRecord> {
+  const job = getJob(jobId);
+  if (!job) throw new Error("Job not found.");
+  if (job.state !== "awaiting_text" || (job.scratch as Scratch).textApproved) throw new Error("More research can only be requested at the story review.");
+  const story = getStory(job.storyId);
+  if (!story) throw new Error("Story not found.");
+  const scratch: Scratch = { ...(job.scratch as Scratch) };
+  if (!scratch.research || !scratch.scripts) throw new Error("This job has no story draft to research further.");
+  if (researchingMore.has(jobId)) throw new Error("More research is already running for this story.");
+  if (isTextQaRunning(jobId) || isRevisingText(jobId)) throw new Error("The story is being checked or revised. Wait for it to finish.");
+
+  researchingMore.add(jobId);
+  try {
+    budget(job, PRICING.openai.research, scratch);
+    const research = await researchStoryMore(story, scratch.research, feedback);
+    record(jobId, PRICING.openai.research, scratch);
+
+    // A fresh draft from the new research: the same writes and audit as runJob's.
+    const parts: { long?: string; short?: string } = {};
+    for (const kind of filmKinds(scratch)) {
+      budget(job, PRICING.openai.script, scratch);
+      parts[kind] = await writeScript(story, research, kind);
+      record(jobId, PRICING.openai.script, scratch);
+    }
+    const longFirst = isLongFirst(scratch);
+    const drafts: Scripts | LongDraft = longFirst ? { long: parts.long! } : { long: parts.long!, short: parts.short! };
+    const scripts = await finalScripts(job, story, research, drafts, scratch, longFirst);
+
+    // Everything succeeded: the new research and draft replace the old together.
+    scratch.research = research;
+    scratch.scriptParts = parts;
+    scratch.scripts = scripts;
+    upsertStory({ ...story, summary: research.summary, moments: research.moments, sources: research.sources, productionNote: research.productionNote });
+    setScripts(story.id, scripts);
+    updateJob(jobId, { scratch, spent: scratch.spent ?? 0, state: "awaiting_text", message: "Ready for story review", error: null });
+    return getJob(jobId)!;
+  } finally {
+    researchingMore.delete(jobId);
+  }
+}
+
 // ---- Automatic Director Text QA (Autopilot v1: the text gate only) ----
 // Server memory only, never persisted: a running phase (the job stays
 // awaiting_text, so the routes refuse manual Approve / Revise until it ends),
@@ -1136,7 +1197,7 @@ async function textQaCall<T>(jobId: string, call: (story: Story, research: Resea
 // Never throws.
 export async function autoTextQaForJob(jobId: string): Promise<TextQaState | undefined> {
   const job = getJob(jobId);
-  if (!job || job.state !== "awaiting_text" || (job.scratch as Scratch).textApproved || isTextQaRunning(jobId) || isRevisingText(jobId)) return undefined;
+  if (!job || job.state !== "awaiting_text" || (job.scratch as Scratch).textApproved || isTextQaRunning(jobId) || isRevisingText(jobId) || isResearchingMore(jobId)) return undefined;
   const phase = (p: TextQaPhase) => textQa.set(jobId, { status: "running", phase: p });
   const end = (s: TextQaState) => (textQa.set(jobId, s), s);
   const failed = (stage: TextQaStage, e: unknown) => {

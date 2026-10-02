@@ -24,11 +24,12 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, clearTextQaForJob, autoTextQaForJob, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob, resumeFinalVisualRepairForJob } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, clearTextQaForJob, autoTextQaForJob, researchMoreForJob, isResearchingMore, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob, resumeFinalVisualRepairForJob } from "../production/generate.ts";
 
 const TEXT_QA_BUSY = "Automatic Text QA is running. Wait for it to finish.";
 const ASSET_QA_BUSY = "Automatic Asset QA is running. Wait for it to finish.";
 const DIRECTOR_QA_BUSY = "Director QA is running. Wait for it to finish.";
+const RESEARCH_MORE_BUSY = "More research is running for this story. Wait for it to finish.";
 
 // The editorial review data for the text gate, read straight from the job's
 // private scratch. Only the useful fields are exposed - never the whole scratch.
@@ -264,6 +265,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (job.state !== "awaiting_text") return { job: toPublic(job) };
     if (isTextQaRunning(id)) return reply.code(409).send({ error: TEXT_QA_BUSY });
     if (isRevisingText(id)) return reply.code(409).send({ error: "The story is being revised. Wait for it to finish." });
+    if (isResearchingMore(id)) return reply.code(409).send({ error: RESEARCH_MORE_BUSY });
     const updated = approveTextForJob(id);
     enqueueJob(id);
     return { job: toPublic(updated) };
@@ -284,6 +286,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (job.state !== "awaiting_text") return reply.code(409).send({ error: "The story can only be revised at the story review." });
     if (isTextQaRunning(id)) return reply.code(409).send({ error: TEXT_QA_BUSY });
     if (isRevisingText(id)) return reply.code(409).send({ error: "A revision is already running for this story." });
+    if (isResearchingMore(id)) return reply.code(409).send({ error: RESEARCH_MORE_BUSY });
     try {
       await reviseTextForJob(id, feedback);
       // The saved draft is new, so the old Text QA result no longer describes it:
@@ -298,6 +301,37 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       // The server runs without a request logger, so this is the one trail a
       // failed revision leaves. Never the feedback text, scripts or payloads.
       console.error(`Director revision failed job=${id} feedbackLength=${feedback.length} error=${error}`);
+      return reply.code(400).send({ error });
+    }
+  });
+
+  // Research more at the text gate: the Director's feedback says what evidence is
+  // missing. One targeted research refresh of the current package and a new
+  // draft written from it, saved only if everything succeeded; then, like a
+  // manual revision, the old Text QA result is cleared and the new draft checked.
+  // The job stays awaiting_text and unapproved; nothing is requeued. On failure
+  // the current draft, research and Text QA result are unchanged.
+  app.post("/api/jobs/:id/research-more", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = getJob(id);
+    if (!job) return reply.code(404).send({ error: "Job not found" });
+    const parsed = reviseBody.safeParse(req.body);
+    const invalid = parsed.success ? directorFeedbackError(parsed.data.feedback) : "Director feedback is required.";
+    if (invalid || !parsed.success) return reply.code(400).send({ error: invalid });
+    const feedback = parsed.data.feedback.trim();
+    if (job.state !== "awaiting_text" || (job.scratch as { textApproved?: boolean }).textApproved) return reply.code(409).send({ error: "More research can only be requested at the story review." });
+    if (isTextQaRunning(id)) return reply.code(409).send({ error: TEXT_QA_BUSY });
+    if (isRevisingText(id)) return reply.code(409).send({ error: "The story is being revised. Wait for it to finish." });
+    if (isResearchingMore(id)) return reply.code(409).send({ error: RESEARCH_MORE_BUSY });
+    try {
+      await researchMoreForJob(id, feedback);
+      clearTextQaForJob(id);
+      void autoTextQaForJob(id);
+      return { job: toPublic(getJob(id)!) };
+    } catch (e: any) {
+      const error = e?.message || "Could not research the story further.";
+      // The one trail a failed request leaves: never the feedback text, research or scripts.
+      console.error(`Research more failed job=${id} feedbackLength=${feedback.length} error=${error}`);
       return reply.code(400).send({ error });
     }
   });

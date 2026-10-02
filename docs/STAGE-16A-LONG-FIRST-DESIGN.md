@@ -361,6 +361,14 @@ Before LONG COMPLETE there is no Short script, Text QA, narration, plan,
 acquisition, image, Runway clip, render, QC or spend. Scratch never gains a
 Short key in this phase.
 
+**The text gate is human.** Automatic Text QA never approves: its PASS means the
+draft is ready for the Director's review. Revise story (the existing evidence),
+and **Research more** (Film #6 showed a strong story whose verified evidence
+pack was too thin: one targeted three-pass research refresh of the current
+package from the Director's request, then a new draft by the normal writer and
+fidelity audit, saved only if all of it succeeds) both re-run Text QA on the new
+draft. The job stays at awaiting_text, pre-media, until Approve & continue.
+
 **No empty Short state.** Absence means absence: a Long-first job never
 persists a placeholder such as `short: ""`, `short: {}`, `shortShots: []`,
 `retainedPresentations.short` or `finalFilmQa.short`. Where a shared helper

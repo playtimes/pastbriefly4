@@ -177,6 +177,44 @@ export async function researchStory(story: Story): Promise<ResearchPackage> {
   return pkg;
 }
 
+// ---- Research more (the human text gate) ----
+
+// The Director found the CURRENT verified package too thin for the Long and asked
+// for more evidence. Three web-search passes at the same standard as
+// researchStory: a targeted expansion of the current package (the Director's
+// request is a research question, never evidence), then the same integrity
+// audit and the same final fact verification. Returns the verified package and
+// saves nothing: the caller replaces the job's research only once everything
+// after it has also succeeded. Mock and the fixture return the package as it is.
+export async function researchStoryMore(story: Story, current: ResearchPackage, feedback: string): Promise<ResearchPackage> {
+  if (story.slug === "paul-bunyan" || config.mode !== "live") return current;
+  const head = `STORY: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nHOOK: ${story.hook}`;
+
+  const expanded = await respondJson<ResearchPackage>({
+    instructions: RESEARCH_MORE_INSTRUCTIONS,
+    input: `${head}\n\nCURRENT VERIFIED RESEARCH PACKAGE:\n${JSON.stringify(current, null, 2)}\n\nDIRECTOR RESEARCH REQUEST (a research question and priority - NOT evidence):\n${feedback}`,
+    schemaName: "research_more",
+    schema: RESEARCH_SCHEMA,
+    webSearch: true,
+  });
+
+  const audited = await respondJson<ResearchPackage>({
+    instructions: RESEARCH_AUDIT_INSTRUCTIONS,
+    input: `${head}\n\nDRAFT RESEARCH TO AUDIT:\n${JSON.stringify(expanded, null, 2)}`,
+    schemaName: "research_audit",
+    schema: RESEARCH_SCHEMA,
+    webSearch: true,
+  });
+
+  return respondJson<ResearchPackage>({
+    instructions: RESEARCH_VERIFY_INSTRUCTIONS,
+    input: `${head}\n\nAUDITED RESEARCH TO VERIFY:\n${JSON.stringify(audited, null, 2)}`,
+    schemaName: "research_verify",
+    schema: RESEARCH_SCHEMA,
+    webSearch: true,
+  });
+}
+
 function worldFromStory(s: Story): StoryWorld {
   return {
     period: s.year,
@@ -239,6 +277,20 @@ Also return a short production note and a small visual world (period, place, pal
 // Shared by the audit and the final verification: both correct the package in
 // place, so the summary must stay story content rather than a verdict on it.
 const SUMMARY_RULE = `SUMMARY IS THE STORY (mandatory): the "summary" field must contain ONLY a concise factual summary of the historical story itself - what happened, who did it, where and when. Never put audit findings, verification commentary, confidence notes, methodology, source-quality commentary or reviewer notes in the summary (never write things like "All major facts in the submitted package are supported..." or "The package has been corrected..."). Correct the package IN PLACE and return the corrected research package itself, not a description of your audit. Preserve useful supported story detail in the summary rather than replacing it with a verdict.`;
+
+const RESEARCH_MORE_INSTRUCTIONS = `You are expanding an existing VERIFIED PastBriefly research package because the human Director found it too thin for the Long documentary. PastBriefly makes "true historical stories that sound made up".
+
+You are given the story, its CURRENT verified research package (summary, moments, facts, sources, production note, visual world) and the DIRECTOR RESEARCH REQUEST. The request tells you WHERE to look and what is missing; it is a research question and a priority, never evidence. Nothing in it is a fact until a source you find supports it.
+
+Use fresh web search, aimed specifically at the evidence the Director asked for. Prefer (1) official documents, government records and archives; (2) museums and national historical institutions; (3) universities and academic material; (4) strong reputable secondary sources. Never let a weaker source override a stronger one.
+
+EXPAND, DO NOT REWRITE: keep the strange central premise and the causal story. Preserve every already-verified fact unless a stronger source corrects it. Add concrete, useful events - real people, actions, places and dates - rather than filler. When strong sources establish a distinct event, add it as its own moment, in chronological order. Add a concrete fact (with its strongest source) for every new date, actor, location, action or sequence step. Resolve contradictions with the strongest source, or keep the disagreement attributed. Do not weaken strong existing sourcing, do not pad toward a runtime, and do not invent: if the evidence for something the Director asked about cannot be found, leave it out.
+
+SOURCES: every source URL must come from a page you actually found or consulted in THIS research. Never invent or reconstruct a URL. Keep the existing sources that still support the package. Each source note must describe what that source actually supports.
+
+${SUMMARY_RULE}
+
+Return the expanded package as strict JSON in the SAME schema (summary, moments, sources, facts, productionNote, world).`;
 
 const RESEARCH_AUDIT_INSTRUCTIONS = `You are a historical integrity auditor for PastBriefly. You are given a DRAFT research package (summary, moments, sources, productionNote, visual world) for one story. Use fresh web search to fact-check it, then return a corrected package in the SAME schema. This is the last factual pass before the scripts are written, so the audited package must be trustworthy.
 

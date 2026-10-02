@@ -418,9 +418,13 @@ therefore evaluate BOTH quality and economics.
        Long Final-film QC → durable LONG COMPLETE → independent Long
        registration, with zero Short work or spend before LONG COMPLETE:
        before LONG COMPLETE, the Short does not exist.
-    3. **Film #6: NEXT** - the first real production proof of the Long-first
-       system. Film #6 has NOT started. The engineering is complete; no real
-       Long has been produced through it yet.
+    3. **Film #6: IN PROGRESS** - the first real production proof of the
+       Long-first system. Its job waits at the human text gate; no narration
+       or media yet, and no real Long has been produced through it yet. The
+       human text gate can request a **Research more** refresh when the
+       verified evidence pack is too thin (an explicit Director action: a
+       targeted three-pass research refresh and a new draft, still pre-media
+       and human-controlled; only Approve & continue leaves the gate).
     4. Then 16C, which stays BLOCKED until the Long-first system has produced
        and passed a real finished Long through Film #6.
 

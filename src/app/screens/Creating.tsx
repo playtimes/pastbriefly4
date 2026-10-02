@@ -152,6 +152,15 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
     show(job);
   }
 
+  // Research more from Director feedback naming the missing evidence: the job
+  // stays at the text gate and comes back with the refreshed research and draft.
+  // Errors are thrown to the review screen, which keeps the current draft.
+  async function researchMore(feedback: string): Promise<void> {
+    if (!jobId.current) throw new Error("The job is not loaded yet.");
+    const { job } = await api.researchMore(jobId.current, feedback);
+    show(job);
+  }
+
   // Revise one film's edit from Director feedback at the visual preview. The job
   // stays at the preview; errors are thrown to the Director board, which keeps
   // the current board and the pasted feedback. targetSlot (from an issue) limits
@@ -270,6 +279,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
           onApprove={approveText}
           approving={approvingText}
           onRevise={reviseText}
+          onResearchMore={researchMore}
         />
       );
     }
@@ -380,22 +390,25 @@ const REVIEW_TABS: [ReviewTab, string][] = [
 ];
 
 // The whole story: every part of the text in one viewport-sized workspace, with
-// Revise story and Continue production. Header and tabs on top, only the active
-// tab scrolls, and the footer never scrolls away. The tab is local UI state only
-// - never persisted, routed or sent anywhere.
+// Revise story, Research more and Continue production. Header and tabs on top,
+// only the active tab scrolls, and the footer never scrolls away. The tab is
+// local UI state only - never persisted, routed or sent anywhere.
 export function StoryReviewPanel(props: {
   review: StoryReview;
   onApprove: () => void;
   approving: boolean;
   onRevise?: (feedback: string) => Promise<void>;
+  onResearchMore?: (feedback: string) => Promise<void>; // the evidence is too thin: research further
   initialTab?: ReviewTab; // opened from a Text QA issue: its tab
   onBack?: () => void;
   backLabel?: string;
 }): React.ReactElement {
-  const { onRevise, initialTab, ...rest } = props;
+  const { onRevise, onResearchMore, initialTab, ...rest } = props;
   const [tab, setTab] = useState<ReviewTab>(initialTab ?? "story");
   const revise = useRevise(onRevise, () => setTab("story"));
-  return <StoryReviewView {...rest} tab={tab} onTab={setTab} revise={revise} />;
+  // Research more uses the same feedback form and state as a revision.
+  const research = useRevise(onResearchMore, () => setTab("story"));
+  return <StoryReviewView {...rest} tab={tab} onTab={setTab} revise={revise} research={research} />;
 }
 
 // The outcome of the last revision attempt in this Story Review session. Local
@@ -561,6 +574,7 @@ export function StoryReviewView({
   onApprove,
   approving,
   revise,
+  research,
   onBack,
   backLabel,
 }: {
@@ -570,9 +584,12 @@ export function StoryReviewView({
   onApprove: () => void;
   approving: boolean;
   revise?: ReviseControls;
+  research?: ReviseControls; // Research more: the same feedback form, asking for more evidence
   onBack?: () => void;
   backLabel?: string;
 }): React.ReactElement {
+  // One text-gate action at a time: a running or open form holds the others.
+  const busy = !!revise?.running || !!research?.running;
   return (
     <div className="max-w-3xl h-[calc(100dvh-8rem)] md:h-[calc(100dvh-6rem)] min-h-[22rem] flex flex-col gap-5">
       <header className="flex-none">
@@ -605,6 +622,7 @@ export function StoryReviewView({
       </div>
 
       {revise && <ReviseBox revise={revise} />}
+      {research && <ReviseBox revise={research} labels={RESEARCH_LABELS} />}
 
       {revise?.notice?.kind === "applied" && !revise.open && (
         <div role="status" className="flex-none flex flex-col gap-0.5 rounded-lg border border-[#a9c3a4]/60 bg-[#a9c3a4]/10 px-4 py-3 text-[14px] text-ink">
@@ -612,15 +630,26 @@ export function StoryReviewView({
           <span>Read the updated story, then continue production.</span>
         </div>
       )}
+      {research?.notice?.kind === "applied" && !research.open && (
+        <div role="status" className="flex-none flex flex-col gap-0.5 rounded-lg border border-[#a9c3a4]/60 bg-[#a9c3a4]/10 px-4 py-3 text-[14px] text-ink">
+          <strong className="font-semibold">Research refreshed</strong>
+          <span>Read the new research and story, then continue production.</span>
+        </div>
+      )}
 
       <footer className="flex-none flex flex-wrap items-center justify-end gap-x-6 gap-y-3 pt-4 border-t border-line">
         <div className="flex-none flex flex-wrap items-center gap-3">
           {revise && (
-            <button onClick={() => revise.onOpen()} disabled={revise.open || approving} aria-expanded={revise.open} className="btn btn-ghost">
+            <button onClick={() => revise.onOpen()} disabled={revise.open || !!research?.open || busy || approving} aria-expanded={revise.open} className="btn btn-ghost">
               Revise story
             </button>
           )}
-          <button onClick={onApprove} disabled={approving || revise?.running} className="btn btn-primary">
+          {research && (
+            <button onClick={() => research.onOpen()} disabled={research.open || !!revise?.open || busy || approving} aria-expanded={research.open} className="btn btn-ghost">
+              Research more
+            </button>
+          )}
+          <button onClick={onApprove} disabled={approving || busy} className="btn btn-primary">
             {approving ? "Continuing…" : "Continue production"}
           </button>
         </div>
@@ -663,19 +692,48 @@ function TabContent({ review: r, tab }: { review: StoryReview; tab: ReviewTab })
   );
 }
 
-// The open Director revision form: feedback, what went wrong, Cancel and submit.
-function ReviseBox({ revise }: { revise: ReviseControls }): React.ReactElement | null {
+// The words of one feedback form: a revision of the draft, or Research more.
+interface FeedbackLabels {
+  id: string;
+  section: string;
+  placeholder: string;
+  failed: string;
+  unchanged: string;
+  running: string;
+  submit: string;
+}
+const REVISE_LABELS: FeedbackLabels = {
+  id: "director-feedback",
+  section: "Director revision",
+  placeholder: "Paste the REVISE feedback from the Director...",
+  failed: "Revision failed",
+  unchanged: "The current draft was not changed.",
+  running: "Revising…",
+  submit: "Revise story",
+};
+const RESEARCH_LABELS: FeedbackLabels = {
+  id: "director-research-feedback",
+  section: "Research more",
+  placeholder: "Say what evidence is missing: the events, people, dates or sources to research further...",
+  failed: "Research failed",
+  unchanged: "The current research and draft were not changed.",
+  running: "Researching…",
+  submit: "Research more",
+};
+
+// The open Director feedback form: feedback, what went wrong, Cancel and submit.
+function ReviseBox({ revise, labels = REVISE_LABELS }: { revise: ReviseControls; labels?: FeedbackLabels }): React.ReactElement | null {
   if (!revise.open) return null;
   return (
-    <section aria-label="Director revision" className="flex-none flex flex-col gap-2.5 pt-4 border-t border-line">
-      <label htmlFor="director-feedback" className="kicker">Director feedback</label>
+    <section aria-label={labels.section} className="flex-none flex flex-col gap-2.5 pt-4 border-t border-line">
+      <label htmlFor={labels.id} className="kicker">Director feedback</label>
       <textarea
-        id="director-feedback"
+        id={labels.id}
         value={revise.feedback}
         onChange={(e) => revise.onFeedback(e.target.value)}
         disabled={revise.running}
         rows={5}
-        placeholder="Paste the REVISE feedback from the Director..."
+        placeholder={labels.placeholder}
         className="w-full max-h-[30vh] resize-y rounded-xl bg-field border border-line px-4 py-3 text-ink text-[14.5px] leading-relaxed placeholder:text-dim outline-none transition focus:border-accent/55"
       />
       {revise.notice?.kind === "invalid" && (
@@ -685,8 +743,8 @@ function ReviseBox({ revise }: { revise: ReviseControls }): React.ReactElement |
       )}
       {revise.notice?.kind === "failed" && (
         <div role="alert" className="flex flex-col gap-1 rounded-lg border border-accent bg-accent/15 px-4 py-3 text-[14px] text-ink">
-          <strong className="font-semibold">Revision failed</strong>
-          <span>The current draft was not changed.</span>
+          <strong className="font-semibold">{labels.failed}</strong>
+          <span>{labels.unchanged}</span>
           <span className="text-[13px] break-words">{revise.notice.message}</span>
         </div>
       )}
@@ -695,7 +753,7 @@ function ReviseBox({ revise }: { revise: ReviseControls }): React.ReactElement |
           Cancel
         </button>
         <button onClick={revise.onSubmit} disabled={revise.running} className="btn btn-ghost">
-          {revise.running ? "Revising…" : "Revise story"}
+          {revise.running ? labels.running : labels.submit}
         </button>
       </div>
     </section>
