@@ -396,23 +396,25 @@ therefore evaluate BOTH quality and economics.
 
 ### Next
 
-16A. **Long-first production reset** - DESIGN COMPLETE, ready for
-    implementation review. See `docs/STAGE-16A-LONG-FIRST-DESIGN.md`.
+16A. **Long-first production reset** - DESIGN COMPLETE; Slice 1 COMPLETE;
+    Slice 2 NEXT. See `docs/STAGE-16A-LONG-FIRST-DESIGN.md`.
     - The Long-first contract stands: ONE job, serial Long → durable LONG
       COMPLETE → Short derivation.
     - Before LONG COMPLETE the Short does not exist.
     - Independent Long video registration needs no `videos` schema migration.
     - Existing jobs, including Project Azorian, keep pair-first semantics.
 
-    Implementation order (design section J; nothing started):
-    1. **Slice 1 - archive retention.** Acquired, screened archive and its
+    Implementation order (design section J):
+    1. **Slice 1 - archive retention: COMPLETE** (implemented, passed final
+       Director review; `f5548f3`). Acquired, screened archive and its
        provenance survive, story-scoped, even when the edit does not select
        it. Small and boring: no asset platform.
-    2. **Slice 2 - one honest Long-first vertical path** for new jobs: Long
+    2. **Slice 2 - one honest Long-first vertical path: NEXT** (not started)
+       for new jobs: Long
        script → Long Text QA → Long narration → Long visuals → Long render →
        Long Final-film QC → durable LONG COMPLETE → independent Long
        registration, with zero Short work or spend before LONG COMPLETE.
-    3. Then 16C.
+    3. Then 16C, only after Slice 2 has produced a successful finished Long.
 
     Rejected: a finish-only "Long-first" flow that stays pair-first upstream
     and only registers the Long earlier. It breaks the contract and leaves

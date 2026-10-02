@@ -1,12 +1,13 @@
 # Stage 16A - Long-first production design
 
-Design only. Nothing here is implemented. `docs/ROADMAP.md` stays the source of
+Design document. Only Slice 1 (archive retention, J.2) is implemented; Slice 2
+and 16C are not. `docs/ROADMAP.md` stays the source of
 truth; this file records what the current code couples, the contract we are
 moving to, and how the completed Stage 16B evidence shapes the Long phase's
 visuals (sections F and I).
 
-Grounded in `main` at `ecc1cb7`. Status: design complete, ready for
-implementation review.
+Grounded in `main` at `ecc1cb7`. Status: design complete; Slice 1 COMPLETED
+(`f5548f3`); Slice 2 next.
 
 ## A. Current pair-first coupling
 
@@ -215,8 +216,8 @@ should assume Blender exists.
 
 ### J.1 Order, and the rejected finish-only step
 
-1. **Slice 1 - archive retention** (J.2).
-2. **Slice 2 - one honest Long-first vertical path** (J.3).
+1. **Slice 1 - archive retention** (J.2). COMPLETED.
+2. **Slice 2 - one honest Long-first vertical path** (J.3). Next.
 3. **16C - Long → Short derivation**, only after Slice 2 has produced a
    finished Long.
 
@@ -229,7 +230,8 @@ the full contract.
 
 ### J.2 Slice 1 - archive retention
 
-Status: implemented in the working tree, awaiting Director review.
+Status: COMPLETED. Implemented and passed final Director review; committed as
+`f5548f3` (feat: retain screened archive candidates).
 
 **Demonstrated defect.**
 - Archive files PB4 acquired and screened are destroyed in three places:
