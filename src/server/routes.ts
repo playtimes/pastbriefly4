@@ -24,7 +24,7 @@ import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
 import { enqueueJob } from "./worker.ts";
-import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob, resumeFinalVisualRepairForJob } from "../production/generate.ts";
+import { newJobId, clearVisualsForRebuild, raiseApprovedMax, approveTextForJob, reviseTextForJob, isRevisingText, isTextQaRunning, textQaState, clearTextQaForJob, autoTextQaForJob, isAssetQaRunning, assetQaState, clearAssetQaIssue, isDirectorQaRunning, directorQaState, startDirectorQaForJob, approveVisualsForJob, visualAutopilotState, jobProgress, regenerateStill, isRegeneratingStill, reviseSequenceForJob, isRevisingSequence, directorReviewForJob, directorRepairForJob, directorCleanupForJob, directorCoordinateForJob, directorVerifyForJob, finalQaState, acceptFinalForJob, resumeFinalVisualRepairForJob } from "../production/generate.ts";
 
 const TEXT_QA_BUSY = "Automatic Text QA is running. Wait for it to finish.";
 const ASSET_QA_BUSY = "Automatic Asset QA is running. Wait for it to finish.";
@@ -56,10 +56,11 @@ function toPublic(j: JobRecord): Job {
   // Only the flow marker of the private scratch: absent for a pair-first job.
   const flowed = scratch.flow === "long-first" ? { ...pub, flow: "long-first" as const } : pub;
   const withProgress = progress ? { ...flowed, progress } : flowed;
-  // Text QA status: its phase or stop reason at the text gate, and "passed" while
-  // the approved job heads for the visuals. Server memory only.
+  // Text QA status: at the text gate its phase, its stop reason or "passed" (the
+  // draft is ready for the human review), and "passed" while the job a person
+  // approved heads for the visuals. Server memory only.
   const qa = textQaState(j.id);
-  const shown = qa && (j.state === "awaiting_text" ? qa.status !== "passed" : qa.status === "passed" && (j.state === "queued" || j.state === "running"));
+  const shown = qa && (j.state === "awaiting_text" || (qa.status === "passed" && (j.state === "queued" || j.state === "running")));
   const withTextQa = shown ? { ...withProgress, textQa: qa } : withProgress;
   // Asset QA at the visual preview: its running phase, then its latest result
   // (only the exceptions for assets the film still shows).
@@ -284,7 +285,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (isTextQaRunning(id)) return reply.code(409).send({ error: TEXT_QA_BUSY });
     if (isRevisingText(id)) return reply.code(409).send({ error: "A revision is already running for this story." });
     try {
-      return { job: toPublic(await reviseTextForJob(id, feedback)) };
+      await reviseTextForJob(id, feedback);
+      // The saved draft is new, so the old Text QA result no longer describes it:
+      // check the new draft again. Text QA never approves; the job stays at the
+      // text gate for the person. (Only this manual route does this: Text QA's own
+      // repair also uses reviseTextForJob and must not start another run.)
+      clearTextQaForJob(id);
+      void autoTextQaForJob(id);
+      return { job: toPublic(getJob(id)!) };
     } catch (e: any) {
       const error = e?.message || "Could not revise the story.";
       // The server runs without a request logger, so this is the one trail a

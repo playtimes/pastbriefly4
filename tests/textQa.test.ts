@@ -7,9 +7,10 @@ import type { Story } from "../src/types.ts";
 
 // Automatic Director Text QA (Autopilot v1): one Director review of the saved
 // Story Review, at most one automatic repair through the existing revision and
-// audit, one read-only verification, then the existing approval path. The
-// provider is stubbed per schema, so nothing live runs; research, narration and
-// media must never run inside Text QA.
+// audit, one read-only verification. It never approves: a PASS leaves the draft
+// at the text gate, ready for the human review, and only a person's Approve &
+// continue requeues the job. The provider is stubbed per schema, so nothing live
+// runs; research, narration and media must never run inside Text QA.
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pb4-text-qa-"));
 process.env.PROVIDER_MODE = "live";
 process.env.OPENAI_API_KEY = "test-key";
@@ -64,7 +65,7 @@ vi.mock("../src/server/worker.ts", () => ({ enqueueJob: vi.fn() }));
 vi.mock("../src/production/wikimedia.ts", () => ({ fetchArchive: vi.fn(async () => null) }));
 vi.mock("../src/providers/runway.ts", () => ({ generateMotion: vi.fn(async () => {}) }));
 
-const { runJob, newJobId, approveTextForJob, autoTextQaForJob } = await import("../src/production/generate.ts");
+const { runJob, newJobId, autoTextQaForJob, textQaState } = await import("../src/production/generate.ts");
 const { createJob, getJob, updateJob, upsertStory, getStory, getScripts } = await import("../src/server/store.ts");
 const { registerRoutes } = await import("../src/server/routes.ts");
 const { config } = await import("../src/server/config.ts");
@@ -121,8 +122,11 @@ async function app() {
 }
 const publicJob = async (a: any, jobId: string) => (await a.inject({ method: "GET", url: `/api/jobs/${jobId}` })).json().job;
 const names = () => h.calls.map((c) => c.schemaName);
-const advance = vi.fn();
-const qa = (jobId: string) => autoTextQaForJob(jobId, advance);
+const qa = (jobId: string) => autoTextQaForJob(jobId);
+// The Text QA a successful manual revision starts runs in the background: wait for it.
+const settled = async (jobId: string) => {
+  for (let i = 0; i < 200 && textQaState(jobId)?.status === "running"; i++) await new Promise((r) => setTimeout(r, 5));
+};
 const PASS = { decision: "PASS", summary: "Clear, sourced and causal.", repairFeedback: null, humanReview: [] };
 
 beforeEach(() => {
@@ -130,7 +134,7 @@ beforeEach(() => {
   h.failOn = "";
   h.hold = null;
   h.research = h.narration = h.images = 0;
-  advance.mockReset();
+  vi.mocked(enqueueJob).mockClear();
   h.review = { ...PASS };
   h.verify = { decision: "PASS", summary: "The repair holds.", humanReview: [] };
   h.revision = {
@@ -144,7 +148,7 @@ beforeEach(() => {
 });
 
 describe("Automatic Text QA: PASS", () => {
-  test("one review of the complete saved Story Review, then the existing approval, with no click", async () => {
+  test("one review of the complete saved Story Review; PASS leaves the draft at the gate, unapproved and not requeued", async () => {
     const { jobId } = atTextGate();
     expect(await qa(jobId)).toEqual({ status: "passed" });
 
@@ -169,47 +173,43 @@ describe("Automatic Text QA: PASS", () => {
     expect(call.input).not.toContain("REPAIR THAT WAS APPLIED");
     expect(call.instructions).toBe(TEXT_QA_INSTRUCTIONS);
 
-    // Approved through approveTextForJob and requeued through `advance`.
+    // PASS is a machine check, not an approval: the job waits for the human.
     const job = getJob(jobId)!;
-    expect(job.state).toBe("queued");
-    expect((job.scratch as any).textApproved).toBe(true);
-    expect(advance).toHaveBeenCalledOnce();
-    expect(advance).toHaveBeenCalledWith(jobId);
+    expect(job.state).toBe("awaiting_text");
+    expect((job.scratch as any).textApproved).toBeUndefined();
+    expect(enqueueJob).not.toHaveBeenCalled();
     expect(job.spent).toBeCloseTo(1.03); // one script-priced call
     expect(h.research + h.narration + h.images).toBe(0);
+    // A resume at the gate starts nothing either.
+    expect(await runJob(jobId)).toBeUndefined();
+    expect(getJob(jobId)!.state).toBe("awaiting_text");
+    expect(h.narration + h.images).toBe(0);
   });
 
-  test("the auto-approved job is the manual Approve & continue job, and resumes the same pipeline at narration", async () => {
-    const auto = atTextGate();
-    const manual = atTextGate();
-    await qa(auto.jobId);
-    approveTextForJob(manual.jobId);
-
-    const shape = (id: string) => {
-      const { id: _id, storyId: _s, createdAt: _c, updatedAt: _u, spent: _sp, scratch, ...rest } = getJob(id)!;
-      const { spent: _x, ...s } = scratch as any;
-      return { ...rest, scratch: s };
-    };
-    expect(shape(auto.jobId)).toEqual(shape(manual.jobId));
-
-    // The same continuation: runJob skips research and scripts and starts narration.
-    const before = h.calls.length;
-    await expect(runJob(auto.jobId)).rejects.toThrow("narration reached");
-    await expect(runJob(manual.jobId)).rejects.toThrow("narration reached");
-    expect(h.calls.length).toBe(before);
-    expect(h.research).toBe(0);
-    expect(h.narration).toBe(2);
-    for (const id of [auto.jobId, manual.jobId]) expect(getJob(id)!.step).toBe("narration");
-  });
-
-  test("the passed job says so while it continues, and the draft is no longer up for review", async () => {
+  test("the passed draft is shown as passed and still up for review; only the human Approve & continue requeues it, which resumes at narration", async () => {
     const { jobId } = atTextGate();
     const a = await app();
     await qa(jobId);
-    const job = await publicJob(a, jobId);
-    expect(job.state).toBe("queued");
-    expect(job.textQa).toEqual({ status: "passed" });
-    expect(job.review).toBeUndefined();
+    const waiting = await publicJob(a, jobId);
+    expect(waiting.state).toBe("awaiting_text");
+    expect(waiting.textQa).toEqual({ status: "passed" });
+    expect(waiting.review).toMatchObject({ longScript: scripts.long, shortScript: scripts.short });
+
+    // The existing approve-text action is the one approval.
+    const approved = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/approve-text` });
+    expect(approved.json().job).toMatchObject({ state: "queued", textQa: { status: "passed" } });
+    expect(approved.json().job.review).toBeUndefined();
+    expect((getJob(jobId)!.scratch as any).textApproved).toBe(true);
+    expect(enqueueJob).toHaveBeenCalledOnce();
+    expect(enqueueJob).toHaveBeenCalledWith(jobId);
+
+    // The same job then resumes normally: research and scripts are skipped and narration starts.
+    const before = h.calls.length;
+    await expect(runJob(jobId)).rejects.toThrow("narration reached");
+    expect(h.calls.length).toBe(before);
+    expect(h.research).toBe(0);
+    expect(h.narration).toBe(1);
+    expect(getJob(jobId)!.step).toBe("narration");
     await a.close();
   });
 });
@@ -234,13 +234,17 @@ describe("Automatic Text QA: REPAIR", () => {
     expect(verify.instructions).toBe(TEXT_VERIFY_INSTRUCTIONS);
 
     expect(getScripts(story.id)).toEqual({ long: "Audited revised long RL-2.", short: "Audited revised short RS-2." });
+    // The repaired, verified draft waits at the gate for the human review.
     const job = getJob(jobId)!;
-    expect(job.state).toBe("queued");
-    expect((job.scratch as any).textApproved).toBe(true);
-    expect(advance).toHaveBeenCalledOnce();
-    expect(advance).toHaveBeenCalledWith(jobId);
+    expect(job.state).toBe("awaiting_text");
+    expect((job.scratch as any).textApproved).toBeUndefined();
+    expect((job.scratch as any).scripts).toEqual({ long: "Audited revised long RL-2.", short: "Audited revised short RS-2." });
+    expect(enqueueJob).not.toHaveBeenCalled();
     expect(job.spent).toBeCloseTo(1.12); // review + revision + audit + verification: the maximum chain
     expect(h.research + h.narration + h.images).toBe(0);
+    const a = await app();
+    expect(await publicJob(a, jobId)).toMatchObject({ state: "awaiting_text", textQa: { status: "passed" }, review: { longScript: "Audited revised long RL-2." } });
+    await a.close();
   });
 
   test("a REPAIR that also lists human issues is HUMAN_REVIEW and never repairs", async () => {
@@ -262,7 +266,7 @@ describe("Automatic Text QA: HUMAN_REVIEW", () => {
     await qa(jobId);
 
     expect(names()).toEqual(["text_qa"]);
-    expect(advance).not.toHaveBeenCalled();
+    expect(enqueueJob).not.toHaveBeenCalled();
     const job = await publicJob(a, jobId);
     expect(job.state).toBe("awaiting_text");
     expect(job.review).toEqual(before);
@@ -278,6 +282,8 @@ describe("Automatic Text QA: HUMAN_REVIEW", () => {
     // Manual Revise and Approve & continue remain the escape hatch.
     const revised = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/revise-text`, payload: { feedback: "Soften the hook." } });
     expect(revised.statusCode).toBe(200);
+    await settled(jobId); // the revised draft is checked again (still HUMAN_REVIEW here)
+    expect((await publicJob(a, jobId)).textQa).toMatchObject({ status: "stopped", stage: "director_review" });
     expect(h.narration + h.images).toBe(0); // nothing advanced before the human approved
     const approved = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/approve-text` });
     expect(approved.json().job.state).toBe("queued");
@@ -293,7 +299,7 @@ describe("Automatic Text QA: HUMAN_REVIEW", () => {
     await qa(jobId);
 
     expect(names()).toEqual(["text_qa", "story_revision", "script_audit", "text_verify"]);
-    expect(advance).not.toHaveBeenCalled();
+    expect(enqueueJob).not.toHaveBeenCalled();
     const job = await publicJob(a, jobId);
     expect(job.state).toBe("awaiting_text");
     expect(job.textQa).toMatchObject({ status: "stopped", stage: "final_verify", summary: "The Short still overstates.", feedback: FEEDBACK, issues: [{ section: "short", reason: "The Short ends on a weak statistic WS-4." }] });
@@ -310,6 +316,49 @@ describe("Automatic Text QA: HUMAN_REVIEW", () => {
       expect(packet).not.toContain(s);
       expect(verify).not.toContain(s);
     }
+    await a.close();
+  });
+});
+
+describe("Automatic Text QA: a manual revision invalidates the last result", () => {
+  test("PASS, then a successful manual revision: the old PASS is cleared, Text QA checks the NEW draft, and the job still only waits for the human", async () => {
+    const { jobId } = atTextGate();
+    const a = await app();
+    expect(await qa(jobId)).toEqual({ status: "passed" });
+
+    const res = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/revise-text`, payload: { feedback: FEEDBACK } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().job.textQa).toEqual({ status: "running", phase: "review" }); // the old PASS no longer shows
+    await settled(jobId);
+
+    // The pair review ran again, on the revised and audited draft.
+    expect(names()).toEqual(["text_qa", "story_revision", "script_audit", "text_qa"]);
+    const again = h.calls[3];
+    expect(again.instructions).toBe(TEXT_QA_INSTRUCTIONS);
+    for (const s of ["TITLE: Revised title RT-6", "LONG SCRIPT:\nAudited revised long RL-2.", "SHORT SCRIPT:\nAudited revised short RS-2."]) expect(again.input).toContain(s);
+    for (const s of ["Current long CL-1", "Current short CS-1", "Fact FX-2 is disputed"]) expect(again.input).not.toContain(s);
+
+    // Second PASS: shown as passed, on the revised draft, still not approved.
+    const job = await publicJob(a, jobId);
+    expect(job).toMatchObject({ state: "awaiting_text", textQa: { status: "passed" }, review: { title: "Revised title RT-6", longScript: "Audited revised long RL-2.", shortScript: "Audited revised short RS-2." } });
+    expect((getJob(jobId)!.scratch as any).textApproved).toBeUndefined();
+    expect(enqueueJob).not.toHaveBeenCalled();
+    expect(h.research + h.narration + h.images).toBe(0);
+    await a.close();
+  });
+
+  test("a failed manual revision keeps the draft and the last Text QA result, and starts no new check", async () => {
+    const { jobId } = atTextGate();
+    const a = await app();
+    expect(await qa(jobId)).toEqual({ status: "passed" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    h.revision.facts = [{ fact: "A new claim NC-1.", source: 3 }]; // the pack has 2 sources
+    const res = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/revise-text`, payload: { feedback: FEEDBACK } });
+    expect(res.statusCode).toBe(400);
+    await settled(jobId);
+    expect(names()).toEqual(["text_qa", "story_revision"]); // no second review
+    expect(await publicJob(a, jobId)).toMatchObject({ state: "awaiting_text", textQa: { status: "passed" }, review: { longScript: scripts.long } });
+    vi.mocked(console.error).mockRestore();
     await a.close();
   });
 });
@@ -331,7 +380,7 @@ describe("Automatic Text QA: failures", () => {
     expect(getScripts(story.id)).toBeNull();
     expect(getStory(story.id)!.title).toBe("Current title CT-5");
     expect(job.textQa).toMatchObject({ status: "stopped", stage: "director_review", message: "Text QA could not complete. Review the current draft manually.", error: "OpenAI responses 500: text_qa boom" });
-    expect(advance).not.toHaveBeenCalled();
+    expect(enqueueJob).not.toHaveBeenCalled();
 
     expect(logged).toHaveBeenCalledOnce();
     expect(logged.mock.calls[0]).toEqual([`Text QA failed job=${jobId} stage=director_review error=OpenAI responses 500: text_qa boom`]);
@@ -416,15 +465,17 @@ describe("Automatic Text QA: concurrency", () => {
     expect(approve.json().error).toBe("Automatic Text QA is running. Wait for it to finish.");
     const revise = await a.inject({ method: "POST", url: `/api/jobs/${jobId}/revise-text`, payload: { feedback: "Fix it." } });
     expect(revise.statusCode).toBe(409);
-    expect(await autoTextQaForJob(jobId, advance)).toBeUndefined();
+    expect(await autoTextQaForJob(jobId)).toBeUndefined();
     const generate = await a.inject({ method: "POST", url: `/api/stories/${story.id}/generate`, payload: { approvedMax: 15 } });
     expect(generate.json()).toMatchObject({ duplicate: true, job: { id: jobId } });
 
     release();
     await running;
     expect(names()).toEqual(["text_qa"]);
-    expect(getJob(jobId)!.state).toBe("queued");
-    expect(advance).toHaveBeenCalledOnce();
+    expect(getJob(jobId)!.state).toBe("awaiting_text"); // passed: ready for the human review, not approved
+    expect(enqueueJob).not.toHaveBeenCalled();
+    // Once it has finished, the manual tools work again.
+    expect((await a.inject({ method: "POST", url: `/api/jobs/${jobId}/approve-text` })).json().job.state).toBe("queued");
     await a.close();
   });
 });
@@ -441,11 +492,11 @@ describe("Automatic Text QA: cost", () => {
     expect(await qa(noRepair.jobId)).toMatchObject({ status: "stopped", stage: "revision", error: expect.stringContaining("Approved maximum") });
     expect(names()).toEqual(["text_qa"]);
     for (const id of [noReview.jobId, noRepair.jobId]) expect(getJob(id)!.state).toBe("awaiting_text");
-    expect(advance).not.toHaveBeenCalled();
+    expect(enqueueJob).not.toHaveBeenCalled();
     vi.mocked(console.error).mockRestore();
   });
 
-  test("mock mode makes no provider call and passes through the same approval", async () => {
+  test("mock mode makes no provider call and passes, leaving the draft at the gate the same way", async () => {
     const { jobId } = atTextGate();
     config.mode = "mock";
     try {
@@ -454,7 +505,8 @@ describe("Automatic Text QA: cost", () => {
       config.mode = "live";
     }
     expect(h.calls).toEqual([]);
-    expect(getJob(jobId)!.state).toBe("queued");
+    expect(getJob(jobId)!.state).toBe("awaiting_text");
+    expect((getJob(jobId)!.scratch as any).textApproved).toBeUndefined();
     expect(getJob(jobId)!.spent).toBe(1);
   });
 

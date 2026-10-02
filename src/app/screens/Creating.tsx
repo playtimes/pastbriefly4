@@ -291,7 +291,16 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
         />
       );
     }
-    return <TextException storyTitle={storyTitle} qa={qa} onReview={(i) => setTextView({ issue: i })} onOpenReview={() => setTextView({ whole: "story", from: null })} more={more(null, "story")} />;
+    return (
+      <TextException
+        storyTitle={storyTitle}
+        qa={qa}
+        passed={job.textQa?.status === "passed"}
+        onReview={(i) => setTextView({ issue: i })}
+        onOpenReview={() => setTextView({ whole: "story", from: null })}
+        more={more(null, "story")}
+      />
+    );
   }
 
   // Visuals need you: the issue list, then one issue at a time with its one

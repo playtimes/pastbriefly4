@@ -30,6 +30,8 @@ vi.mock("../src/providers/openai.ts", () => ({
     if (h.fail) throw new Error(h.fail);
     if (o.schemaName === "story_revision") return h.revision;
     if (o.schemaName === "script_audit") return { long: "Audited revised long RL-2.", short: "Audited revised short RS-2." };
+    // A successful manual revision re-runs Text QA on the new draft: it passes here.
+    if (o.schemaName === "text_qa") return { decision: "PASS", summary: "Clear.", repairFeedback: null, humanReview: [] };
     throw new Error(`unexpected provider call ${o.schemaName}`);
   }),
   imageMimeType: () => "image/png",
@@ -54,7 +56,7 @@ vi.mock("../src/production/narration.ts", () => ({
 vi.mock("../src/production/wikimedia.ts", () => ({ fetchArchive: vi.fn(async () => null) }));
 vi.mock("../src/providers/runway.ts", () => ({ generateMotion: vi.fn(async () => {}) }));
 
-const { runJob, newJobId } = await import("../src/production/generate.ts");
+const { runJob, newJobId, textQaState } = await import("../src/production/generate.ts");
 const { createJob, getJob, updateJob, upsertStory, getStory, getScripts } = await import("../src/server/store.ts");
 const { registerRoutes } = await import("../src/server/routes.ts");
 
@@ -106,6 +108,10 @@ async function app() {
 }
 const revise = (a: any, jobId: string, feedback: unknown) => a.inject({ method: "POST", url: `/api/jobs/${jobId}/revise-text`, payload: { feedback } });
 const review = async (a: any, jobId: string) => (await a.inject({ method: "GET", url: `/api/jobs/${jobId}` })).json().job.review;
+// The Text QA a successful revision starts runs in the background: wait for it.
+const settled = async (jobId: string) => {
+  for (let i = 0; i < 200 && textQaState(jobId)?.status === "running"; i++) await new Promise((r) => setTimeout(r, 5));
+};
 
 beforeEach(() => {
   h.calls.length = 0;
@@ -127,6 +133,7 @@ describe("director revision", () => {
     const a = await app();
     const res = await revise(a, jobId, "  Remove the disputed fact FX-2 and tighten the opening.  ");
     expect(res.statusCode).toBe(200);
+    await settled(jobId);
 
     const call = h.calls.find((c) => c.schemaName === "story_revision")!;
     for (const s of [
@@ -156,9 +163,14 @@ describe("director revision", () => {
     expect(res.statusCode).toBe(200);
     const job = res.json().job;
     expect(job.state).toBe("awaiting_text");
+    // The old Text QA result is gone; the new draft is being checked.
+    expect(job.textQa).toEqual({ status: "running", phase: "review" });
+    await settled(jobId);
 
-    // Exactly the revision plus the existing audit, the audit seeing the revised facts.
-    expect(h.calls.map((c) => c.schemaName)).toEqual(["story_revision", "script_audit"]);
+    // The revision plus the existing audit, the audit seeing the revised facts;
+    // then Text QA again, on the NEW saved draft.
+    expect(h.calls.map((c) => c.schemaName)).toEqual(["story_revision", "script_audit", "text_qa"]);
+    expect(h.calls[2].input).toContain("LONG SCRIPT:\nAudited revised long RL-2.");
     const audit = h.calls[1].input;
     expect(audit).toContain("TITLE: Revised title RT-6");
     expect(audit).toContain("DRAFT LONG SCRIPT:\nRevised long RL-1.");
@@ -177,9 +189,10 @@ describe("director revision", () => {
     expect(getScripts(story.id)).toEqual({ long: "Audited revised long RL-2.", short: "Audited revised short RS-2." });
     expect(getStory(story.id)!.title).toBe("Revised title RT-6");
 
-    // Charged like two script calls, never approved, nothing else ran.
+    // Charged like three script calls (revision, audit, the new draft's Text QA
+    // review), never approved, nothing else ran.
     const rec = getJob(jobId)!;
-    expect(rec.spent).toBeCloseTo(1.06);
+    expect(rec.spent).toBeCloseTo(1.09);
     expect((rec.scratch as any).textApproved).toBeUndefined();
     expect(h.research + h.narration + h.images).toBe(0);
     await a.close();
@@ -189,6 +202,7 @@ describe("director revision", () => {
     const { jobId } = atTextGate();
     const a = await app();
     await revise(a, jobId, "Remove FX-2.");
+    await settled(jobId);
     await runJob(jobId);
     expect(getJob(jobId)!.state).toBe("awaiting_text");
     expect(h.narration + h.images).toBe(0);
@@ -270,6 +284,7 @@ describe("director revision", () => {
     logged.mockClear();
     h.revision.facts = [{ fact: "Fact FX-1 is supported.", source: 1 }];
     expect((await revise(a, jobId, "Tighten it.")).statusCode).toBe(200);
+    await settled(jobId);
     expect((await revise(a, jobId, "")).statusCode).toBe(400);
     expect(logged).not.toHaveBeenCalled();
     logged.mockRestore();

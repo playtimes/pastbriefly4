@@ -1,8 +1,9 @@
 ﻿import { describe, test, expect, vi } from "vitest";
 
 // The worker starts Automatic Director Text QA only when runJob reports a NEW
-// draft at the text gate, and hands it enqueueJob: the same requeue the manual
-// Approve & continue route uses. The pipeline itself is stubbed.
+// draft at the text gate. It hands Text QA no requeue: Text QA never approves,
+// so only the manual Approve & continue route requeues the job. The pipeline
+// itself is stubbed.
 const h = vi.hoisted(() => ({ reached: {} as Record<string, "text_gate" | "preview_gate" | undefined>, ran: [] as string[] }));
 
 vi.mock("../src/production/generate.ts", () => ({
@@ -18,12 +19,12 @@ const { autoTextQaForJob, autoVisualQaForJob } = await import("../src/production
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 describe("worker and Automatic Text QA", () => {
-  test("a new draft at the text gate starts Text QA with the worker's own requeue", async () => {
+  test("a new draft at the text gate starts Text QA, without any requeue", async () => {
     h.reached["new-draft"] = "text_gate";
     enqueueJob("new-draft");
     await settle();
     expect(autoTextQaForJob).toHaveBeenCalledOnce();
-    expect(autoTextQaForJob).toHaveBeenCalledWith("new-draft", enqueueJob);
+    expect(autoTextQaForJob).toHaveBeenCalledWith("new-draft"); // it never approves or requeues
   });
 
   test("any other stop does not start Text QA", async () => {

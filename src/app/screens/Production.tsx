@@ -81,6 +81,7 @@ export const SECTION_TAB: Record<TextQaSection, ReviewTab> = { story: "story", h
 export function TextException(props: {
   storyTitle: string;
   qa?: TextQaStop; // absent when the Text QA result was lost (server memory, e.g. a restart)
+  passed?: boolean; // Automatic Text QA passed: the draft only waits for the human review
   onReview: (issue: number) => void;
   onOpenReview: () => void; // the Advanced story review, when there is no issue to open
   more: React.ReactNode;
@@ -90,8 +91,8 @@ export function TextException(props: {
     <div className="flex flex-col gap-7 max-w-[760px]">
       <div className="flex flex-col gap-2.5">
         <p className={attention}>{props.storyTitle ? `Text needs you · ${props.storyTitle}` : "Text needs you"}</p>
-        <h1 className={title}>{issues.length ? things(issues.length) : "Your story needs a look"}</h1>
-        {!issues.length && <p className={lead}>PB4 could not finish checking the story. Read it, then continue.</p>}
+        <h1 className={title}>{issues.length ? things(issues.length) : props.passed ? "Your story is ready for review" : "Your story needs a look"}</h1>
+        {!issues.length && <p className={lead}>{props.passed ? "Automatic Text QA passed. Ready for your review." : "PB4 could not finish checking the story. Read it, then continue."}</p>}
       </div>
       {issues.length > 0 && (
         <ol aria-label="Text issues" className="flex flex-col border-t border-line">

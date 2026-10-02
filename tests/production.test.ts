@@ -213,6 +213,16 @@ describe("Text needs you", () => {
     expect(SECTION_TAB).toEqual({ story: "story", hook: "story", spine: "story", facts: "facts", long: "long", short: "short" });
   });
 
+  test("a passed Text QA says so: ready for your review, with the story review as the one action", () => {
+    const p = props({ qa: undefined, passed: true });
+    const html = renderToStaticMarkup(React.createElement(TextException, p));
+    expect(html).toContain("Your story is ready for review</h1>");
+    expect(html).toContain("Automatic Text QA passed. Ready for your review.");
+    expect(html).not.toContain("could not finish checking");
+    expect(html).toMatch(/btn btn-primary">Open story review</);
+    expect(html).not.toContain("Review issue");
+  });
+
   test("without an issue list (lost or failed QA) the story review is the one action", () => {
     const p = props({ qa: undefined });
     const html = renderToStaticMarkup(React.createElement(TextException, p));
@@ -223,7 +233,7 @@ describe("Text needs you", () => {
     expect(p.onOpenReview).toHaveBeenCalledOnce();
   });
 
-  test("only a stopped Text QA is a human exception; not yet started or running stays on Writing", () => {
+  test("a settled Text QA (stopped, or passed and waiting for the human review) hands the gate over; not yet started or running stays on Writing", () => {
     const review = { title: "", hook: "", facts: [], moments: [], sources: [], longScript: "", shortScript: "" };
     const now = Date.parse("2026-09-28T18:00:00.000Z");
     const justNow = new Date(now - 1500).toISOString(); // reached the gate one poll ago
@@ -237,6 +247,9 @@ describe("Text needs you", () => {
     for (const phase of ["review", "repair", "verify"] as const) expect(stage.productionFace(at({ textQa: { status: "running", phase } }), now)).toBe("running");
     // Stopped: the exception.
     expect(stage.productionFace(at({ textQa: qa }), now)).toBe("text");
+    // Passed: PASS is not an approval, so the draft waits for the human review at once.
+    expect(stage.productionFace(at({ textQa: { status: "passed" } }), now)).toBe("text");
+    expect(stage.gateFace(at({ textQa: { status: "passed" } }))).toBe("text");
     // No result long after reaching the gate (lost to a restart): the user decides, never a dead end.
     expect(stage.productionFace(at({ updatedAt: new Date(now - stage.GATE_GRACE_MS - 1).toISOString() }), now)).toBe("text");
     expect(stage.storyProductionLabel(at({ updatedAt: new Date(Date.now() - 1000).toISOString() }))).toBe("In production · Writing");

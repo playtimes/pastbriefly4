@@ -114,7 +114,8 @@ export function productionFace(job: FaceJob, now: number = Date.now()): Producti
   if (job.state === "done") return "done";
   const face = gateFace(job);
   if (face === "final") return "final";
-  if (face === "text") return job.textQa?.status === "stopped" || (!job.textQa && pastGrace(job, now)) ? "text" : "running";
+  // A passed Text QA hands the gate over too: the draft is ready for the human review.
+  if (face === "text") return job.textQa?.status === "stopped" || job.textQa?.status === "passed" || (!job.textQa && pastGrace(job, now)) ? "text" : "running";
   if (face === "visuals") {
     const settled = job.assetQa?.status === "done" || !!job.directorQa?.long || !!job.directorQa?.short || job.visualAutopilot?.status === "failed";
     return settled || (!job.visualAutopilot && !job.assetQa && pastGrace(job, now)) ? "visuals" : "running";

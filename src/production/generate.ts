@@ -1105,6 +1105,10 @@ export function textQaState(jobId: string): TextQaState | undefined {
 export function isTextQaRunning(jobId: string): boolean {
   return textQa.get(jobId)?.status === "running";
 }
+// A person's revision replaced the draft: the last result described the old one.
+export function clearTextQaForJob(jobId: string): void {
+  textQa.delete(jobId);
+}
 
 // One Director call priced like any script call, preflighted against the
 // approved maximum and charged once it returns (no charge without a provider call).
@@ -1124,11 +1128,13 @@ async function textQaCall<T>(jobId: string, call: (story: Story, research: Resea
 
 // After a NEW draft reaches the text gate: one Director review of the saved
 // Story Review; on REPAIR, the existing reviseTextForJob (with its audit) once,
-// then one read-only verification of the NEW saved draft. PASS approves through
-// approveTextForJob and `advance` requeues the job, exactly as Approve & continue
-// does. Anything else stops at the Story Review with the reason, the draft kept.
-// No retries. Never throws.
-export async function autoTextQaForJob(jobId: string, advance: (jobId: string) => void): Promise<TextQaState | undefined> {
+// then one read-only verification of the NEW saved draft. PASS means the machine
+// check passed and the draft is ready for the human review: the job stays at
+// awaiting_text, unapproved and not requeued. Only a person's Approve & continue
+// (approveTextForJob) lets production go on to narration and media. Anything
+// else stops at the Story Review with the reason, the draft kept. No retries.
+// Never throws.
+export async function autoTextQaForJob(jobId: string): Promise<TextQaState | undefined> {
   const job = getJob(jobId);
   if (!job || job.state !== "awaiting_text" || (job.scratch as Scratch).textApproved || isTextQaRunning(jobId) || isRevisingText(jobId)) return undefined;
   const phase = (p: TextQaPhase) => textQa.set(jobId, { status: "running", phase: p });
@@ -1139,17 +1145,8 @@ export async function autoTextQaForJob(jobId: string, advance: (jobId: string) =
     console.error(`Text QA failed job=${jobId} stage=${stage} error=${error}`);
     return error;
   };
-  const pass = (stage: TextQaStage) => {
-    try {
-      if (getJob(jobId)?.state !== "awaiting_text") throw new Error("The job is no longer at the story review.");
-      approveTextForJob(jobId);
-      const s = end({ status: "passed" });
-      advance(jobId);
-      return s;
-    } catch (e) {
-      return end({ status: "stopped", stage, message: "Text QA could not complete. Review the current draft manually.", summary: "", issues: [], error: failed(stage, e) });
-    }
-  };
+  // The machine check passed: the draft waits at the gate for the human review.
+  const pass = () => end({ status: "passed" });
 
   // A Long-first job (its flow, never its draft's shape) gets its own Long-only
   // review and verification (no Short input, checks or sections); a pair-first
@@ -1166,7 +1163,7 @@ export async function autoTextQaForJob(jobId: string, advance: (jobId: string) =
   } catch (e) {
     return end({ status: "stopped", stage: "director_review", message: "Text QA could not complete. Review the current draft manually.", summary: "", issues: [], error: failed("director_review", e) });
   }
-  if (review.decision === "PASS") return pass("director_review");
+  if (review.decision === "PASS") return pass();
   if (review.decision === "HUMAN_REVIEW") return end({ status: "stopped", stage: "director_review", message: "The Director needs a human decision on this draft.", summary: review.summary, issues: review.humanReview });
 
   const feedback = review.repairFeedback!;
@@ -1184,7 +1181,7 @@ export async function autoTextQaForJob(jobId: string, advance: (jobId: string) =
   } catch (e) {
     return end({ status: "stopped", stage: "final_verify", message: "Text repair completed, but final verification failed. Review the current draft manually.", summary: review.summary, issues: [], feedback, error: failed("final_verify", e) });
   }
-  if (verify.decision === "PASS") return pass("final_verify");
+  if (verify.decision === "PASS") return pass();
   return end({ status: "stopped", stage: "final_verify", message: "Text repair completed, but the final verification still needs you.", summary: verify.summary, issues: verify.humanReview, feedback });
 }
 

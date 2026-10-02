@@ -316,15 +316,16 @@ function longFirstJob(story: Story, approvedMax = 50) {
 }
 
 // The worker and the two autopilots, as production runs them: a new draft goes
-// to Text QA (approving on PASS), fresh visuals to the Visual Autopilot; a gate
-// the autopilot leaves is approved as a person would. Stops at done, failed or
+// to Text QA (which never approves), then the human Approve & continue; fresh
+// visuals go to the Visual Autopilot, and a visual gate
+// it leaves is approved as a person would. Stops at done, failed or
 // awaiting_final.
 async function drive(id: string): Promise<void> {
   for (let i = 0; i < 12; i++) {
     const job = getJob(id)!;
     if (job.state === "done" || job.state === "failed" || job.state === "awaiting_final") return;
     if (job.state === "awaiting_text") {
-      await autoTextQaForJob(id, () => {});
+      await autoTextQaForJob(id);
       if (getJob(id)!.state === "awaiting_text") approveTextForJob(id);
       continue;
     }
@@ -526,7 +527,8 @@ describe("2, 3. Long-first in live mode, every provider stubbed", () => {
     const story = newStory();
     const job = longFirstJob(story);
     expect(await runJob(job.id)).toBe("text_gate");
-    await autoTextQaForJob(job.id, () => {});
+    await autoTextQaForJob(job.id);
+    approveTextForJob(job.id); // the human gate: Text QA never approves
     expect(await runJob(job.id)).toBe("preview_gate");
     const before = h.calls.length;
     const advanced: string[] = [];
@@ -583,7 +585,13 @@ describe("4. resume at the saved boundaries never repeats completed paid work", 
     const atText = h.calls.length;
     expect(await runJob(job.id)).toBeUndefined(); // still at the text gate
     expect(h.calls.length).toBe(atText);
-    await autoTextQaForJob(job.id, () => {});
+    // Text QA passes and the job still waits: a restart there calls nothing again.
+    expect(await autoTextQaForJob(job.id)).toEqual({ status: "passed" });
+    const passed = [h.calls.length, h.provider.length];
+    expect(await runJob(job.id)).toBeUndefined();
+    expect([h.calls.length, h.provider.length]).toEqual(passed);
+    expect(getJob(job.id)!.state).toBe("awaiting_text");
+    approveTextForJob(job.id); // the human gate
     await runJob(job.id);
     const atPreview = [h.calls.length, h.provider.length];
     updateJob(job.id, { state: "queued" }); // the worker resumes a gate job after a restart
@@ -827,8 +835,12 @@ describe("flow authority: the job's flow, never its draft's shape, selects the L
   test("A + B. a NO-FLOW job whose draft lacks a Short stays pair-first: Text QA review, revision, audit and verification are the pair helpers", async () => {
     config.mode = "live";
     const { job } = atTextGate(false);
-    const state = await withAnswers(() => autoTextQaForJob(job.id, () => {}));
+    const state = await withAnswers(() => autoTextQaForJob(job.id));
     expect(state?.status).toBe("passed");
+    // Passed (after the one repair) is not approved: the job waits for the human.
+    expect(getJob(job.id)!.state).toBe("awaiting_text");
+    expect(scratchOf(job.id).textApproved).toBeUndefined();
+    expect(h.provider).toEqual([]);
     expect(h.helpers).toEqual(["reviewStoryDraft", "reviseStoryText", "auditScripts", "verifyStoryDraft"]);
     for (const name of ["reviewLongDraft", "verifyLongDraft", "reviseLongText", "auditLongScript"]) expect(h.helpers).not.toContain(name);
     expect(labels()).toEqual(["text_qa", "story_revision", "script_audit", "text_verify"]);
@@ -850,12 +862,86 @@ describe("flow authority: the job's flow, never its draft's shape, selects the L
   test("a real Long-first job with the same draft takes the Long-only helpers, and the story's stored scripts stay the Long alone", async () => {
     config.mode = "live";
     const { job, story } = atTextGate(true);
-    const state = await withAnswers(() => autoTextQaForJob(job.id, () => {}));
+    const state = await withAnswers(() => autoTextQaForJob(job.id));
     expect(state?.status).toBe("passed");
+    expect(getJob(job.id)!.state).toBe("awaiting_text"); // not approved: waiting for the human
+    expect(scratchOf(job.id).textApproved).toBeUndefined();
+    expect(h.provider).toEqual([]); // no narration or media
     expect(h.helpers).toEqual(["reviewLongDraft", "reviseLongText", "auditLongScript", "verifyLongDraft"]);
     expect(labels()).toEqual(["long_text_qa", "long_story_revision", "long_script_audit", "long_text_verify"]);
     expect(scratchOf(job.id).scripts).toEqual({ long: LONG });
     expect(store.getScripts(story.id)).toEqual({ long: LONG });
+    expectNoShort(job.id, story.slug);
+  });
+});
+
+describe("the human text gate: Automatic Text QA PASS never approves a Long-first draft", () => {
+  test("PASS waits at awaiting_text, shown as passed and still up for review; only Approve & continue starts the Long's narration", async () => {
+    config.mode = "live";
+    const story = newStory();
+    const job = longFirstJob(story);
+    expect(await runJob(job.id)).toBe("text_gate");
+    expect(await autoTextQaForJob(job.id)).toEqual({ status: "passed" });
+    expect(labels().slice(-1)).toEqual(["long_text_qa"]); // one review, no repair
+    const waiting = getJob(job.id)!;
+    expect(waiting.state).toBe("awaiting_text");
+    expect((waiting.scratch as any).textApproved).toBeUndefined();
+    expect(h.provider).toEqual([]); // no narration, image, archive or motion
+
+    const app = Fastify();
+    await registerRoutes(app);
+    const pub = (await app.inject({ method: "GET", url: `/api/jobs/${job.id}` })).json().job;
+    expect(pub).toMatchObject({ state: "awaiting_text", flow: "long-first", textQa: { status: "passed" }, review: { longScript: LONG } });
+    expect("shortScript" in pub.review).toBe(false);
+    await app.close();
+
+    expect(await runJob(job.id)).toBeUndefined(); // a resume at the gate starts nothing
+    expect(h.provider).toEqual([]);
+    approveTextForJob(job.id); // what the approve-text route does: the human Approve & continue
+    expect(await runJob(job.id)).toBe("preview_gate");
+    expect(h.provider.filter((p) => p.startsWith("tts:"))).toEqual(["tts:long.mp3"]);
+    expectNoShort(job.id, story.slug);
+  });
+});
+
+describe("a manual revision invalidates the last Text QA result (Long-first)", () => {
+  test("PASS, then a successful manual revision: the old PASS is cleared, the Long-only Text QA checks the NEW Long, stories.scripts stays { long }", async () => {
+    config.mode = "live";
+    const story = newStory();
+    const job = longFirstJob(story);
+    expect(await runJob(job.id)).toBe("text_gate");
+    expect(await autoTextQaForJob(job.id)).toEqual({ status: "passed" });
+
+    const REVISED = `${LONG}\n\nOne revised closing line.`;
+    const original = h.respond!;
+    h.respond = async (opts) => {
+      if (opts.schemaName !== "long_story_revision" && opts.schemaName !== "long_script_audit") return original(opts);
+      h.calls.push({ label: opts.schemaName, input: String(opts.input), instructions: String(opts.instructions), images: 0 });
+      return opts.schemaName === "long_script_audit" ? { long: REVISED } : { title: story.title, hook: story.hook, moments: [], facts: [], long: REVISED };
+    };
+    const app = Fastify();
+    await registerRoutes(app);
+    try {
+      const res = await app.inject({ method: "POST", url: `/api/jobs/${job.id}/revise-text`, payload: { feedback: "Close on the strangest fact." } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().job.textQa).toEqual({ status: "running", phase: "review" });
+      for (let i = 0; i < 200 && g.textQaState(job.id)?.status === "running"; i++) await new Promise((r) => setTimeout(r, 5));
+    } finally {
+      h.respond = original;
+    }
+
+    expect(labels().slice(-3)).toEqual(["long_story_revision", "long_script_audit", "long_text_qa"]);
+    expect(h.helpers.slice(-3)).toEqual(["reviseLongText", "auditLongScript", "reviewLongDraft"]);
+    expect(h.calls.at(-1)!.input).toContain(`LONG SCRIPT:\n${REVISED}`);
+    expect(h.calls.at(-1)!.input).not.toMatch(/SHORT/);
+    const pub = (await app.inject({ method: "GET", url: `/api/jobs/${job.id}` })).json().job;
+    expect(pub).toMatchObject({ state: "awaiting_text", flow: "long-first", textQa: { status: "passed" }, review: { longScript: REVISED } });
+    expect("shortScript" in pub.review).toBe(false);
+    await app.close();
+    expect(scratchOf(job.id).textApproved).toBeUndefined();
+    expect(scratchOf(job.id).scripts).toEqual({ long: REVISED });
+    expect(store.getScripts(story.id)).toEqual({ long: REVISED });
+    expect(h.provider).toEqual([]); // no narration or media
     expectNoShort(job.id, story.slug);
   });
 });
