@@ -76,7 +76,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
           // Ready stays on this route, with no redirect: this job's own pair only.
           const detail = await api.story(slug);
           if (stop) return;
-          const pair = latestCompletePair(detail.videos, job.id);
+          const pair = latestCompletePair(detail.videos, job.id, detail.longCompleteJobIds);
           if (!pair) return navigate(`/story/${slug}/watch`);
           finished = true; // nothing left to poll
           setReady(pair);
@@ -472,6 +472,21 @@ export function buildStoryReviewClipboardText(r: StoryReview): string {
         .map((f) => ["- " + f.fact, f.sourceTitle && `  Source: ${f.sourceTitle}`, f.sourceUrl && `  ${f.sourceUrl}`].filter(Boolean).join("\n"))
         .join("\n\n")
     : "No fact sheet was produced for this story.";
+  // A Long-first draft has no Short: no Short section and no Short check.
+  const hasShort = r.shortScript !== undefined;
+  const shortSection = hasShort ? `## SHORT SCRIPT\n\n${r.shortScript}\n\n` : "";
+  const checks = [
+    "Is the strange premise immediately understandable?",
+    "Does the Long tell a causal story rather than merely list facts?",
+    "Is the opening strong enough to make the viewer want the next sentence?",
+    "Is anything confusing, repetitive, padded, generic, or unnecessary?",
+    "Do any factual claims appear weak, ambiguous, overstated, or insufficiently supported by the listed sources?",
+    ...(hasShort ? ["Does the Short preserve the strongest version of the premise?"] : []),
+    "Does the story have enough depth for the Long without artificial padding?",
+    "Give a final decision:",
+  ]
+    .map((c, i) => `${i + 1}. ${c}`)
+    .join("\n");
   return `# PASTBRIEFLY DIRECTOR REVIEW
 
 Stage: TEXT GATE
@@ -511,24 +526,13 @@ ${facts}
 
 ${r.longScript}
 
-## SHORT SCRIPT
-
-${r.shortScript}
-
-## REVIEW REQUEST
+${shortSection}## REVIEW REQUEST
 
 Review this PB4 text gate as editorial / production director.
 
 Check:
 
-1. Is the strange premise immediately understandable?
-2. Does the Long tell a causal story rather than merely list facts?
-3. Is the opening strong enough to make the viewer want the next sentence?
-4. Is anything confusing, repetitive, padded, generic, or unnecessary?
-5. Do any factual claims appear weak, ambiguous, overstated, or insufficiently supported by the listed sources?
-6. Does the Short preserve the strongest version of the premise?
-7. Does the story have enough depth for the Long without artificial padding?
-8. Give a final decision:
+${checks}
    - APPROVE
    - REVISE
 
@@ -574,7 +578,7 @@ export function StoryReviewView({
       </header>
 
       <div role="tablist" className="flex-none flex gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] border-b border-line">
-        {REVIEW_TABS.map(([id, label]) => (
+        {REVIEW_TABS.filter(([id]) => id !== "short" || r.shortScript !== undefined).map(([id, label]) => (
           <button
             key={id}
             role="tab"

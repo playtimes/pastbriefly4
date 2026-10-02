@@ -155,18 +155,21 @@ export function storyProductionLabel(job: Job): string {
 
 // ---- Ready
 
+// A complete production: a pair-first job's Long + Short, or a Long-first job's
+// Long alone once it reached LONG COMPLETE (no Short exists yet).
 export interface CompletePair {
   jobId: string;
   long: Video;
-  short: Video;
+  short?: Video;
 }
 
 // The newest job with BOTH a Long and a Short among the story's videos (newest
 // first, as the server returns them). A job adds its videos one at a time and a
 // later job can fail between them, so the first video is not proof of anything:
 // a newer lone video never hides the last complete pair. With `jobId`, only that
-// job's pair.
-export function latestCompletePair(videos: Video[], jobId?: string): CompletePair | null {
+// job's pair. A job in `longComplete` (LONG COMPLETE, from the server) is
+// complete with its Long alone; any other lone video still is not.
+export function latestCompletePair(videos: Video[], jobId?: string, longComplete: string[] = []): CompletePair | null {
   const byJob = new Map<string, Partial<Record<Video["kind"], Video>>>();
   for (const v of videos) {
     const pair = byJob.get(v.jobId) ?? {};
@@ -176,6 +179,7 @@ export function latestCompletePair(videos: Video[], jobId?: string): CompletePai
   for (const [id, pair] of byJob) {
     if (jobId && id !== jobId) continue;
     if (pair.long && pair.short) return { jobId: id, long: pair.long, short: pair.short };
+    if (pair.long && longComplete.includes(id)) return { jobId: id, long: pair.long };
   }
   return null;
 }
@@ -185,10 +189,10 @@ export function latestCompletePair(videos: Video[], jobId?: string): CompletePai
 // complete pair (its Ready face, also after a reload). With none of these it
 // navigates as it always did.
 export type ProductionTarget = { jobId: string } | { navigate: "watch" | "story" };
-export function productionTarget(detail: { activeJob: Pick<Job, "id"> | null; failedJob: Pick<Job, "id"> | null; videos: Video[] }): ProductionTarget {
+export function productionTarget(detail: { activeJob: Pick<Job, "id"> | null; failedJob: Pick<Job, "id"> | null; videos: Video[]; longCompleteJobIds?: string[] }): ProductionTarget {
   if (detail.activeJob) return { jobId: detail.activeJob.id };
   if (detail.failedJob) return { jobId: detail.failedJob.id };
-  const pair = latestCompletePair(detail.videos);
+  const pair = latestCompletePair(detail.videos, undefined, detail.longCompleteJobIds);
   if (pair) return { jobId: pair.jobId };
   return { navigate: detail.videos.length >= 2 ? "watch" : "story" };
 }

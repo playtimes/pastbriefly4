@@ -31,7 +31,7 @@ vi.mock("../src/providers/runway.ts", () => ({ generateMotion: vi.fn(async () =>
 
 const { acquireStill, recoverArchiveStill, archiveOwner } = await import("../src/production/visuals.ts");
 const { ensureStoryDirs, inStory, storyDir, retainedArchiveDir, clearWorkingVisuals } = await import("../src/production/paths.ts");
-const { recordArchiveReview } = await import("../src/production/archiveRetention.ts");
+const { recordArchiveReview, retainedArchiveInventory } = await import("../src/production/archiveRetention.ts");
 const { clearVisualsForRebuild, newJobId } = await import("../src/production/generate.ts");
 const { createJob, updateJob, upsertStory } = await import("../src/server/store.ts");
 const { config, DATA_DIR, MEDIA_DIR } = await import("../src/server/config.ts");
@@ -309,5 +309,49 @@ describe("8. a retention failure never fails the acquisition", () => {
     expect(await acquireStill(story, "long", shot, null)).toBe("archive");
     expect(shot.path).toBe("archive/long-03.jpg");
     expect(vi.mocked(console.warn).mock.calls.some(([m]) => /retention failed/.test(String(m)))).toBe(true);
+  });
+});
+
+describe("9. the Slice 2 read path: retainedArchiveInventory (prompt metadata only)", () => {
+  test("no retained folder is simply no candidates", () => {
+    expect(retainedArchiveInventory(makeStory().slug)).toEqual([]);
+  });
+
+  test("each screened candidate's title, licence, credit, searches and slot rejections, newest first; malformed sidecars skipped; no path or hash", async () => {
+    const story = makeStory();
+    stubCommons([AT_SEA], { [AT_SEA.imageinfo[0].url]: JPEG });
+    await acquireStill(story, "long", archiveShot(3, "L03"), null, new Map(), undefined, undefined, "job-1");
+    recordArchiveReview(story.slug, sha(JPEG), { film: "long", assetId: "L03", decision: "rejected", reason: "The slot needs the ship under construction.", by: "final visual repair", jobId: "job-1" });
+    // A newer candidate, then three sidecars the reader must skip.
+    const drawing = page("File:Project Azorian Released Files Page 21.png", "https://upload.wikimedia.org/p21.png", { mime: "image/png" });
+    stubCommons([drawing], { "https://upload.wikimedia.org/p21.png": PNG });
+    await new Promise((r) => setTimeout(r, 5));
+    await acquireStill(story, "long", archiveShot(4, "L04"), null);
+    const dir = retainedArchiveDir(story.slug);
+    writeFileSync(path.join(dir, `${sha(Buffer.from("a"))}.json`), "{ not json");
+    writeFileSync(path.join(dir, `${sha(Buffer.from("b"))}.json`), JSON.stringify({ status: "approved", title: "x", acquisitions: [], reviews: [] }));
+    writeFileSync(path.join(dir, "notes.json"), JSON.stringify({ status: "screened archive candidate", title: "not a sidecar name", acquisitions: [], reviews: [] }));
+
+    const inventory = retainedArchiveInventory(story.slug);
+    expect(inventory).toEqual([
+      { title: "File:Project Azorian Released Files Page 21.png", license: "Public domain", credit: "U.S. Government · Public domain", queries: [expect.stringContaining("Glomar")], rejections: [] },
+      { title: "File:USNS Glomar Explorer (T-AG-193).jpg", license: "Public domain", credit: "U.S. Government · Public domain", queries: [expect.stringContaining("Glomar")], rejections: ["The slot needs the ship under construction."] },
+    ]);
+    const text = JSON.stringify(inventory);
+    expect(text).not.toContain(sha(JPEG));
+    expect(text).not.toContain(DATA_DIR);
+    expect(text).not.toContain("archive-retained");
+  });
+
+  test("at most `max` candidates", async () => {
+    const story = makeStory();
+    const dir = retainedArchiveDir(story.slug);
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 25; i++) {
+      const hash = sha(Buffer.from(`c${i}`));
+      writeFileSync(path.join(dir, `${hash}.json`), JSON.stringify({ status: "screened archive candidate", sha256: hash, title: `File:${i}.jpg`, license: "CC0", credit: "c", acquisitions: [{ at: `2026-01-01T00:00:${String(i).padStart(2, "0")}.000Z`, query: "q" }], reviews: [] }));
+    }
+    expect(retainedArchiveInventory(story.slug)).toHaveLength(20);
+    expect(retainedArchiveInventory(story.slug, 3).map((c) => c.title)).toEqual(["File:24.jpg", "File:23.jpg", "File:22.jpg"]);
   });
 });

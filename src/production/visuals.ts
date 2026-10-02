@@ -16,7 +16,7 @@ import { copyFileSync } from "node:fs";
 import { generateImageFile, respondJson } from "../providers/openai.ts";
 import { generateMotion } from "../providers/runway.ts";
 import { fetchArchive } from "./wikimedia.ts";
-import { retainArchiveCandidate } from "./archiveRetention.ts";
+import { retainArchiveCandidate, type RetainedArchiveCandidate } from "./archiveRetention.ts";
 
 export const FPS = 30;
 
@@ -505,6 +505,11 @@ export function slotBlock(s: EditSlot): string {
 
 // The verified story context both planners share.
 function storyContext(story: Story, research: ResearchPackage, scripts: { long: string; short: string }): string[] {
+  return [...storyFacts(story, research), "", `LONG SCRIPT:\n${scripts.long}`, "", `SHORT SCRIPT:\n${scripts.short}`];
+}
+
+// The story and its verified research, without any script.
+function storyFacts(story: Story, research: ResearchPackage): string[] {
   const w = research.world;
   return [
     `STORY: ${story.title}`,
@@ -529,10 +534,6 @@ function storyContext(story: Story, research: ResearchPackage, scripts: { long: 
     `- visual direction: ${w.visualDirection}`,
     `- recurring people: ${w.recurringPeople.join("; ") || "(none)"}`,
     `- recurring locations: ${w.recurringLocations.join("; ") || "(none)"}`,
-    "",
-    `LONG SCRIPT:\n${scripts.long}`,
-    "",
-    `SHORT SCRIPT:\n${scripts.short}`,
   ];
 }
 
@@ -2298,6 +2299,284 @@ export async function planVisuals(
     return assembleEdit(kind, slots[kind], edit[kind], presentations[kind], library[kind], motion, story, research);
   };
   return { long: film("long"), short: film("short"), coverageRejected, coverageRepaired };
+}
+
+// ---------------------------------------------------------------------------
+// Long-first planning (Stage 16A): the Long alone
+// ---------------------------------------------------------------------------
+// A Long-first job has no Short before LONG COMPLETE, so it is planned by
+// planLongVisuals: Long-only Coverage and Editor calls (prompt, schema and
+// payload with no Short) around the same per-film machinery planVisuals uses -
+// slots, candidate screening, the one Coverage repair, presentations, edit
+// validation, archive holds, the one edit repair, motion selection and assembly.
+// The repair calls are the existing ones: they already ask only about the films
+// they have targets for. planVisuals (pair-first) is unchanged.
+
+export interface LongCoverageInput {
+  story: Story;
+  research: ResearchPackage;
+  script: string;
+  slots: EditSlot[];
+  retained: RetainedArchiveCandidate[]; // this story's screened archive candidates (prompt metadata only)
+}
+export type LongCoverageDirector = (input: LongCoverageInput, respond?: typeof respondJson) => Promise<{ longAssets: CoverageAsset[] }>;
+
+export interface LongEditorInput {
+  story: Story;
+  research: ResearchPackage;
+  script: string;
+  slots: EditSlot[];
+  library: MediaAsset[];
+  presentations: Presentation[];
+}
+export type LongEditorDirector = (input: LongEditorInput, respond?: typeof respondJson) => Promise<{ long: EditorAssignment[] }>;
+
+export interface LongVisualDirectors {
+  coverage: LongCoverageDirector;
+  editor: LongEditorDirector;
+  repair?: EditRepairDirector;
+  coverageRepair?: CoverageRepairDirector;
+}
+
+export const LONG_COVERAGE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["longAssets"],
+  properties: { longAssets: { type: "array", items: coverageAssetSchema } },
+};
+
+export const LONG_COVERAGE_INSTRUCTIONS = `You are the Coverage Director for PastBriefly, a factual historical documentary. You are given one story, its FINAL verified research (facts, moments, sources, story world), the Long documentary script, and the film's FIXED EDIT SLOTS. Your only question is: "What useful documentary media should exist for this film?" Think like a documentary director planning coverage before the edit: the stills, archive items and graphics an editor will need to cut this film well. Return strict JSON: the film's media library, "longAssets".
+
+YOU DO NOT EDIT - the edit is already cut into fixed slots with fixed times and narration, and a separate Editor will later choose, for every slot, one presentation of one of your assets. You assign nothing to slots: no slot ids, no timing, no order of use, no crops. The slots are shown only so you know what the narration needs the viewer to see, and for how long.
+
+HOW YOUR ASSETS ARE USED - PastBriefly shows every asset in its full "base" view. For a RECONSTRUCTION it also derives detail crops from your mustShow regions: a "detail-left" crop when an element sits in the left third, "detail-center" for the center, "detail-right" for the right third; "whole" (an element that spans the frame) gives no crop. The Editor can show one asset many times - its base, then a detail, then the base again as a callback - at no extra cost. So one well-composed reconstruction with its key elements in distinct regions can cover several slots: an establishing view and real details of it. Archive and graphics are shown in their base view only; graphics are never cropped.
+
+A LIBRARY, NOT A QUOTA - propose the assets this film genuinely needs: each distinct event, place, person, object or piece of evidence the narration has to show, plus geography or information that is clearer as a graphic. Do not create one asset per slot and do not manufacture near-duplicates: the Editor reuses assets and cuts to their details. Every generated reconstruction or graphic the Editor uses costs an image; an unused asset costs nothing, but a library of near-identical images makes a monotonous film. Every asset must earn its place with visual information no other asset gives.
+
+ASSET FIELDS
+- truth: "archive" | "reconstruction" | "graphic" (see MEDIA CHOICE).
+- purpose: what the viewer should understand from this asset, as a VISIBLE idea a storyboard artist could draw. GOOD: "Establish the Soviet submarine visibly grounded on rocks inside the narrow Swedish archipelago." "Show Swedish patrol boats forming a perimeter around the grounded submarine." BAD (never): "Show Cold War", "Create tension", "Espionage suspicions", or any mood or atmosphere label.
+- mustShow: the concrete elements this one frame shows, each with its region (see MUSTSHOW).
+- mustNotShow: short, concrete protections against obvious historical mistakes (wrong flag, wrong era, a vessel freely underway when it is aground, active battle when there was none).
+- prompt: the specific single-frame scene (see SCENE). For archive it is the reconstruction fallback (see ARCHIVE FALLBACK).
+- archiveQuery: for archive, a specific event query that targets the REAL historical media; "" otherwise.
+- useMaster: see MASTER REFERENCE. Most assets do not use it.
+- baseFraming: "wide" (the whole composition, the usual choice) or "medium" (a modest push) for the base view.
+- motionCapable: true only for a reconstruction whose REAL physical movement would improve it when animated (a vessel moving, water, people physically working, refloating or towing). False for archive, graphics, documents, maps, static instruments, portraits, static evidence, meetings and human-heavy interiors. PastBriefly animates only a few assets per film and chooses them itself.
+
+MUSTSHOW MUST DESCRIBE ACTUAL VISIBLE CONTENT - every mustShow element is ONE concrete, physically visible, atomic thing that is present in this exact frame. PastBriefly derives legal detail crops from these elements, so an element that is not really in the picture would produce a false crop. GOOD: "grounded Soviet submarine", "exposed rocks beneath hull", "Swedish patrol vessel". BAD: "proximity to naval base", "Cold War tension", "Swedish response", "autumn environment", "skeptical expressions", "signage or buoys". MUSTSHOW IS FACTUAL CONTENT, NOT MOOD: never an expression, emotion, lighting, time of day, season, weather or atmosphere (BAD: "skeptical expression", "anxious expression", "tension", "concern", "suspicion", "autumn atmosphere", "early morning light", "dramatic weather"). Lighting or mood may appear in the prompt where appropriate, never as a mustShow element. Every element must be crop-safe: one concrete visible object, person or place feature a detail crop can land on. EXACTLY ONE THING PER ELEMENT - never offer alternatives: no "or", no "/", no "either", no "and/or" (BAD: "naval or coast guard vessel", "gangway/hatch", "table or desk"). Choose the one thing the frame shows. If the research does not say which it was, name the concrete thing it does support at the level it supports it (for "naval or coast guard vessel", "Swedish vessel"): never invent a more specific detail just to avoid an alternative. An element that offers alternatives discards the WHOLE asset. Never a whole-scene summary such as "submarine surrounded by Swedish ships" as one element: name the parts. Usually 1-3 elements, never more than ${MAX_MUST_SHOW}. Give each a region: "left", "center" or "right" for the third of the frame it sits in, or "whole" when it spans the frame. Put different key elements in different regions when the scene naturally allows it, so the Editor gets real, distinct details; the image is composed to match your regions.
+
+ONE ASSET = ONE FRAME - one location, one moment, one primary action, from a single vantage. Never action A plus action B in one frame (BAD: "an officer examines equipment while another questions the captain"), never the current event plus the next event. You are providing SEVERAL pieces of coverage: when a moment has two actions, choose the one the narration needs or make them separate assets; never cram the narration into one image. Explicitly forbidden: a collage, a montage, an inset, a split screen, a split-focus showing two different actions at once, separate moments, a before/after, "in the next moment", a "series of shots", a "through a window / through a hatch" trick used to depict a second event, or any composite that stitches together separate scenes, locations, moments or actions. A graphic may carry several marks on ONE map or diagram ONLY because they all explain one spatial fact.
+
+FACTUAL GROUNDING (HARD FACTUAL VISUAL RULE) - the verified facts are hard constraints. Every concrete, event-specific thing in an asset must be supported by the final fact sheet, the verified research moments, the sources or the audited narration itself. PLAUSIBLE IS NOT SUPPORTED: historically likely is not enough. Unless verified research supports them, do NOT invent event-specific meetings, rooms or interiors, phone calls, handshakes, flags, insignia, signs, hazard markers, military equipment, cranes, sonar equipment, crowds, press conferences, documents, readable labels, extra ships, weather, military deployments, public reactions or actions. NO UNSUPPORTED EVENT-SPECIFIC DETAIL: a reconstruction may depict only event-specific details supported by the verified facts, the research moments or the audited narration. Never invent a specific operations room, conference room, interrogation room, phone-call scene, meeting, handshake, salvage equipment, tug, crane, sonar equipment, patrol zone, military installation, flag, insignia, boundary marker or warning sign unless it is supported. When the narration describes something abstract or unsupported, prefer another supported physical detail, real archive, geography or an already-supported recurring subject: do not stage a fictional event. Generic period or location presentation is acceptable ONLY when it does not claim that a specific historical event happened. Do not dramatize negations or limitations: when the narration says something did not happen, was prevented, limited, refused or remained uncertain, do not stage a confrontation to visualise that absence (for "access was limited", do NOT stage someone physically blocking another person at a hatch). When narration is abstract (interpretation, suspicion, consequence, policy, reflection), do not invent a physical scene for it: the Editor will cover it with an existing asset, an archive item, or a graphic that states a concrete fact.
+
+NO INVENTED READABLE TEXT - a generated reconstruction must never depend on readable historical text: no legible documents, newspaper headlines, communiqués, report text, hull numbers, labels, signs or captions. Never ask image generation for hull numbers, signs, map labels, document text, instrument readings, headlines, insignia text or captions unless the exact visible wording is explicitly verified AND necessary. Where a document matters, show it as a physical object with no readable text. A GRAPHIC communicates only supported information: never invent labelled sonar stations, patrol zones, detection nodes, military positions or routes. If generated text would be needed to make a graphic understandable, choose another visual instead.
+
+MASTER REFERENCE (useMaster) - the master image exists only to keep the recurring MAIN PHYSICAL SUBJECT (for example the grounded vessel) consistent. Set useMaster true only when THAT recurring subject is visibly present in this reconstruction. Never merely because the asset belongs to the same event, and never for an interior without the recurring subject, a people-only scene, an evidence or object-only shot, a graphic, archive or an unrelated environment.
+
+VISUAL HIERARCHY - guidance for choosing each asset's truth, never a quota or a percentage. Ask in this order and choose the first that genuinely serves the narration: (1) real historical or documentary material, when a real photograph, document, film or press item of this subject plausibly exists and genuinely tells this part of the story; (2) a clear explanation - a map, route, diagram, timeline or simple comparison graphic - where the point is spatial or informational; (3) a reconstruction, for a genuine visual gap the story needs and real material cannot show, and for the cinematic storytelling the narration needs; (4) motion only where real physical movement adds value (PastBriefly selects the few clips itself, from motion-capable reconstructions). Never force a category: a story with little real material is still told well with reconstructions, and a story rich in real material should not have it replaced by reconstructions of the same subject.
+
+MEDIA CHOICE (truth)
+- "archive": when a specific real historical person, vessel, event, photograph, document, newspaper or film plausibly exists and directly supports the story (for example the real vessel at the real event, a real public figure named in the facts, real press coverage). archiveQuery must be specific and event-anchored (names, vessel, place, year), never generic like "Sweden 1981", and never a vague idea like "public concern". Do NOT choose archive for an abstract outcome such as an apology, a reimbursement, a policy change or public concern, unless the research or sources point to a real photo, document or event that captured it. There is no archive quota and never choose archive merely for variety - but when direct historical subjects clearly exist, zero archive is not the automatic answer.
+- "reconstruction": a physical event or scene that must be shown but lacks suitable archive material.
+- "graphic": information that is clearer spatially or informationally - geography, route, distance, positions, a timeline, a simple comparison. Never for atmosphere, never a generic "military infographic". purpose and mustShow state the exact information (e.g. "Karlskrona naval base" on the left, "grounding location" on the right).
+
+SCREENED ARCHIVE CANDIDATES - the input may list SCREENED ARCHIVE CANDIDATES: real archive files PastBriefly already acquired for THIS story in earlier work, with the searches that found them and any reason a slot rejected one before. They passed acquisition screening only: they are NOT approved and NOT known to suit any slot, and a rejection holds for the purpose it was given for. When one genuinely shows what a part of the narration needs, you may plan an archive asset for it like any archive: a purpose it truly shows, and an archiveQuery that names it specifically (the words of its title), so it is searched and screened again like any other archive. Never plan an asset merely because a candidate exists, never for a purpose it was rejected for, and never claim more about a candidate's content than its title says.
+
+ARCHIVE FALLBACK MUST NOT FAKE HISTORY - for an archive asset, archiveQuery seeks the REAL historical media, but your prompt is the RECONSTRUCTION FALLBACK used only if acquisition finds nothing. That prompt describes a historical editorial RECONSTRUCTION of the physical scene, never the archive item itself: it must NOT ask for a photograph, a news photo, an archival image or a historical photograph. It must NEVER fabricate a newspaper headline, a communiqué's text, a report's text, a TV broadcast, a logo, a press photograph or any readable historical document: describe the surrounding physical scene with no readable text.
+
+SCENE (prompt) - one specific single frame grounded in purpose, mustShow (with its regions), mustNotShow and the story world. Describe a concrete composition suited to the subject (a wide elevated vantage for geography, a medium eye-level shot for people mid-action, a tight view of an instrument). Keep the key subjects well inside the frame, in the regions you gave them. Do NOT return generic prompts like "cinematic Cold War scene" or "dramatic military atmosphere", and do not rotate through a fixed set of camera shapes.
+
+COVERAGE AND VARIETY - for the story's important physical events, give the Editor useful coverage: an establishing view, the action, the evidence or object, the people involved, the geography. Choose only what helps the narration. Avoid a library dominated by one primary subject at a similar scale (for example many submarine-wide or ship-wide compositions): distinct actions involving the same subject should differ in scale, subject or evidence. If one asset already communicates a geography or spatial relationship, do not propose another similar map from a slightly different angle: the Editor reuses it. A new asset must add new information. Give the Editor what it needs for intentional callbacks and for a clear ending.
+
+DETAIL CROPS ARE NOT NEW COVERAGE - an asset's base view and its detail crops are ONE visual family: the same image, the same moment, the same vantage. Detail crops are useful coverage, but they cannot substitute indefinitely for genuinely different documentary material. A film that cuts only between the base and crops of one asset still shows the viewer one picture.
+
+DEPTH OF COVERAGE - the Long has sustained narrative sections where the narration stays on one important subject or event for many slots in a row. For each such sustained section, provide multiple materially different assets where the verified facts support them, so the Editor can move between independent visual families rather than cycling one image and its crops. Scale this depth to the Long's duration: as guidance, not a quota, a roughly 4-minute Long will often need around 18-24 genuinely distinct assets, depending on the story, and a sustained 20-40 second section should normally have several materially different visual families when the verified facts support them. Never add near-duplicates to reach a number. Prefer real variation in documentary information: a different subject, the people involved, the action, the evidence, an object, the geography, archive, the environment, the consequence. This is depth, not a quota: there is no fixed asset count. Do not manufacture unsupported scenes just for variety, and do not create near-duplicate assets; every factual safeguard above still applies. When the verified facts genuinely support only one view, fewer assets are correct.
+
+Return JSON { "longAssets": [...] }.`;
+
+// One screened archive candidate as the Long Coverage call sees it: its title,
+// licence and credit, the searches that found it, and any earlier rejection.
+function retainedBlock(c: RetainedArchiveCandidate): string {
+  return [
+    `- "${c.title}" (licence: ${c.license || "unknown"}; credit: ${c.credit || "unknown"})`,
+    `  found by: ${c.queries.join("; ") || "(no query recorded)"}`,
+    ...c.rejections.map((r) => `  rejected for one slot before: ${r}`),
+  ].join("\n");
+}
+
+export function longCoveragePayload(input: LongCoverageInput): string {
+  const { story, research, script, slots, retained } = input;
+  return [
+    ...storyFacts(story, research),
+    "",
+    `LONG SCRIPT:\n${script}`,
+    ...(retained.length
+      ? ["", "SCREENED ARCHIVE CANDIDATES (already acquired for this story; screened, NOT approved; each may or may not suit any slot):", "", retained.map(retainedBlock).join("\n")]
+      : []),
+    "",
+    "The edit is already cut. The fixed slots below show what the narration needs the viewer to see and for how long; a separate Editor assigns media to them. Do NOT assign anything to slots: propose the film's media library.",
+    "",
+    `LONG SLOTS (#0-#${slots.length - 1}):`,
+    "",
+    slotBlocks(slots),
+    "",
+    'Return JSON { "longAssets": [...] }.',
+  ].join("\n");
+}
+
+export const openAiLongCoverageDirector: LongCoverageDirector = async (input, respond = respondJson) => {
+  return respond<{ longAssets: CoverageAsset[] }>({
+    instructions: LONG_COVERAGE_INSTRUCTIONS,
+    input: longCoveragePayload(input),
+    schemaName: "long_coverage_plan",
+    schema: LONG_COVERAGE_SCHEMA,
+  });
+};
+
+// The Long Editor's schema: presentationId is an enum of the film's legal ids.
+export function longEditorSchema(presentations: Presentation[]) {
+  const film = editorSchema({ long: presentations, short: [] }).properties.long;
+  return { type: "object", additionalProperties: false, required: ["long"], properties: { long: film } };
+}
+
+export const LONG_EDITOR_INSTRUCTIONS = `You are the Editor for PastBriefly, a factual historical documentary. The edit is already cut into FIXED SLOTS, each with a fixed time, duration and narration, and a validated MEDIA LIBRARY already exists for the film, with every LEGAL PRESENTATION of it listed. Your only question for every slot is: "What legal piece of available media should appear in this fixed slot?" Return strict JSON: exactly one assignment for every slot of the film.
+
+WHAT YOU RETURN - for each slot: slotId, presentationId (one of the listed presentation ids, exactly as written) and motionPriority. You do NOT create assets, create crops, alter timing, choose cuts or estimate cost. Every slotId exactly once: no missing slot, no duplicate slot, no unknown slot, and no presentation that is not listed. A plan that breaks any of this is rejected whole; nothing will repair it.
+
+PRESENTATIONS - "<asset>:base" shows the whole asset. "<asset>:detail-left", ":detail-center" and ":detail-right" crop the SAME image onto the listed elements of that region. Every presentation of one asset is the same underlying picture, so reusing an asset, in any presentation, costs nothing. A detail shows only the elements it lists: never pick a detail for something it does not list. You do not need to use every asset; an unused asset is simply never made.
+
+EVERY CUT SERVES THE NARRATION - each slot's presentation must show what that slot's narration is about, or be a deliberate, supported cutaway. Every cut should earn its place: reveal new information, change scale, introduce a person, object or place, show evidence, reset geography, escalate the action, make an intentional callback, or give a deliberate visual breath.
+
+SEQUENCES - you see the whole timeline: edit it as small sequences, not as isolated slot islands. Think in mini-sequences of roughly 20-40 seconds of slots, each with an intentional arc, for example establish -> detail -> person/evidence -> escalation -> payoff, or establishing base -> supported detail -> different subject or evidence -> archive -> callback, rather than new asset -> new asset -> new asset -> new asset. A base followed by one of its details is a natural documentary cut; so is returning to an earlier base as a callback. Reuse is desirable when it creates coverage, continuity, a callback or a scale change, but do not overuse one asset just because it has many presentations.
+
+EVERY SLOT IS AN ACTUAL CUT - the exact same presentationId may NEVER appear in two adjacent slots: that is a hidden hold, not a cut, and the whole plan is rejected. This applies equally to reconstruction, archive, graphic and detail presentations, with ONE exception: a presentation marked "adjacent repeat: one deliberate hold" (the base of a base-only archive) may fill TWO adjacent slots when the narration genuinely stays on it, if those two slots last ${ARCHIVE_HOLD_MAX_SEC}s or less together; it plays as one continuous held image, and a third adjacent slot is still rejected. Each presentation in the library lists its capabilities: "detail views: none" means it is base only, so you cannot cut within it. If a base-only archive or graphic stays relevant across several phrases, cut away to another supported presentation and return to it later; do NOT fake a hold by repeating it. BAD: slot 20 -> L07:base, slot 21 -> L07:base, slot 22 -> L07:base. GOOD: slot 20 -> L07:base, slot 21 -> L04:detail-center, slot 22 -> L07:base (only when each choice genuinely supports its slot's narration). A base followed by one of its own details is a real cut. The same presentation later, after other slots, is allowed. Before returning JSON, explicitly check every adjacent pair: assignment[n].presentationId must not equal assignment[n - 1].presentationId.
+
+ARCHIVE MUST MATCH THE WORDS - an archive presentation must directly support the CURRENT slot's narration. Do not place a related famous person or event merely because it belongs to the story (BAD: a prime minister's archive image starting on narration about a diplomatic protest). Put archive where that person, event or media is actually being spoken about.
+
+TEMPORAL ALIGNMENT - do not anticipate later facts, evidence or events. A visual about information the film introduces later must not be placed earlier merely because it belongs to the same story or sequence. Every presentation must support the CURRENT slot's narration or be a genuinely supported cutaway for that current thought.
+
+ABSTRACT NARRATION - when a slot mainly carries interpretation, suspicion, consequence, policy, transition or reflection, use a supported asset that fits: a detail or callback of an earlier asset, an archive item, or a graphic that states a concrete fact. Do not pick an unrelated scene just because it is new.
+
+REPETITION AND OVERUSE - track the recent sequence as you go. Avoid three consecutive slots dominated by the same primary subject at a similar scale. Different presentation ids do not make a run varied: submarine wide -> submarine detail -> submarine wide -> submarine detail -> submarine wide is still one subject. Break long same-subject runs with a supported reset where the narration allows: a person, an object or evidence, geography, archive, the environment or another action. Do not lean on one asset for most of a sequence when other supported assets fit: reuse is a tool for detail and callbacks, not a way to avoid variety. Prefer useful alternation where the narration supports it (environment, subject, person, evidence, geography, archive, detail, action, intentional return), without rotating categories mechanically.
+
+CALLBACKS AND ENDING - reuse an earlier asset when the narration returns to it, so the callback reads as intentional. Exact presentation reuse must be intentional: when returning to an asset shortly after it appeared, prefer another of its legal presentations where that is meaningful; an exact earlier crop should return only when the repeated composition itself serves the story. Give the film a deliberate ending: a final image that closes the story, not an arbitrary last asset.
+
+MOTION PRIORITY - 0 none, 1 useful, 2 strong, 3 standout. PastBriefly chooses the actual motion itself: only a base presentation of a motion-capable reconstruction, on a slot marked "motion allowed: yes", can move; at most ${MOTION_BUDGET.long} clips in the film; at most one clip per asset; highest priority first, earlier slots winning ties. A priority above 0 is useful ONLY when all three hold: the slot is 5s or shorter ("motion allowed: yes"), the chosen presentation is the base of a motion-capable reconstruction, and visible physical movement would improve the shot (a vessel moving, refloating or towing, water, a physical operation). Never give a priority, least of all 3, to a slot that cannot move (a long slot, a detail, archive, a graphic). Every slot lists "motion allowed": if it says no, motionPriority MUST be 0; a priority there can never take effect. Every presentation lists "motion eligible": if it says no, motionPriority MUST be 0, or the whole plan is rejected. Give 3 only for the few standout moments. Most slots are 0. Never raise a priority just to make the film feel busy.
+
+FINAL CHECK - before returning, verify: every slot appears exactly once; no two adjacent slots share the same presentationId (except one allowed two-slot archive hold); and every motionPriority above 0 is on a "motion eligible: yes" presentation AND on a slot marked "motion allowed: yes".
+
+Return, for "long", exactly one assignment per slot, in slot order.`;
+
+export function longEditorPayload(input: LongEditorInput): string {
+  const { story, research, script, slots, library, presentations } = input;
+  return [
+    ...storyFacts(story, research),
+    "",
+    `LONG SCRIPT:\n${script}`,
+    "",
+    `LONG MEDIA LIBRARY (${library.length} assets, ${presentations.length} legal presentations):`,
+    "",
+    library.map((a) => libraryBlock(a, presentations)).join("\n\n"),
+    "",
+    "The edit is already cut. For every slot below choose one listed presentation of the library, and a motion priority.",
+    "",
+    `LONG SLOTS (#0-#${slots.length - 1}):`,
+    "",
+    slotBlocks(slots),
+    "",
+    'Return JSON { "long": [...] }: exactly one assignment per slot, each slotId exactly once.',
+  ].join("\n");
+}
+
+export const openAiLongEditor: LongEditorDirector = async (input, respond = respondJson) => {
+  return respond<{ long: EditorAssignment[] }>({
+    instructions: LONG_EDITOR_INSTRUCTIONS,
+    input: longEditorPayload(input),
+    schemaName: "long_edit_plan",
+    schema: longEditorSchema(input.presentations),
+  });
+};
+
+// The offline Long planners: the same tiny valid library and edit the pair
+// fallbacks make, for the Long alone.
+export const fallbackLongCoverageDirector: LongCoverageDirector = async (input) => ({ longAssets: fallbackAssets(input.slots, input.research) });
+export const fallbackLongEditor: LongEditorDirector = async (input) => ({ long: fallbackEdit(input.slots, input.presentations) });
+
+const defaultLongDirectors = (): LongVisualDirectors =>
+  config.mode === "live"
+    ? { coverage: openAiLongCoverageDirector, coverageRepair: openAiCoverageRepair, editor: openAiLongEditor, repair: openAiEditRepair }
+    : { coverage: fallbackLongCoverageDirector, editor: fallbackLongEditor };
+
+// Plan a Long-first job's Long with TWO calls (plus the same optional Coverage
+// repair and edit repair calls), exactly as planVisuals plans one film. Returns
+// only the Long: nothing about a Short is built, asked or returned.
+export async function planLongVisuals(
+  story: Story,
+  research: ResearchPackage,
+  script: string,
+  narration: Narration,
+  directors: LongVisualDirectors = defaultLongDirectors(),
+  hooks: PlanningHooks = {},
+  retained: RetainedArchiveCandidate[] = [],
+): Promise<{ long: PlannedShot[]; coverageRejected: RejectedCandidate[]; coverageRepaired: RepairedCandidate[] }> {
+  if (config.mode === "live" && !(research.facts && research.facts.length > 0)) {
+    throw new Error("Visual planning requires verified facts. Re-run the current research/text pipeline before planning visuals.");
+  }
+  const slots = planSlots("long", script, narration);
+
+  hooks.before?.();
+  const coverage = await directors.coverage({ story, research, script, slots, retained });
+  hooks.after?.();
+  if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) {
+    throw new VisualPlanError('Invalid coverage plan: the answer is not a { "longAssets" } object.');
+  }
+  const list = coverageList("long", coverage.longAssets);
+  // The one Coverage repair, for either/or rejections only (the existing call).
+  const repairTargets = screenCandidates("long", list).rejected.filter(isRepairableRejection).map((r) => ({ ...r, candidate: list[r.index] }));
+  let patched = new Map<number, unknown>();
+  if (directors.coverageRepair && repairTargets.length) {
+    hooks.before?.();
+    const fix = await directors.coverageRepair({ story, research, targets: repairTargets });
+    hooks.after?.();
+    patched = applyCoverageRepair(repairTargets, fix).long;
+  }
+  const screened = screenCoverage("long", list.map((c, i) => (patched.has(i) ? patched.get(i) : c)));
+  const library = screened.assets;
+  const rejectedAt = screened.rejected.map((r) => r.index);
+  const coverageRepaired = [...patched.keys()].map((index): RepairedCandidate => {
+    const reason = repairTargets.find((t) => t.index === index)!.reason;
+    if (rejectedAt.includes(index)) return { film: "long", index, reason, recovered: false };
+    return { film: "long", index, reason, recovered: true, id: assetId("long", index - rejectedAt.filter((r) => r < index).length) };
+  });
+  const presentations = buildPresentations(library);
+
+  hooks.before?.();
+  const plan = await directors.editor({ story, research, script, slots, library, presentations });
+  hooks.after?.();
+  const checked = validateEdit("long", slots, normalizeMotionPriorities(slots, plan?.long).plan, presentations, true);
+  // The one edit repair for adjacent identical presentations (the existing call,
+  // asked about the Long only: its Short lists are empty arguments, never state).
+  const targets = adjacentRepeatTargets(checked, archiveHolds(slots, checked.map((e) => e.presentationId), presentations));
+  let answer: unknown = checked;
+  if (directors.repair && targets.length) {
+    const input: EditRepairInput = {
+      story,
+      slots: { long: slots, short: [] },
+      library: { long: library, short: [] },
+      presentations: { long: presentations, short: [] },
+      edit: { long: checked, short: [] },
+      targets: { long: targets, short: [] },
+    };
+    const allowed = repairAllowedIds(input); // a target with no option fails before the call
+    hooks.before?.();
+    const fix = await directors.repair(input);
+    hooks.after?.();
+    answer = normalizeMotionPriorities(slots, applyEditRepair("long", checked, allowed.long, fix?.long)).plan;
+  }
+  const edit = validateEdit("long", slots, answer, presentations);
+  const motion = selectMotion("long", slots, edit, presentations, library);
+  return { long: assembleEdit("long", slots, edit, presentations, library, motion, story, research), coverageRejected: screened.rejected, coverageRepaired };
 }
 
 // Phrase beats -> fixed edit slots for one film, checked before any planner sees

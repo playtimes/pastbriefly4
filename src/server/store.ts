@@ -99,13 +99,17 @@ export function setStorySaved(storyId: string, saved: boolean): void {
   db.prepare(`UPDATE stories SET saved=? WHERE id=?`).run(saved ? 1 : 0, storyId);
 }
 
-export function setScripts(storyId: string, scripts: Scripts): void {
+// A story's latest audited scripts: the pair of a pair-first job, or only the
+// Long of a Long-first job (Stage 16A), which has no Short yet.
+export type StoredScripts = Scripts | { long: string };
+
+export function setScripts(storyId: string, scripts: StoredScripts): void {
   db.prepare(`UPDATE stories SET scripts=? WHERE id=?`).run(J(scripts), storyId);
 }
 
-export function getScripts(storyId: string): Scripts | null {
+export function getScripts(storyId: string): StoredScripts | null {
   const r = db.prepare(`SELECT scripts FROM stories WHERE id=?`).get(storyId) as any;
-  return r?.scripts ? P<Scripts | null>(r.scripts, null) : null;
+  return r?.scripts ? P<StoredScripts | null>(r.scripts, null) : null;
 }
 
 // ---- Jobs ----
@@ -135,18 +139,22 @@ function rowToJob(r: any): JobRecord {
   };
 }
 
+// `scratch` is the job's initial private state, written by the SAME insert that
+// creates the job, so a job is never seen without it (e.g. a Long-first job's
+// flow marker). Without it the job starts with empty scratch, as always.
 export function createJob(input: {
   id: string;
   storyId: string;
   mock: boolean;
   estimatedCost: number;
   approvedMax: number;
+  scratch?: Record<string, any>;
 }): JobRecord {
   const ts = now();
   db.prepare(
-    `INSERT INTO jobs (id,story_id,state,step,message,mock,estimated_cost,approved_max,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
-  ).run(input.id, input.storyId, "queued", "queued", "Queued", input.mock ? 1 : 0, input.estimatedCost, input.approvedMax, ts, ts);
+    `INSERT INTO jobs (id,story_id,state,step,message,mock,estimated_cost,approved_max,scratch,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(input.id, input.storyId, "queued", "queued", "Queued", input.mock ? 1 : 0, input.estimatedCost, input.approvedMax, JSON.stringify(input.scratch ?? {}), ts, ts);
   return getJob(input.id)!;
 }
 
@@ -234,6 +242,14 @@ function rowToVideo(r: any): Video {
     hasAudio: !!r.has_audio,
     createdAt: r.created_at,
   };
+}
+
+// The story's jobs that reached LONG COMPLETE (a Long-first job finished with its
+// Long registered). Their lone Long video is a complete production; any other
+// job's lone video is not.
+export function longCompleteJobIds(storyId: string): string[] {
+  const rows = db.prepare(`SELECT id FROM jobs WHERE story_id=? AND json_extract(scratch, '$.longComplete') IS NOT NULL`).all(storyId) as any[];
+  return rows.map((r) => r.id);
 }
 
 export function videosForStory(storyId: string): Video[] {

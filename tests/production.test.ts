@@ -885,3 +885,48 @@ describe("Story page status", () => {
     expect(stage.storyProductionLabel(job({ state: "running", step: "finishing" }))).toBe("In production · Checking final films");
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe("Long-first (Stage 16A): a finished Long alone is a complete production", () => {
+  const video = (id: string, jobId: string, kind: "long" | "short", durationSec: number): Video => ({ id, storyId: "s", jobId, kind, path: `stories/demo/${id}.mp4`, width: 1920, height: 1080, durationSec, fps: 30, hasAudio: true, createdAt: "" });
+
+  test("a LONG COMPLETE job's lone Long is Ready; any other lone video still is not, and never hides the last pair", () => {
+    const videos = [video("v5", "j3", "long", 700), video("v4", "j2", "short", 57), video("v3", "j2", "long", 708)];
+    // j3 reached LONG COMPLETE: its Long alone is the newest complete production.
+    expect(stage.latestCompletePair(videos, undefined, ["j3"])).toEqual({ jobId: "j3", long: videos[0] });
+    expect(stage.latestCompletePair(videos, "j3", ["j3"])!.short).toBeUndefined();
+    // Without LONG COMPLETE the same lone video is a legacy partial: the pair wins, as always.
+    expect(stage.latestCompletePair(videos)!.jobId).toBe("j2");
+    expect(stage.latestCompletePair(videos, undefined, ["other"])!.jobId).toBe("j2");
+    expect(stage.latestCompletePair(videos, "j3")).toBeNull();
+    // Opening the route after a reload finds the finished Long.
+    expect(stage.productionTarget({ activeJob: null, failedJob: null, videos: [videos[0]], longCompleteJobIds: ["j3"] })).toEqual({ jobId: "j3" });
+    expect(stage.productionTarget({ activeJob: null, failedJob: null, videos: [videos[0]] })).toEqual({ navigate: "story" });
+  });
+
+  test("Ready shows one Long card with Watch Long; no Short card, no empty slot", () => {
+    const pair = { jobId: "j3", long: video("v5", "j3", "long", 708) };
+    const onWatch = vi.fn();
+    const p = { storyTitle: "Project Azorian", job: job({ id: "j3", state: "done", step: "finishing", spent: 8.2, flow: "long-first" }), pair, onWatch };
+    const html = renderToStaticMarkup(React.createElement(ReadyPanel, p));
+    expect(html).toContain("Ready");
+    expect(html).toMatch(/data-ready="long"[^]*11:48[^]*Watch Long/);
+    expect(html).not.toContain('data-ready="short"');
+    expect(html).not.toContain("Watch Short");
+    expect(html).toContain("$8.20");
+    buttons(React.createElement(ReadyPanel, p), "Watch Long")[0].props.onClick();
+    expect(onWatch.mock.calls).toEqual([["long"]]);
+  });
+
+  test("the film view offers no empty Short tab for a Long-only preview; a pair keeps both tabs", () => {
+    const base = (pv: VisualPreview) => ({ preview: pv, version: 0, onBack: vi.fn(), onRegenerate: vi.fn(), regen: { running: null, failed: null, done: null }, onReviseSequence: vi.fn() }) as any;
+    const longOnly = { ...preview(), frames: preview().frames.filter((f) => f.kind === "long") };
+    const out = renderToStaticMarkup(React.createElement(VisualReview, base(longOnly)));
+    expect(out).toContain('data-film-tab="long"');
+    expect(out).not.toContain('data-film-tab="short"');
+    const pair = renderToStaticMarkup(React.createElement(VisualReview, base(preview())));
+    expect(pair).toContain('data-film-tab="long"');
+    expect(pair).toContain('data-film-tab="short"');
+  });
+});

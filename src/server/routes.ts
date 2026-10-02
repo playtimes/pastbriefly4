@@ -3,7 +3,7 @@ import { z } from "zod";
 import { config, settingsStatus, setMode, saveSettings } from "./config.ts";
 import { CATEGORIES, directorFeedbackError, stillFeedbackError, sequenceFeedbackError, type Job, type StoryReview } from "../types.ts";
 import type { ResearchPackage } from "../production/pipelineTypes.ts";
-import type { Scripts } from "./store.ts";
+import type { StoredScripts } from "./store.ts";
 import {
   listStories,
   getStory,
@@ -13,12 +13,13 @@ import {
   activeJobForStory,
   latestJobForStory,
   videosForStory,
+  longCompleteJobIds,
   createJob,
   getJob,
   updateJob,
   type JobRecord,
 } from "./store.ts";
-import { estimateJob } from "../production/estimate.ts";
+import { estimateLongFirst } from "../production/estimate.ts";
 import { findStories, recheckStory } from "../production/research.ts";
 import { discover } from "../production/discover.ts";
 import { getNiches } from "../production/niches.ts";
@@ -32,7 +33,7 @@ const DIRECTOR_QA_BUSY = "Director QA is running. Wait for it to finish.";
 // The editorial review data for the text gate, read straight from the job's
 // private scratch. Only the useful fields are exposed - never the whole scratch.
 function reviewFromJob(j: JobRecord): StoryReview | null {
-  const scratch = j.scratch as { research?: ResearchPackage; scripts?: Scripts };
+  const scratch = j.scratch as { research?: ResearchPackage; scripts?: StoredScripts };
   const research = scratch.research;
   const scripts = scratch.scripts;
   if (!research || !scripts) return null;
@@ -44,14 +45,17 @@ function reviewFromJob(j: JobRecord): StoryReview | null {
     moments: research.moments,
     sources: research.sources,
     longScript: scripts.long,
-    shortScript: scripts.short,
+    // A Long-first draft has no Short: the review then has no Short at all.
+    ...("short" in scripts ? { shortScript: scripts.short } : {}),
   };
 }
 
 function toPublic(j: JobRecord): Job {
   const { previewApproved, scratch, ...pub } = j;
   const progress = jobProgress(j);
-  const withProgress = progress ? { ...pub, progress } : pub;
+  // Only the flow marker of the private scratch: absent for a pair-first job.
+  const flowed = scratch.flow === "long-first" ? { ...pub, flow: "long-first" as const } : pub;
+  const withProgress = progress ? { ...flowed, progress } : flowed;
   // Text QA status: its phase or stop reason at the text gate, and "passed" while
   // the approved job heads for the visuals. Server memory only.
   const qa = textQaState(j.id);
@@ -138,7 +142,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return {
       story,
       videos: videosForStory(story.id),
-      estimate: estimateJob(story),
+      // The jobs whose lone Long is a complete production (LONG COMPLETE).
+      longCompleteJobIds: longCompleteJobIds(story.id),
+      estimate: estimateLongFirst(story), // what Generate approves: a new job is Long-first
       activeJob: active ? toPublic(active) : null,
       failedJob: failed ? toPublic(failed) : null,
     };
@@ -233,11 +239,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: "approvedMax (a positive number) is required." });
     const approvedMax = parsed.data.approvedMax;
 
-    const estimate = estimateJob(story);
+    // Every new job is Long-first (Stage 16A): it makes and finishes the Long
+    // alone, so it is estimated and approved for that work only. The flow marker
+    // is written by the same insert that creates the job. Jobs created before
+    // this stay pair-first.
+    const estimate = estimateLongFirst(story);
     if (approvedMax > config.maxSpendUsd) return reply.code(400).send({ error: `Approved max $${approvedMax} exceeds the ceiling $${config.maxSpendUsd}.` });
     if (approvedMax + 1e-9 < estimate.total) return reply.code(400).send({ error: `Approved max $${approvedMax} is below the estimate $${estimate.total}.` });
 
-    const job = createJob({ id: newJobId(), storyId: story.id, mock: config.mode === "mock", estimatedCost: estimate.total, approvedMax });
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: config.mode === "mock", estimatedCost: estimate.total, approvedMax, scratch: { flow: "long-first" } });
     setStorySaved(story.id, true);
     enqueueJob(job.id);
     return { job: toPublic(job), duplicate: false };

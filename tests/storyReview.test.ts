@@ -398,3 +398,24 @@ describe("Text needs you: the simple issue view and the advanced review", () => 
     expect(progress(job({ state: "running", step: "research" }))).toContain("Researching…</h1>");
   });
 });
+
+describe("a Long-first draft (Stage 16A): no Short anywhere in the review", () => {
+  const { shortScript: _s, ...longOnly } = review;
+  test("no Short tab and no empty Short pane; the pair review keeps all four tabs", () => {
+    const out = renderToStaticMarkup(React.createElement(StoryReviewPanel, { review: longOnly as StoryReview, onApprove: vi.fn(), approving: false }));
+    for (const t of ["Story", "Facts &amp; Sources", "Long script"]) expect(out).toContain(`>${t}</button>`);
+    expect(out).not.toContain("Short script");
+    const pair = renderToStaticMarkup(React.createElement(StoryReviewPanel, { review, onApprove: vi.fn(), approving: false }));
+    expect(pair).toContain(">Short script</button>");
+  });
+
+  test("the review packet has no Short section and no Short check; the pair packet is unchanged", () => {
+    const md = buildStoryReviewClipboardText(longOnly as StoryReview);
+    expect(md).toContain("## LONG SCRIPT\n\nLong script L-1.\n\nLong paragraph L-2.\n\n## REVIEW REQUEST");
+    expect(md).not.toMatch(/SHORT|Short|undefined/);
+    expect(md).toContain("6. Does the story have enough depth for the Long without artificial padding?\n7. Give a final decision:");
+    const pair = buildStoryReviewClipboardText(review);
+    expect(pair).toContain("## SHORT SCRIPT\n\nShort script S-9.\n\n## REVIEW REQUEST");
+    expect(pair).toContain("6. Does the Short preserve the strongest version of the premise?\n7. Does the story have enough depth for the Long without artificial padding?\n8. Give a final decision:");
+  });
+});

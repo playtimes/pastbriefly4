@@ -50,7 +50,11 @@ export function Videos({ slug, film = "long" }: { slug: string; film?: VideoKind
   const jobs = [...byJob.values()];
   const current = jobs[0] ?? [];
   const previous = jobs.slice(1);
-  const active = current.find((v) => v.kind === tab);
+  // Only the films the current job made: a Long-first job has its Long alone, so
+  // no empty Short tab is offered (and a /watch/short link shows the Long).
+  const kinds = (["long", "short"] as VideoKind[]).filter((k) => current.some((v) => v.kind === k));
+  const shown = kinds.includes(tab) ? tab : kinds[0];
+  const active = current.find((v) => v.kind === shown);
 
   if (!current.length) {
     return (
@@ -87,12 +91,12 @@ export function Videos({ slug, film = "long" }: { slug: string; film?: VideoKind
       {/* Centered Long / Short switch. */}
       <div className="mt-[26px] flex justify-center">
         <div className="inline-flex rounded-full border border-line bg-[#15100e] p-[5px]">
-          {(["long", "short"] as VideoKind[]).map((k) => (
+          {kinds.map((k) => (
             <button
               key={k}
               onClick={() => setTab(k)}
               className={`h-10 rounded-full px-[22px] text-[14px] font-semibold transition ${
-                tab === k ? "bg-accent text-white" : "text-[#8f8579] hover:text-ink"
+                shown === k ? "bg-accent text-white" : "text-[#8f8579] hover:text-ink"
               }`}
             >
               {k === "long" ? "Long documentary" : "Short"}

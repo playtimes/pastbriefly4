@@ -5,7 +5,7 @@ import { More, moreItem } from "../More.tsx";
 import { DISPLAY_STAGES, stageIndex, stageLabel, stageProgress, type CompletePair, type DisplayStage } from "../productionStage.ts";
 import type { VisualIssue } from "../visualReview/visualIssues.ts";
 import { Still } from "../visualReview/Still.tsx";
-import type { FinalQaIssue, Job, TextQaSection, TextQaState, VideoKind } from "../../types.ts";
+import type { FinalQaIssue, Job, TextQaSection, TextQaState, Video, VideoKind } from "../../types.ts";
 import type { ReviewTab } from "./Creating.tsx";
 
 // The plain faces of the Production screen (/story/:slug/creating): Running,
@@ -365,11 +365,14 @@ function runtime(sec: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// Production finished: the pair this job rendered, what it cost, and a way to
-// watch each film on the existing Watch page. Persistent: a reload shows it again.
+// Production finished: the films this job rendered (the pair, or a Long-first
+// job's Long alone), what it cost, and a way to watch each film on the existing
+// Watch page. Persistent: a reload shows it again.
 export function ReadyPanel({ storyTitle, job, pair, onWatch }: { storyTitle: string; job: Job; pair: CompletePair; onWatch: (film: VideoKind) => void }): React.ReactElement {
   const card = "flex-1 min-w-0 flex flex-col gap-4 rounded-[16px] border border-line bg-panel p-5 md:p-6";
   const cost = money(job.spent);
+  const films: [VideoKind, string, Video][] = [["long", "Long documentary", pair.long]];
+  if (pair.short) films.push(["short", "Short", pair.short]);
   return (
     <div className="flex flex-col gap-8 max-w-[760px]">
       <div className="flex flex-col gap-2.5">
@@ -380,7 +383,7 @@ export function ReadyPanel({ storyTitle, job, pair, onWatch }: { storyTitle: str
         <h1 className={title}>{storyTitle}</h1>
       </div>
       <div className="flex flex-col md:flex-row gap-4">
-        {([["long", "Long documentary", pair.long], ["short", "Short", pair.short]] as const).map(([kind, label, video]) => (
+        {films.map(([kind, label, video]) => (
           <div key={kind} data-ready={kind} className={card}>
             <div className="flex items-baseline justify-between gap-3">
               <span className="font-serif text-[22px] leading-none text-ink">{label}</span>

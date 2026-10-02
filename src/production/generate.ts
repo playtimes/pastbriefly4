@@ -2,8 +2,8 @@ import crypto from "node:crypto";
 import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { config } from "../server/config.ts";
 import { PRICING, assetReviewUsd, round, ttsUsd } from "../server/pricing.ts";
-import { getJob, getStory, upsertStory, updateJob, addVideos, setScripts, approvePreview, type JobRecord } from "../server/store.ts";
-import type { AssetQaIssue, AssetQaPhase, AssetQaStage, AssetQaState, DirectorQaRun, DirectorQaRuns, FinalQaState, VisualAutopilotState, CoordinatedRepairReport, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent, DirectorVerifyReport, JobStep, SequenceCleanupReport, Story, TextQaPhase, TextQaReview, TextQaStage, TextQaState, TextQaVerify, Video } from "../types.ts";
+import { getJob, getStory, upsertStory, updateJob, addVideo, addVideos, setScripts, approvePreview, type JobRecord } from "../server/store.ts";
+import type { JobFlow, AssetQaIssue, AssetQaPhase, AssetQaStage, AssetQaState, DirectorQaRun, DirectorQaRuns, FinalQaState, VisualAutopilotState, CoordinatedRepairReport, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent, DirectorVerifyReport, JobStep, SequenceCleanupReport, Story, TextQaPhase, TextQaReview, TextQaStage, TextQaState, TextQaVerify, Video } from "../types.ts";
 import { imageMimeType, respondJson, ProviderOutputError } from "../providers/openai.ts";
 import {
   assetQaTargets,
@@ -36,13 +36,14 @@ import { buildFilm } from "../app/visualReview/model.ts";
 import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type CleanupPattern } from "../app/visualReview/board.ts";
 import { now } from "../server/db.ts";
 import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
-import { recordArchiveReview } from "./archiveRetention.ts";
+import { recordArchiveReview, retainedArchiveInventory } from "./archiveRetention.ts";
 import { researchStory } from "./research.ts";
-import { writeScript, auditScripts, reviseStoryText, reviewStoryDraft, verifyStoryDraft, textQaCallsProvider } from "./scripts.ts";
+import { writeScript, auditScripts, auditLongScript, reviseStoryText, reviseLongText, reviewStoryDraft, reviewLongDraft, verifyStoryDraft, verifyLongDraft, textQaCallsProvider, type LongDraft, type RevisedText, type RevisedLongText } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
 import { plainDashes } from "./text.ts";
 import {
   planVisuals,
+  planLongVisuals,
   acquireStill,
   recoverArchiveStill,
   seedArchiveLedger,
@@ -108,9 +109,17 @@ import {
 import { cellTimes } from "../render/contactSheet.ts";
 
 interface Scratch {
+  // Stage 16A: "long-first" for a Long-first job, written by the insert that
+  // created it. Absent: a pair-first job, forever (older scratch is never
+  // reinterpreted). A Long-first job makes only the Long until LONG COMPLETE: it
+  // never gains a Short key (no Short script, narration, shots, QA or files).
+  flow?: JobFlow;
+  // LONG COMPLETE: the Long passed (or was accepted), was registered as its own
+  // video, and the job is done. Saved together with state "done".
+  longComplete?: { videoId: string; at: string };
   research?: ResearchPackage;
   scriptParts?: { long?: string; short?: string };
-  scripts?: Scripts;
+  scripts?: Scripts | LongDraft; // a LongDraft only for a Long-first job
   textApproved?: boolean; // the story review gate: set once the user approves the text
   narration?: { long?: Narration; short?: Narration };
   masterRef?: string;
@@ -165,6 +174,28 @@ async function runScriptAudit(job: JobRecord, story: Story, research: ResearchPa
   return audited;
 }
 
+// A Long-first job's fidelity audit: the same resumable, separately charged call
+// over the Long alone.
+async function runLongScriptAudit(job: JobRecord, story: Story, research: ResearchPackage, long: string, scratch: Scratch): Promise<string> {
+  budget(job, PRICING.openai.script, scratch);
+  const audited = await auditLongScript(story, research, long);
+  record(job.id, PRICING.openai.script, scratch);
+  return audited;
+}
+
+// The final scripts as stored and narrated (plain hyphens only): the audited pair,
+// or a Long-first job's audited Long alone. `longFirst` is the job's flow
+// (isLongFirst), never the draft's shape: a pair-first job always gets the pair
+// audit. The audit runs only for live, non-fixture stories - the same gate
+// writeScripts uses.
+async function finalScripts(job: JobRecord, story: Story, research: ResearchPackage, drafts: Scripts | LongDraft, scratch: Scratch, longFirst: boolean): Promise<Scripts | LongDraft> {
+  const audit = story.slug !== "paul-bunyan" && config.mode === "live";
+  if (longFirst) return { long: plainDashes(audit ? await runLongScriptAudit(job, story, research, drafts.long, scratch) : drafts.long) };
+  const pair = drafts as Scripts;
+  const final = audit ? await runScriptAudit(job, story, research, pair, scratch) : pair;
+  return { long: plainDashes(final.long), short: plainDashes(final.short) };
+}
+
 // Resolves "text_gate" when this run wrote a NEW draft and stopped at the text
 // gate, which is where the worker starts Automatic Director Text QA, and
 // "preview_gate" when it stopped at the visual preview with visuals no Asset QA
@@ -194,29 +225,23 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     //    fidelity audit (Final Text Integrity). Each of the three calls is
     //    resumable: the drafts live in scriptParts and survive an audit failure,
     //    and scratch.scripts is only set (and setScripts only stores) the audited
-    //    result, so narration always speaks the audited scripts.
+    //    result, so narration always speaks the audited scripts. A Long-first job
+    //    writes and audits only the Long (two calls), and stores only the Long.
     if (!scratch.scripts) {
-      step(jobId, "scripts", "Writing the films", scratch);
+      step(jobId, "scripts", isLongFirst(scratch) ? "Writing the film" : "Writing the films", scratch);
       scratch.scriptParts ??= {};
       const parts = scratch.scriptParts;
-      if (parts.long === undefined) {
+      for (const kind of filmKinds(scratch)) {
+        if (parts[kind] !== undefined) continue;
         budget(job, PRICING.openai.script, scratch);
-        parts.long = await writeScript(story, research, "long");
+        parts[kind] = await writeScript(story, research, kind);
         record(jobId, PRICING.openai.script, scratch);
       }
-      if (parts.short === undefined) {
-        budget(job, PRICING.openai.script, scratch);
-        parts.short = await writeScript(story, research, "short");
-        record(jobId, PRICING.openai.script, scratch);
-      }
-      const drafts = { long: parts.long!, short: parts.short! };
-      // The audit is the third script call. It runs only for live, non-fixture
-      // stories - the same gate writeScripts uses - so mock and Paul Bunyan keep
-      // their deterministic drafts. On a later resume scratch.scripts already
-      // exists, so this whole block is skipped and the audit is never re-charged.
-      const final = story.slug !== "paul-bunyan" && config.mode === "live" ? await runScriptAudit(job, story, research, drafts, scratch) : drafts;
-      // The finalized scripts are stored and narrated with plain hyphens only.
-      scratch.scripts = { long: plainDashes(final.long), short: plainDashes(final.short) };
+      const drafts: Scripts | LongDraft = isLongFirst(scratch) ? { long: parts.long! } : { long: parts.long!, short: parts.short! };
+      // The audit is the last script call. Mock and Paul Bunyan keep their
+      // deterministic drafts. On a later resume scratch.scripts already exists,
+      // so this whole block is skipped and the audit is never re-charged.
+      scratch.scripts = await finalScripts(job, story, research, drafts, scratch, isLongFirst(scratch));
       setScripts(story.id, scratch.scripts);
       updateJob(jobId, { scratch });
     }
@@ -232,40 +257,48 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
       return drafted ? "text_gate" : undefined; // wait for Approve & continue (by Text QA or the user)
     }
 
-    // 3. Narration - Long and Short are separate paid calls, each resumable.
-    if (!scratch.narration?.long || !scratch.narration?.short) {
+    // 3. Narration - Long and Short are separate paid calls, each resumable. A
+    //    Long-first job narrates only the Long.
+    if (filmKinds(scratch).some((kind) => !scratch.narration?.[kind])) {
       step(jobId, "narration", "Recording narration", scratch);
       scratch.narration ??= {};
       const nar = scratch.narration;
-      if (!nar.long) {
-        budget(job, ttsUsd(scripts.long.length), scratch);
-        nar.long = await recordNarration(story.slug, "long", scripts.long);
-        record(jobId, ttsUsd(scripts.long.length), scratch);
-      }
-      if (!nar.short) {
-        budget(job, ttsUsd(scripts.short.length), scratch);
-        nar.short = await recordNarration(story.slug, "short", scripts.short);
-        record(jobId, ttsUsd(scripts.short.length), scratch);
+      for (const kind of filmKinds(scratch)) {
+        if (nar[kind]) continue;
+        const text = scriptOf(scratch, kind)!;
+        budget(job, ttsUsd(text.length), scratch);
+        nar[kind] = await recordNarration(story.slug, kind, text);
+        record(jobId, ttsUsd(text.length), scratch);
       }
     }
-    const narration = scratch.narration as { long: Narration; short: Narration };
+    const narration = scratch.narration as { long: Narration; short?: Narration };
 
     // 4. Plan shots - TWO planning calls cover both films: the Coverage Director
     //    (media library), then the Editor (one presentation per fixed slot). Each
     //    call (and the optional Coverage repair and Editor repair calls) is preflighted
     //    and charged once it returns, even if its answer then
     //    fails validation (which stops the job before any acquisition). Reused on
-    //    resume: once both plans are in scratch this block is skipped.
-    if (!scratch.longShots || !scratch.shortShots) {
+    //    resume: once every film's plan is in scratch this block is skipped. A
+    //    Long-first job plans the Long alone (planLongVisuals), with this story's
+    //    retained archive offered to its Coverage call as screened candidates.
+    if (filmKinds(scratch).some((kind) => !(kind === "long" ? scratch.longShots : scratch.shortShots))) {
       step(jobId, "stills", "Planning the visuals", scratch);
-      const plans = await planVisuals(story, research, scripts, narration, undefined, {
+      const hooks = {
         before: () => budget(job, PRICING.openai.visualPlan, scratch),
         after: () => record(jobId, PRICING.openai.visualPlan, scratch),
-      });
-      scratch.longShots = plans.long;
-      scratch.shortShots = plans.short;
-      scratch.coverageRejected = plans.coverageRejected;
-      scratch.coverageRepaired = plans.coverageRepaired;
+      };
+      if (isLongFirst(scratch)) {
+        const plan = await planLongVisuals(story, research, scripts.long, narration.long, undefined, hooks, retainedArchiveInventory(story.slug));
+        scratch.longShots = plan.long;
+        scratch.coverageRejected = plan.coverageRejected;
+        scratch.coverageRepaired = plan.coverageRepaired;
+      } else {
+        const plans = await planVisuals(story, research, scripts as Scripts, narration as { long: Narration; short: Narration }, undefined, hooks);
+        scratch.longShots = plans.long;
+        scratch.shortShots = plans.short;
+        scratch.coverageRejected = plans.coverageRejected;
+        scratch.coverageRepaired = plans.coverageRepaired;
+      }
       updateJob(jobId, { scratch });
     }
     // A plan stored by an older planner (e.g. a v1 shot list) is never reinterpreted.
@@ -341,7 +374,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     }
 
     // 5. Visual preview gate
-    const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
+    const preview = previewOf(story, scratch);
     updateJob(jobId, { step: "preview", preview, scratch, message: "Reviewing visual direction" });
 
     const approved = opts.autoApprovePreview || getJob(jobId)!.previewApproved;
@@ -363,14 +396,11 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
       }
     }
 
-    // 7. Render both films
+    // 7. Render both films (a Long-first job: the Long alone)
     scratch.renderPercent = 0;
-    step(jobId, "rendering", "Rendering the films", scratch);
+    step(jobId, "rendering", isLongFirst(scratch) ? "Rendering the film" : "Rendering the films", scratch);
     const plans = renderPlans(story, scratch, narration, accent);
-    await renderFilms(storyDir(story.slug), [
-      { plan: plans.long, compositionId: "LongVideo", outPath: inStory(story.slug, "renders/long.mp4") },
-      { plan: plans.short, compositionId: "ShortVideo", outPath: inStory(story.slug, "renders/short.mp4") },
-    ], (fraction) => {
+    await renderFilms(storyDir(story.slug), renderJobs(story, plans, filmKinds(scratch)), (fraction) => {
       // Persist only whole-percent changes, so the poll sees progress without a write per frame.
       const pct = Math.min(100, Math.floor(fraction * 100));
       if (pct === scratch.renderPercent) return;
@@ -387,15 +417,20 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
   }
 }
 
-type RenderPlans = Record<FinalFilmKind, RenderPlan>;
+type RenderPlans = { long: RenderPlan; short?: RenderPlan };
 
-// Both films' render plans, rebuilt from the saved edit and narration: the same
-// plans rendered them, so a resume checks the finished files against them.
-function renderPlans(story: Story, scratch: Scratch, narration: { long: Narration; short: Narration }, accent: string): RenderPlans {
-  return {
-    long: buildRenderPlan("long", story, scratch.longShots!, narration.long, accent),
-    short: buildRenderPlan("short", story, scratch.shortShots!, narration.short, accent),
-  };
+// The job's films' render plans (both, or a Long-first job's Long alone), rebuilt
+// from the saved edit and narration: the same plans rendered them, so a resume
+// checks the finished files against them.
+function renderPlans(story: Story, scratch: Scratch, narration: { long: Narration; short?: Narration }, accent: string): RenderPlans {
+  const long = buildRenderPlan("long", story, scratch.longShots!, narration.long, accent);
+  if (isLongFirst(scratch)) return { long };
+  return { long, short: buildRenderPlan("short", story, scratch.shortShots!, narration.short!, accent) };
+}
+
+// One render job per film to (re)render, each to its fixed output file.
+function renderJobs(story: Story, plans: RenderPlans, kinds: FinalFilmKind[]) {
+  return kinds.map((kind) => ({ plan: plans[kind]!, compositionId: kind === "long" ? ("LongVideo" as const) : ("ShortVideo" as const), outPath: inStory(story.slug, `renders/${kind}.mp4`) }));
 }
 
 const FILM_NAME: Record<FinalFilmKind, string> = { long: "Long", short: "Short" };
@@ -412,16 +447,22 @@ const FILM_NAME: Record<FinalFilmKind, string> = { long: "Long", short: "Short" 
 // 3. Both films PASS (or Continue anyway): register the pair in ONE transaction,
 //    then done. Anything left for a person: awaiting_final, nothing registered,
 //    the finished files and the findings kept. Mock never calls a reviewer.
+// A Long-first job does all of this for its Long alone: one file, the Long's two
+// specialists, and on PASS (or Continue anyway) addVideo(long), then LONG
+// COMPLETE and done in one final job update. A restart between those two writes
+// resumes here: the saved results skip every reviewer, and addVideo upserts the
+// same `${jobId}-long` row, so nothing is charged, rendered or registered twice.
 async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans: RenderPlans): Promise<void> {
-  step(job.id, "finishing", "Checking final films", scratch);
+  const longFirst = isLongFirst(scratch);
+  step(job.id, "finishing", longFirst ? "Checking the final film" : "Checking final films", scratch);
   // A recovered archive already bound but not yet rendered (a restart during the
   // final visual repair): render that film first, so its file matches its edit.
   const pending = scratch.finalFilmQa?.visualRepair?.rerender;
   if (pending?.length) {
     await renderRepaired(job, story, scratch, pending);
-    plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category));
+    plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short?: Narration }, accentFor(story.category));
   }
-  const finals = (["long", "short"] as const).map((kind) => {
+  const finals = filmKinds(scratch).map((kind) => {
     const rel = `renders/${kind}.mp4`;
     const file = inStory(story.slug, rel);
     let p: Probe;
@@ -432,24 +473,24 @@ async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans
     }
     return { kind, rel, file, p };
   });
-  for (const f of finals) validateFinalVideo(plans[f.kind], f.p);
+  for (const f of finals) validateFinalVideo(plans[f.kind]!, f.p);
   if (!scratch.finalFilmQa) {
-    scratch.finalFilmQa = { outputsValidated: true, long: {}, short: {} };
+    scratch.finalFilmQa = longFirst ? { outputsValidated: true, long: {} } : { outputsValidated: true, long: {}, short: {} };
     updateJob(job.id, { scratch });
   }
 
   const qa = scratch.finalFilmQa;
   if (config.mode === "live" && !qa.accepted) {
     for (const [kind, specialist] of FINAL_SPECIALISTS) {
-      if (qa[kind][specialist]) continue;
-      const f = finals.find((x) => x.kind === kind)!;
+      const f = finals.find((x) => x.kind === kind);
+      if (!f || qa[kind]![specialist]) continue; // a film this job does not make has no specialist
       await finalSpecialist(job, scratch, finalFilmInput(story, scratch, kind, f.file, f.p.durationSec), kind, specialist);
     }
     const results = finalFilmResults(qa);
-    if (results.long?.decision !== "PASS" || results.short?.decision !== "PASS") {
+    if (finals.some((f) => results[f.kind]?.decision !== "PASS")) {
       // The one automatic recovery for a visual HUMAN_REVIEW caused by failed
       // archive acquisition; then the changed film is checked again from the top.
-      const durations = { long: finals[0].p.durationSec, short: finals[1].p.durationSec };
+      const durations = Object.fromEntries(finals.map((f) => [f.kind, f.p.durationSec])) as Partial<Record<FinalFilmKind, number>>;
       const repair = finalVisualRepairPlan(scratch, durations);
       if (repair && round((scratch.spent ?? 0) + repair.maxUsd) > job.approvedMax + 1e-9) {
         console.warn(`Final visual repair skipped job=${job.id}: it may cost up to $${repair.maxUsd.toFixed(2)}, beyond the approved maximum.`);
@@ -457,16 +498,16 @@ async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans
         const changed = await repairFinalVisuals(job, story, scratch, repair, durations);
         if (changed.length) {
           await renderRepaired(job, story, scratch, changed);
-          return finishFilms(job, story, scratch, renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category)));
+          return finishFilms(job, story, scratch, renderPlans(story, scratch, scratch.narration as { long: Narration; short?: Narration }, accentFor(story.category)));
         }
       }
-      updateJob(job.id, { state: "awaiting_final", step: "finishing", message: "Final films need review", scratch });
+      updateJob(job.id, { state: "awaiting_final", step: "finishing", message: longFirst ? "The final film needs review" : "Final films need review", scratch });
       return;
     }
   }
 
-  addVideos(
-    finals.map(({ kind, rel, p }): Video => ({
+  const videos = finals.map(
+    ({ kind, rel, p }): Video => ({
       id: `${job.id}-${kind}`,
       storyId: story.id,
       jobId: job.id,
@@ -478,15 +519,20 @@ async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans
       fps: p.fps,
       hasAudio: p.hasAudio,
       createdAt: now(),
-    })),
+    }),
   );
+  if (longFirst) {
+    // LONG COMPLETE: the Long is registered on its own, then marked and done.
+    addVideo(videos[0]);
+    scratch.longComplete = { videoId: videos[0].id, at: now() };
+  } else addVideos(videos);
   updateJob(job.id, { state: "done", step: "finishing", message: "Finished", scratch });
 }
 
 // What one specialist reviews: this film's final narration, the saved research,
 // the finished mp4 and the saved final edit.
 function finalFilmInput(story: Story, scratch: Scratch, kind: FinalFilmKind, videoPath: string, durationSec: number): FinalFilmInput {
-  return { story, kind, script: scratch.scripts![kind], research: scratch.research!, videoPath, durationSec, shots: (kind === "long" ? scratch.longShots : scratch.shortShots)! };
+  return { story, kind, script: scriptOf(scratch, kind)!, research: scratch.research!, videoPath, durationSec, shots: (kind === "long" ? scratch.longShots : scratch.shortShots)! };
 }
 
 // One Final-film QC specialist, with PB4's usual paid-call rules: preflighted
@@ -510,10 +556,10 @@ async function finalSpecialist(job: JobRecord, scratch: Scratch, input: FinalFil
       throw e;
     }
   };
-  const qa = scratch.finalFilmQa!;
+  const film = scratch.finalFilmQa![kind]!;
   try {
-    if (specialist === "factual") qa[kind].factual = await reviewFinalFactual(input, reviewer);
-    else qa[kind].visual = await reviewFinalVisual(input, reviewer);
+    if (specialist === "factual") film.factual = await reviewFinalFactual(input, reviewer);
+    else film.visual = await reviewFinalVisual(input, reviewer);
   } catch (e) {
     if (answered) record(job.id, usd, scratch);
     throw e;
@@ -557,7 +603,7 @@ const filmShots = (s: Scratch, kind: FinalFilmKind): PlannedShot[] => (kind === 
 // was planned as archive (archiveQuery kept), is now a reconstruction on its
 // generated still, and every use shows its base (an archive has no crops).
 function archiveFallbacksInIssues(scratch: Scratch, kind: FinalFilmKind, durationSec: number): PlannedShot[] {
-  const visual = scratch.finalFilmQa?.[kind].visual;
+  const visual = scratch.finalFilmQa?.[kind]?.visual;
   if (visual?.decision !== "HUMAN_REVIEW") return [];
   const shots = filmShots(scratch, kind);
   const ids = issueAssets(shots, cellTimes(durationSec, kind), visual.issues.flatMap((i) => i.cells));
@@ -625,20 +671,22 @@ export interface FinalVisualRepairPlan {
 }
 
 // Whether the findings are the repairable class: live, not accepted, never
-// attempted, BOTH factual audits PASS, and a visual HUMAN_REVIEW whose cells show
-// archive fallbacks or movable slots. null otherwise. `durations` are the
-// reviewed files' own. `only` (or a saved repairOnly) limits it to that film. The
-// cost is the worst case, preflighted before anything.
-function finalVisualRepairPlan(scratch: Scratch, durations: Record<FinalFilmKind, number>, only = scratch.finalFilmQa?.repairOnly): FinalVisualRepairPlan | null {
+// attempted, EVERY film's factual audit PASS (both films, or a Long-first job's
+// Long alone), and a visual HUMAN_REVIEW whose cells show archive fallbacks or
+// movable slots. null otherwise. `durations` are the reviewed files' own. `only`
+// (or a saved repairOnly) limits it to that film. The cost is the worst case,
+// preflighted before anything.
+function finalVisualRepairPlan(scratch: Scratch, durations: Partial<Record<FinalFilmKind, number>>, only = scratch.finalFilmQa?.repairOnly): FinalVisualRepairPlan | null {
   const qa = scratch.finalFilmQa;
   if (config.mode !== "live" || !qa || qa.accepted || qa.visualRepair) return null;
-  if (qa.long.factual?.decision !== "PASS" || qa.short.factual?.decision !== "PASS" || !qa.long.visual || !qa.short.visual) return null;
-  const films = (["long", "short"] as const)
-    .filter((film) => (!only || film === only) && qa[film].visual!.decision === "HUMAN_REVIEW")
+  const kinds = filmKinds(scratch);
+  if (kinds.some((film) => qa[film]?.factual?.decision !== "PASS" || !qa[film]?.visual)) return null;
+  const films = kinds
+    .filter((film) => (!only || film === only) && qa[film]!.visual!.decision === "HUMAN_REVIEW")
     .map((film) => ({
       film,
-      assets: archiveFallbacksInIssues(scratch, film, durations[film]).map((s) => s.assetId),
-      sequence: repetitionTargets(filmShots(scratch, film), qa[film].visual!, durations[film], film, new Set()).length > 0,
+      assets: archiveFallbacksInIssues(scratch, film, durations[film]!).map((s) => s.assetId),
+      sequence: repetitionTargets(filmShots(scratch, film), qa[film]!.visual!, durations[film]!, film, new Set()).length > 0,
     }))
     .filter((f) => f.assets.length || f.sequence);
   if (!films.length) return null;
@@ -667,17 +715,17 @@ function bindArchive(shots: PlannedShot[], assetId: string, path: string, credit
 // The whole attempt: saved first (so it never runs twice, even after a restart),
 // then the archive stage, then one sequence stage per flagged film. Returns the
 // films whose pictures changed, to re-render and audit again (empty: none).
-async function repairFinalVisuals(job: JobRecord, story: Story, scratch: Scratch, plan: FinalVisualRepairPlan, durations: Record<FinalFilmKind, number>): Promise<FinalFilmKind[]> {
+async function repairFinalVisuals(job: JobRecord, story: Story, scratch: Scratch, plan: FinalVisualRepairPlan, durations: Partial<Record<FinalFilmKind, number>>): Promise<FinalFilmKind[]> {
   const qa = scratch.finalFilmQa!;
-  const audits = { long: qa.long.visual!, short: qa.short.visual! }; // the findings being repaired
+  const audits = Object.fromEntries(plan.films.map((f) => [f.film, qa[f.film]!.visual!])) as Partial<Record<FinalFilmKind, VisualAudit>>; // the findings being repaired
   const repair: FinalVisualRepair = { attempted: true, tried: [], recovered: [], rejected: [] };
   qa.visualRepair = repair;
   step(job.id, "finishing", "Repairing repeated visuals", scratch);
   const changed = new Set(await recoverFinalArchive(job, story, scratch, plan, repair));
   for (const f of plan.films) {
-    if (f.sequence && (await diversifyFinalSequence(job, story, scratch, f.film, audits[f.film], durations[f.film], repair))) changed.add(f.film);
+    if (f.sequence && (await diversifyFinalSequence(job, story, scratch, f.film, audits[f.film]!, durations[f.film]!, repair))) changed.add(f.film);
   }
-  return (["long", "short"] as const).filter((k) => changed.has(k));
+  return filmKinds(scratch).filter((k) => changed.has(k));
 }
 
 // The archive stage. Each implicated asset gets ONE more archive search (archive
@@ -709,7 +757,7 @@ async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratc
   };
 
   const changed: FinalFilmKind[] = [];
-  for (const film of ["long", "short"] as const) {
+  for (const film of filmKinds(scratch)) {
     const mine = found.filter((f) => f.film === film);
     if (!mine.length) continue;
     const next = structuredClone(filmShots(scratch, film));
@@ -745,7 +793,7 @@ async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratc
     try {
       resolveReuse(story, film, final);
       assertFilmGrammarPlan(film, final);
-      validateEdit(film, planSlots(film, scratch.scripts![film], scratch.narration![film]!), storedEdit(final), storedPresentations(final));
+      validateEdit(film, planSlots(film, scriptOf(scratch, film)!, scratch.narration![film]!), storedEdit(final), storedPresentations(final));
     } catch (e: any) {
       for (const f of mine.filter((m) => passed.has(m.assetId))) reject(f, `The recovered archive does not fit the saved edit: ${e?.message || e}`);
       continue;
@@ -753,11 +801,11 @@ async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratc
     if (film === "long") scratch.longShots = final;
     else scratch.shortShots = final;
     for (const f of mine.filter((m) => passed.has(m.assetId))) repair.recovered.push({ film, assetId: f.assetId, source: f.credit });
-    delete qa[film].visual; // it described the old pictures
+    delete qa[film]!.visual; // it described the old pictures
     changed.push(film);
   }
   if (changed.length) repair.rerender = changed;
-  updateJob(job.id, { scratch, ...(changed.length ? { preview: buildPreview(story, scratch.longShots!, scratch.shortShots!) } : {}) });
+  updateJob(job.id, { scratch, ...(changed.length ? { preview: previewOf(story, scratch) } : {}) });
   return changed;
 }
 
@@ -803,10 +851,10 @@ async function diversifyFinalSequence(
     return false;
   }
   const pendingBefore = !!repair.rerender?.includes(film);
-  const auditBefore = qa[film].visual;
+  const auditBefore = qa[film]!.visual;
   const before = structuredClone(filmShots(scratch, film));
   repair.rerender = [...new Set([...(repair.rerender ?? []), film])];
-  delete qa[film].visual;
+  delete qa[film]!.visual;
   updateJob(job.id, { scratch });
 
   let kept = false;
@@ -840,12 +888,12 @@ async function diversifyFinalSequence(
     if (film === "long") scratch.longShots = before;
     else scratch.shortShots = before;
     if (!pendingBefore) {
-      if (auditBefore) qa[film].visual = auditBefore;
+      if (auditBefore) qa[film]!.visual = auditBefore;
       repair.rerender = repair.rerender!.filter((k) => k !== film);
       if (!repair.rerender.length) delete repair.rerender;
     }
   }
-  updateJob(job.id, { scratch, preview: buildPreview(story, scratch.longShots!, scratch.shortShots!) });
+  updateJob(job.id, { scratch, preview: previewOf(story, scratch) });
   return kept;
 }
 
@@ -853,11 +901,8 @@ async function diversifyFinalSequence(
 // checks every file against the contract again. Local work, never charged.
 async function renderRepaired(job: JobRecord, story: Story, scratch: Scratch, kinds: FinalFilmKind[]): Promise<void> {
   step(job.id, "finishing", "Rendering the repaired film", scratch);
-  const plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short: Narration }, accentFor(story.category));
-  await renderFilms(
-    storyDir(story.slug),
-    kinds.map((kind) => ({ plan: plans[kind], compositionId: kind === "long" ? "LongVideo" : "ShortVideo", outPath: inStory(story.slug, `renders/${kind}.mp4`) })),
-  );
+  const plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short?: Narration }, accentFor(story.category));
+  await renderFilms(storyDir(story.slug), renderJobs(story, plans, kinds));
   delete scratch.finalFilmQa!.visualRepair!.rerender;
   updateJob(job.id, { scratch });
 }
@@ -875,8 +920,9 @@ export function resumeFinalVisualRepairForJob(jobId: string, approvedMax?: numbe
   if (!story) throw new Error("Story not found.");
   const scratch = job.scratch as Scratch;
   if (job.state !== "awaiting_final" || !scratch.finalFilmQa) throw new Error("Only finished films waiting for review can be repaired.");
-  const duration = (k: FinalFilmKind) => probeVideo(inStory(story.slug, `renders/${k}.mp4`)).durationSec;
-  const plan = finalVisualRepairPlan(scratch, { long: duration("long"), short: duration("short") }, kind);
+  // Only the job's own files: a Long-first job has no Short file to probe.
+  const durations = Object.fromEntries(filmKinds(scratch).map((k) => [k, probeVideo(inStory(story.slug, `renders/${k}.mp4`)).durationSec]));
+  const plan = finalVisualRepairPlan(scratch, durations, kind);
   if (!plan) throw new Error(kind ? `The finished ${FILM_NAME[kind]} has no automatic visual repair available.` : "These finished films have no automatic archive repair available.");
   const max = approvedMax === undefined ? job.approvedMax : round(approvedMax);
   if (!Number.isFinite(max)) throw new Error("The approved maximum must be a number.");
@@ -889,12 +935,27 @@ export function resumeFinalVisualRepairForJob(jobId: string, approvedMax?: numbe
   return getJob(jobId)!;
 }
 
-function films(s: Scratch): Array<["long" | "short", PlannedShot[]]> {
-  return [
-    ["long", s.longShots ?? []],
-    ["short", s.shortShots ?? []],
-  ];
+const isLongFirst = (s: Scratch): boolean => s.flow === "long-first";
+
+// The films this job makes: the Long alone for a Long-first job, both for a
+// pair-first job. Every production loop over films goes through here, so a
+// Long-first job never touches (or creates) Short state.
+export function filmKinds(s: { flow?: JobFlow }): FinalFilmKind[] {
+  return s.flow === "long-first" ? ["long"] : ["long", "short"];
 }
+
+function films(s: Scratch): Array<["long" | "short", PlannedShot[]]> {
+  return filmKinds(s).map((kind) => [kind, (kind === "long" ? s.longShots : s.shortShots) ?? []]);
+}
+
+// The saved edit's preview. A Long-first job has no Short shots: its preview is
+// the Long's alone (the empty list is only buildPreview's argument, never saved).
+function previewOf(story: Story, s: Scratch) {
+  return buildPreview(story, s.longShots!, isLongFirst(s) ? [] : s.shortShots!);
+}
+
+// A film's saved script: the pair's, or a Long-first job's Long.
+const scriptOf = (s: Scratch, kind: FinalFilmKind): string | undefined => (s.scripts as Partial<Scripts> | undefined)?.[kind];
 
 // One film's retained pool as saved, or for an older job without one, seeded from
 // its CURRENT shots only (anything dropped before this existed stays lost).
@@ -925,14 +986,16 @@ export function jobProgress(job: { step: JobStep; scratch: Record<string, any> }
   const s = (job.scratch ?? {}) as Scratch;
   // Progress counts the assets being made: a reuse shares its owner's still.
   const shots = [...(s.longShots ?? []), ...(s.shortShots ?? [])].filter((sh) => sh.edit !== "reuse");
+  // One count per film the job makes: two for a pair, one for a Long-first job.
+  const kinds = filmKinds(s);
   switch (job.step) {
     case "scripts": {
       const p = s.scriptParts ?? {};
-      return { current: (p.long !== undefined ? 1 : 0) + (p.short !== undefined ? 1 : 0), total: 2 };
+      return { current: kinds.filter((k) => p[k] !== undefined).length, total: kinds.length };
     }
     case "narration": {
       const n = s.narration ?? {};
-      return { current: (n.long ? 1 : 0) + (n.short ? 1 : 0), total: 2 };
+      return { current: kinds.filter((k) => n[k]).length, total: kinds.length };
     }
     case "archive": {
       const archive = shots.filter((sh) => sh.truth === "archive");
@@ -1007,17 +1070,20 @@ export async function reviseTextForJob(jobId: string, feedback: string): Promise
 
   revising.add(jobId);
   try {
+    // A Long-first job (its flow, never its draft's shape) revises and then
+    // audits its Long alone; a pair-first job always takes the pair path.
+    const longFirst = isLongFirst(scratch);
     budget(job, PRICING.openai.script, scratch);
-    const revised = await reviseStoryText(story, research, scripts, feedback);
+    const revised: RevisedText | RevisedLongText = longFirst ? await reviseLongText(story, research, { long: scripts.long }, feedback) : await reviseStoryText(story, research, scripts as Scripts, feedback);
     record(jobId, PRICING.openai.script, scratch);
 
     const nextStory = { ...story, title: revised.title, hook: revised.hook };
     const nextResearch: ResearchPackage = { ...research, moments: revised.moments, facts: revised.facts };
-    const drafts = { long: revised.long, short: revised.short };
-    const final = story.slug !== "paul-bunyan" && config.mode === "live" ? await runScriptAudit(job, nextStory, nextResearch, drafts, scratch) : drafts;
+    const drafts: Scripts | LongDraft = longFirst ? { long: revised.long } : { long: revised.long, short: (revised as RevisedText).short };
+    const final = await finalScripts(job, nextStory, nextResearch, drafts, scratch, longFirst);
 
     scratch.research = nextResearch;
-    scratch.scripts = { long: plainDashes(final.long), short: plainDashes(final.short) };
+    scratch.scripts = final;
     upsertStory(nextStory);
     setScripts(story.id, scratch.scripts);
     updateJob(jobId, { scratch, spent: scratch.spent ?? 0, state: "awaiting_text", message: "Ready for story review", error: null });
@@ -1042,7 +1108,7 @@ export function isTextQaRunning(jobId: string): boolean {
 
 // One Director call priced like any script call, preflighted against the
 // approved maximum and charged once it returns (no charge without a provider call).
-async function textQaCall<T>(jobId: string, call: (story: Story, research: ResearchPackage, scripts: Scripts) => Promise<T>): Promise<T> {
+async function textQaCall<T>(jobId: string, call: (story: Story, research: ResearchPackage, scripts: Scripts | LongDraft) => Promise<T>): Promise<T> {
   const job = getJob(jobId);
   if (!job) throw new Error("Job not found.");
   if (job.state !== "awaiting_text") throw new Error("The job is no longer at the story review.");
@@ -1085,10 +1151,18 @@ export async function autoTextQaForJob(jobId: string, advance: (jobId: string) =
     }
   };
 
+  // A Long-first job (its flow, never its draft's shape) gets its own Long-only
+  // review and verification (no Short input, checks or sections); a pair-first
+  // job always gets the pair review.
+  const longFirst = isLongFirst(job.scratch as Scratch);
+  const reviewDraft = (story: Story, research: ResearchPackage, d: Scripts | LongDraft) => (longFirst ? reviewLongDraft(story, research, { long: d.long }) : reviewStoryDraft(story, research, d as Scripts));
+  const verifyDraft = (story: Story, research: ResearchPackage, d: Scripts | LongDraft, repair: string) =>
+    longFirst ? verifyLongDraft(story, research, { long: d.long }, repair) : verifyStoryDraft(story, research, d as Scripts, repair);
+
   phase("review");
   let review: TextQaReview;
   try {
-    review = await textQaCall(jobId, reviewStoryDraft);
+    review = await textQaCall(jobId, reviewDraft);
   } catch (e) {
     return end({ status: "stopped", stage: "director_review", message: "Text QA could not complete. Review the current draft manually.", summary: "", issues: [], error: failed("director_review", e) });
   }
@@ -1106,7 +1180,7 @@ export async function autoTextQaForJob(jobId: string, advance: (jobId: string) =
   phase("verify");
   let verify: TextQaVerify;
   try {
-    verify = await textQaCall(jobId, (story, research, scripts) => verifyStoryDraft(story, research, scripts, feedback));
+    verify = await textQaCall(jobId, (story, research, scripts) => verifyDraft(story, research, scripts, feedback));
   } catch (e) {
     return end({ status: "stopped", stage: "final_verify", message: "Text repair completed, but final verification failed. Review the current draft manually.", summary: review.summary, issues: [], feedback, error: failed("final_verify", e) });
   }
@@ -1135,9 +1209,10 @@ function storedFilm(jobId: string, kind: "long" | "short", atGate = true) {
   const scratch: Scratch = { ...(job.scratch as Scratch) };
   const shots = kind === "long" ? scratch.longShots : scratch.shortShots;
   const narration = scratch.narration?.[kind];
-  if (!shots?.length || !scratch.scripts || !narration) throw new Error(`This job has no ${kind} edit to revise.`);
+  const script = scriptOf(scratch, kind);
+  if (!shots?.length || !script || !narration) throw new Error(`This job has no ${kind} edit to revise.`);
   assertFilmGrammarPlan(kind, shots);
-  const slots = planSlots(kind, scratch.scripts[kind], narration);
+  const slots = planSlots(kind, script, narration);
   if (slots.length !== shots.length || slots.some((s, i) => shots[i].index !== s.id || Math.abs(shots[i].startSec - s.startSec) > 1e-6 || Math.abs(shots[i].endSec - s.endSec) > 1e-6)) {
     throw new Error(`The stored ${kind} edit no longer matches its fixed slots. Rebuild the visuals instead.`);
   }
@@ -1211,7 +1286,7 @@ async function reviseStoredSequence(
     const { [kind]: _stale, ...other } = scratch.directorQa;
     scratch.directorQa = other;
   }
-  const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
+  const preview = previewOf(story, scratch);
   updateJob(job.id, ctx.final ? { scratch, spent: scratch.spent ?? 0, preview } : { scratch, spent: scratch.spent ?? 0, preview, state: "awaiting_preview", previewApproved: false, error: null });
   return { job: getJob(job.id)!, changed: revised.changed, unresolved: revised.unresolved, choices };
 }
@@ -1359,7 +1434,7 @@ export async function directorReviewForJob(
 // deterministic attention flags. Built fresh from the saved job on every call.
 function qaInput(film: ReturnType<typeof storedFilm>, kind: "long" | "short"): DirectorQaInput {
   const { story, scratch, shots, slots, presentations } = film;
-  const fr = buildFilm(buildPreview(story, scratch.longShots!, scratch.shortShots!), kind);
+  const fr = buildFilm(previewOf(story, scratch), kind);
   const byFrame = sequenceAttentionFlags(fr);
   const flags = shots.map((s) => byFrame[fr.frames.findIndex((f) => f.slot === s.index)] ?? []);
   return { story, kind, slots, shots, presentations, flags, openingSec: OPENING_SEC, endingSec: ENDING_SEC };
@@ -1441,7 +1516,7 @@ const CLEANUP_REMAINS: Record<CleanupPattern, string> = {
 // editable only if it is not a motion slot and has at least one legal change.
 function cleanupIssues(film: ReturnType<typeof storedFilm>, kind: "long" | "short") {
   const { story, scratch, shots, slots, pool, presentations } = film;
-  const fr = buildFilm(buildPreview(story, scratch.longShots!, scratch.shortShots!), kind);
+  const fr = buildFilm(previewOf(story, scratch), kind);
   const locked = new Map(shots.filter((s) => s.wantsMotion).map((s) => [s.index, MOTION_LOCK] as [number, string]));
   const choices = sequenceSlotChoices(kind, slots, shots, presentations, locked, story, pool);
   const slotOf = (frame: number) => fr.frames[frame].slot ?? frame;
@@ -1623,7 +1698,7 @@ export async function regenerateStill(jobId: string, kind: "long" | "short", ind
     resolveReuse(story, kind, shots);
     retain(scratch, kind, shots); // the asset's retained entries follow its (possibly moved) still
     if (result === "generated") record(jobId, PRICING.openai.image, scratch);
-    const preview = buildPreview(story, scratch.longShots!, scratch.shortShots!);
+    const preview = previewOf(story, scratch);
     updateJob(jobId, { scratch, spent: scratch.spent ?? 0, preview, state: "awaiting_preview", previewApproved: false, error: null });
     return getJob(jobId)!;
   } finally {
@@ -1760,7 +1835,7 @@ export async function autoAssetQaForJob(
   try {
     saveAssetQa(jobId, { status: "started" });
     const scratch = job.scratch as Scratch;
-    const films = (["long", "short"] as const).map((kind) => [kind, assetQaTargets(kind, (kind === "long" ? scratch.longShots : scratch.shortShots) ?? [])] as const);
+    const films = filmKinds(scratch).map((kind) => [kind, assetQaTargets(kind, (kind === "long" ? scratch.longShots : scratch.shortShots) ?? [])] as const);
 
     // 1. Review every current owner still once.
     let reviewed = 0;
@@ -1802,7 +1877,7 @@ export async function autoAssetQaForJob(
     if (regenerated.length) {
       phase("verify");
       const now = getJob(jobId)!.scratch as Scratch;
-      for (const kind of ["long", "short"] as const) {
+      for (const kind of filmKinds(now)) {
         const done = new Map(regenerated.filter((r) => r.target.kind === kind).map((r) => [r.target.assetId, { reason: r.reason, feedback: r.feedback }]));
         const targets = assetQaTargets(kind, (kind === "long" ? now.longShots : now.shortShots) ?? []).filter((t) => done.has(t.assetId));
         for (const batch of chunk(targets)) {
@@ -1960,16 +2035,17 @@ export function approveVisualsForJob(jobId: string): JobRecord {
 }
 
 // The whole visual gate is clean, read from the CURRENT saved state only: the
-// Asset QA result is clean, and each film's Director QA completed with its
-// existing `clean` result. A result a later edit invalidated is gone, so it can
-// never count; a stored "running" without a live run reads as interrupted.
+// Asset QA result is clean, and each film's Director QA (a Long-first job: the
+// Long's alone) completed with its existing `clean` result. A result a later
+// edit invalidated is gone, so it can never count; a stored "running" without a
+// live run reads as interrupted.
 export function visualGateClean(jobId: string): boolean {
   const job = getJob(jobId);
   if (!job || job.state !== "awaiting_preview") return false;
   const asset = (job.scratch as Scratch).assetQa;
   if (asset?.status !== "done" || !asset.clean) return false;
   const runs = directorQaState(jobId, job.scratch);
-  return (["long", "short"] as const).every((kind) => {
+  return filmKinds(job.scratch as Scratch).every((kind) => {
     const run = runs?.[kind];
     return run?.status === "complete" && run.clean;
   });
@@ -2002,7 +2078,8 @@ async function autopilotDirectorQa(jobId: string, kind: "long" | "short"): Promi
 // After production has just acquired fresh visuals and stopped at the visual
 // gate (the worker's "preview_gate"): Asset QA; if clean, Director QA for Long;
 // if Long completed (clean or with exceptions, so every exception arrives in one
-// stop), Director QA for Short; then, only if the whole gate is clean in the
+// stop), Director QA for Short (a Long-first job has none: it stops at the
+// Long); then, only if the whole gate is clean in the
 // saved state, the existing approval and `advance` (the worker's enqueueJob),
 // exactly as manual Continue. Any exception, failure or interruption stops at
 // the visual gate. Each stage is the existing function with its own guards,
@@ -2022,8 +2099,11 @@ export async function autoVisualQaForJob(jobId: string, advance: (jobId: string)
     if (!asset.clean) return stop();
     const long = await autopilotDirectorQa(jobId, "long");
     if (long?.status !== "complete") return stop();
-    const short = await autopilotDirectorQa(jobId, "short");
-    if (short?.status !== "complete") return stop();
+    // A Long-first job has no Short: the gate is Asset QA and the Long's run.
+    if (filmKinds((getJob(jobId)?.scratch ?? {}) as Scratch).includes("short")) {
+      const short = await autopilotDirectorQa(jobId, "short");
+      if (short?.status !== "complete") return stop();
+    }
     if (!visualGateClean(jobId)) return stop();
     approveVisualsForJob(jobId);
     visualAutopilot.set(jobId, { status: "passed" });

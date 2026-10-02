@@ -1,13 +1,15 @@
 # Stage 16A - Long-first production design
 
-Design document. Only Slice 1 (archive retention, J.2) is implemented; Slice 2
-and 16C are not. `docs/ROADMAP.md` stays the source of
+Design document. Slice 1 (archive retention, J.2) and Slice 2 (the Long-first
+vertical path, J.3) are complete. Film #6, the first real production proof of
+the Long-first system, is next and has not started; 16C stays blocked until it
+has produced and passed a real finished Long. `docs/ROADMAP.md` stays the source of
 truth; this file records what the current code couples, the contract we are
 moving to, and how the completed Stage 16B evidence shapes the Long phase's
 visuals (sections F and I).
 
 Grounded in `main` at `ecc1cb7`. Status: design complete; Slice 1 COMPLETED
-(`f5548f3`); Slice 2 next.
+(`f5548f3`); Slice 2 COMPLETED (final review passed); Film #6 next, not started.
 
 ## A. Current pair-first coupling
 
@@ -217,9 +219,11 @@ should assume Blender exists.
 ### J.1 Order, and the rejected finish-only step
 
 1. **Slice 1 - archive retention** (J.2). COMPLETED.
-2. **Slice 2 - one honest Long-first vertical path** (J.3). Next.
-3. **16C - Long → Short derivation**, only after Slice 2 has produced a
-   finished Long.
+2. **Slice 2 - one honest Long-first vertical path** (J.3). COMPLETED.
+3. **Film #6** - the first real production proof of the Long-first system.
+   Next; not started.
+4. **16C - Long → Short derivation**, blocked until the Long-first system has
+   produced and passed a real finished Long through Film #6.
 
 **Rejected:** a "Long-first" job that stays pair-first upstream and only
 registers the Long earlier at the finish. It would still write, narrate, plan,
@@ -331,6 +335,14 @@ folder is under `DATA_DIR`, not in the story folder that is Remotion's
 
 ### J.3 Slice 2 - one honest Long-first vertical path
 
+Status: COMPLETED. The implementation is finished and its final review passed.
+Every new production job created through Generate is Long-first; jobs without
+the flow marker (every job created before, Project Azorian included) stay
+pair-first; before LONG COMPLETE, the Short does not exist. The engineering is
+complete; the first real Long production proof (Film #6) has not happened yet.
+The corrections below come from the implementation-ready inspection of the
+actual code and replace the earlier assumptions where they differ.
+
 **Lifecycle (new Long-first jobs only):**
 
 ```
@@ -349,6 +361,14 @@ Before LONG COMPLETE there is no Short script, Text QA, narration, plan,
 acquisition, image, Runway clip, render, QC or spend. Scratch never gains a
 Short key in this phase.
 
+**No empty Short state.** Absence means absence: a Long-first job never
+persists a placeholder such as `short: ""`, `short: {}`, `shortShots: []`,
+`retainedPresentations.short` or `finalFilmQa.short`. Where a shared helper
+needs two lists (`buildPreview`, the existing edit repair), the Long-first path
+passes an empty list as a function argument only; it is never saved. The mock
+script writer builds only the requested format, so a Long-first mock run never
+constructs a Short either.
+
 **State / versioning.**
 - One saved discriminator, `scratch.flow = "long-first"`, written in the same
   insert that creates the job. That means `createJob()` takes optional initial
@@ -357,13 +377,17 @@ Short key in this phase.
   stays legacy even if it resumes afterwards; existing scratch is never
   reinterpreted.
 - No new job types and no parent / child jobs.
-- LONG COMPLETE is `scratch.longComplete = { videoId, at }`, saved after
-  `addVideo(long)`. `addVideo()` is an idempotent upsert on `${jobId}-long`,
-  so a crash between the two re-registers safely on resume, without a second
-  QC call or charge.
-- Inside the flow, the code works over an explicit film list: `["long"]` for
-  Long-first, `["long","short"]` for legacy. Today's `films(scratch)` loops
-  then stay one code path instead of being copied.
+- LONG COMPLETE is `scratch.longComplete = { videoId, at }`, saved with
+  `state: "done"` in ONE job update right after `addVideo(long)`.
+  `addVideo()` is an idempotent upsert on `${jobId}-long` (it keeps the row's
+  `created_at`), so a crash between the two re-registers safely on resume: the
+  validated file is only re-probed, the saved QC results skip every reviewer,
+  nothing is rendered or charged again, and one row exists. No extra
+  transaction is needed.
+- Inside the flow, the code works over an explicit film list,
+  `filmKinds(scratch)`: `["long"]` for Long-first, `["long","short"]` for
+  legacy. `films(scratch)` and the production loops that hard-coded both films
+  go through it, so they stay one code path instead of being copied.
 
 **Pair couplings that must change for this flow:**
 
@@ -373,44 +397,94 @@ Short key in this phase.
 | Text QA | `reviewStoryDraft` / `verifyStoryDraft` / `reviseStoryText`, `textQaInput()` send both scripts; prompts check Short against Long; repair returns both | Long-only input, schema and prompt; the cross-film consistency check drops out |
 | Story review | `reviewFromJob()` (`routes.ts`) needs `shortScript`; UI shows both | Long only |
 | Narration | done only when both exist | Long only |
-| Visual planning | `planVisuals()` makes four joint model calls (coverage, coverage repair, editor, edit repair) returning `{long, short}` | Long-only versions of those four calls; see below |
+| Visual planning | `planVisuals()` makes TWO joint model calls (Coverage, Editor) returning `{long, short}`; the Coverage repair and edit repair already ask only about the films that have targets | Long-only Coverage and Editor (prompt, schema, payload, mock fallback) in `planLongVisuals()`; the two repair calls are reused unchanged; see below |
 | Preview / gates | `buildPreview(story, long, short)`; `visualGateClean()` needs both Director runs; Autopilot runs Long then Short QA | Long-only preview; gate needs Asset QA + the Long Director run |
 | Asset QA / motion / render | loops over both films; `renderFilms` gets both | Long only |
 | Final QC / finish | `finishFilms()` validates both, four specialists, pair registration; the final repair needs both factual PASS; Continue anyway accepts both | Long validation, Long factual + visual, the repair scoped to the Long and needing only the Long's factual PASS, `addVideo(long)`, LONG COMPLETE |
 | Pricing | `estimateJob()` / `planCounts()` price both films | Long-phase estimate only (below) |
 | UI / Ready | `latestCompletePair()`, `videos.length >= 2`, "accepts both films", Visual Review builds both, Videos assumes a pair | A Long-first job is finished with its Long; Long-only review / Ready copy; legacy views unchanged |
 
+**Further pair couplings the inspection found (all handled for Long-first,
+unchanged for legacy):**
+- `planCounts()` read `scripts.short.length` and threw on a stored Long-only
+  draft, which would have broken the story page and Generate (500).
+- `jobProgress()` counted scripts and narration out of 2.
+- Resume checks: narration needed both films (`!narration.long ||
+  !narration.short`) and planning needed both plans (`!longShots ||
+  !shortShots`), so a Long-first job would have re-narrated and re-planned,
+  and paid again, on every resume.
+- Seven `buildPreview(story, longShots, shortShots!)` call sites (preview gate,
+  Director review / cleanup, sequence revision, still regeneration, final
+  repair).
+- `FinalFilmQaRecord.short` was required, and `finalFilmResults()` read it
+  unguarded; `finishFilms()` probed both files and required both films PASS;
+  `finalVisualRepairPlan()` required the Short's factual PASS and visual audit;
+  `resumeFinalVisualRepairForJob()` probed `renders/short.mp4`.
+- `visualGateClean()` waited for both Director runs, and the Visual Autopilot
+  always ran the Short's Director QA (a Long-first job would never be approved).
+- `toPublic()` exposes no scratch, so the UI could not tell a Long-first job;
+  story detail had no way to tell a finished Long from a legacy lone video;
+  `ReadyPanel` dereferenced the Short and would crash.
+- `createJob()` could not take initial scratch.
+
 **Planning boundary.**
-- `planVisuals()` is not refactored to keep its pair shape. Most of the planner
-  already works per film: `planSlots()`, `screenCoverage()`,
-  `buildPresentations()`, `validateEdit()`, `selectMotion()`, `assembleEdit()`
-  and Film Grammar all take `kind`.
-- Only the four model calls are joint. The Long path gets Long-only versions of
-  them (prompt + schema) around the same per-film machinery. The legacy pair
-  path keeps `planVisuals()` as is.
-- Those Long-only calls are where section I's hierarchy enters, as guidance
-  rather than quotas:
-  - real archive first, including **this story's retained archive from
-    Slice 1, offered as known real material**;
-  - graphics / maps for explanation;
-  - reconstruction for genuine gaps;
-  - motion selective.
-- No Blender. Blender coverage stays a later, need-driven addition.
-- **For Director review:** whether Slice 2's Coverage call reads the retained
-  archive (my recommendation; otherwise retention is write-only until a later
-  slice), or Slice 2 stays a purely structural Long-only split.
+- `planVisuals()` is not refactored and keeps its pair shape. Most of the
+  planner already works per film: `planSlots()`, `screenCoverage()`,
+  `validateEdit()`, `archiveHolds()`, `adjacentRepeatTargets()`,
+  `normalizeMotionPriorities()`, `selectMotion()`, `assembleEdit()` and Film
+  Grammar take `kind`; `buildPresentations()` takes one film's assets.
+- Only Coverage and Editor are joint. `planLongVisuals()` (in `visuals.ts`)
+  gives the Long its own Coverage and Editor calls around the same per-film
+  machinery and reuses the existing Coverage repair and edit repair calls. It
+  needed no new exports: it lives beside the private helpers it uses. The pair
+  prompts, payloads and schemas are pinned byte-for-byte to their pre-Slice-2
+  hashes by a test.
+- The Long-only Coverage prompt is where section I's hierarchy enters, as
+  guidance rather than quotas: real material first, then graphics / maps for
+  explanation, reconstruction for genuine gaps and cinematic storytelling,
+  motion selective. It names no Blender backend. Blender coverage stays a later,
+  need-driven addition.
+- **Retained archive (decided: Coverage only).** The Long Coverage call is
+  given this story's retained archive (Slice 1) as a compact inventory labelled
+  SCREENED ARCHIVE CANDIDATES (screened, not approved): title, licence, credit,
+  the searches that found each, and any slot rejection reason, at most 20, read
+  by `retainedArchiveInventory()`; malformed sidecars are skipped and no path or
+  hash reaches the prompt. Any archive it then plans goes through the normal
+  `searchArchive()` → `fetchArchive()` screening into `archive/long-NN.jpg` and
+  Pixel Asset QA. Retained bytes are never reused directly or rendered from
+  `DATA_DIR`: the sidecar keeps only the Commons title, not the description and
+  categories `fetchArchive()` screens anchors against, so a direct reuse would
+  be a second, weaker screening. Deferred unless real production shows the need.
+- **Known limitation.** A brand-new story has no retained archive, so the
+  inventory does not help a new story's FIRST Coverage call (Film #6's first
+  plan included). It helps a visual rebuild, a later job for the same story,
+  later re-planning and the future Short derivation.
+- **Master reference (decided: unchanged).** The master still stays
+  unconditional (one image, $0.08). `scratch.masterRef` is also the
+  "visual work started" sentinel that clears an older job's working files, and
+  `images/hero.png` doubles as the story thumbnail, so skipping it would be
+  unrelated lifecycle work.
 
 **Pricing / spend.**
-- The Long-first estimate covers only pre-LONG COMPLETE work:
-  - research
-  - Long script + Long audit
-  - Long narration
-  - master still
-  - Long stills and Long motion (today's Long share of `planCounts()`)
-  - Long-only planning calls
-  - Long Final-film QC (one factual + one visual)
-  - the quality reserve, which should be reviewed against the smaller
-    Long-only workload before Slice 2 ships
+- `estimateLongFirst()` covers only pre-LONG COMPLETE work, from the same
+  `PRICING` constants and `planCounts()` as the pair estimate:
+  - research (`research`)
+  - Long script + Long fidelity audit (`2 x script`)
+  - Long narration (`ttsUsd(longChars)`)
+  - master still (`image`)
+  - Long stills (`(longShots - 4) x image`) and Long motion
+    (`clamp(floor(longShots / 5), 3, 6) x video5s`)
+  - Long Coverage + Editor (`2 x visualPlan`)
+  - Long Final-film QC (`finalFactualReview + finalVisualReview`)
+  - the quality reserve (`AUTOPILOT_QUALITY_RESERVE_USD`)
+- With today's constants and default counts that is $9.39 (the pair estimate
+  is $12.53). Generate and the story page use it for every new job;
+  `estimateJob()` is unchanged.
+- **Reserve (decided: unchanged at $1.50 for the first proof).** It still
+  covers real Long-only bounded work (Text QA and its repair, planner repairs,
+  archive-hold repair, Asset QA and still regeneration, Director QA, and the
+  final visual repair with its $0.75 re-audit). Actual Film #6 spend is
+  measured before any tuning.
 - `budget()` / `record()`, `approved_max`, `spent` and record-only-on-success
   are unchanged.
 - No Short reserve is needed before LONG COMPLETE.
@@ -445,15 +519,20 @@ Short key in this phase.
 - Existing `videos` rows and UI views stay valid.
 - No `videos` migration: `kind` + `addVideo()` suffice (section D).
 - `stories.scripts` may hold a Long-only object for flow jobs. Readers such as
-  `planCounts()` and the story page must accept a missing `short`.
+  `planCounts()` and the story page accept a missing `short`.
+- UI: the public job carries `flow` only for a Long-first job; story detail
+  lists `longCompleteJobIds`, so a LONG COMPLETE job's lone Long is Ready while
+  a legacy lone video still never counts (or hides the last pair). Ready, the
+  story page, Watch, Visual Review and Story Review show no empty Short.
 
 **Deliberately deferred.**
 - 16C: Short derivation, its pricing and continuation approval.
 - Blender integration.
 - Low-resolution archive presentation.
+- Direct reuse of retained archive bytes.
 - Retiring the legacy pair path.
 - Film Grammar changes.
-- Reserve tuning beyond a Long-only review.
+- Reserve tuning, after real Long-first spend is measured.
 
 **Why this is the smallest honest slice.**
 - The contract forbids any Short work before LONG COMPLETE, so every stage of
@@ -470,5 +549,5 @@ LONG COMPLETE → later derive 1-3 Shorts → reuse Long research / media / scen
 → minimal extra vertical media → Short QC
 ```
 
-It starts only after Slice 2 has produced a finished Long. A Short failure
-never touches the Long.
+It stays blocked until the Long-first system has produced and passed a real
+finished Long through Film #6. A Short failure never touches the Long.

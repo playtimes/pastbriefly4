@@ -643,14 +643,16 @@ export type FinalFilmKind = "long" | "short";
 export type FinalSpecialist = "factual" | "visual";
 
 // Saved under the job's scratch as `finalFilmQa`. `outputsValidated` is the
-// durable marker that BOTH final mp4s exist and passed the file contract, so
-// nothing renders them again. Each specialist result is saved as soon as it
-// exists; `accepted` is the person's Continue anyway. No prompt or image bytes.
+// durable marker that the job's final mp4s (BOTH for a pair-first job, the Long
+// alone for a Long-first job) exist and passed the file contract, so nothing
+// renders them again. Each specialist result is saved as soon as it exists;
+// `accepted` is the person's Continue anyway. No prompt or image bytes. A
+// Long-first job's record has no `short` at all.
 export interface FinalFilmQaRecord {
   outputsValidated: true;
   accepted?: true;
   long: { factual?: FactualAudit; visual?: VisualAudit };
-  short: { factual?: FactualAudit; visual?: VisualAudit };
+  short?: { factual?: FactualAudit; visual?: VisualAudit };
   visualRepair?: FinalVisualRepair;
   // An explicit resume of an awaiting_final job may limit the repair to one film;
   // the other film's edit, file and results are then never touched.
@@ -683,7 +685,7 @@ export const FINAL_SPECIALISTS: [FinalFilmKind, FinalSpecialist][] = [
 export function finalFilmResults(record: FinalFilmQaRecord): Partial<Record<FinalFilmKind, FinalFilmQaResult>> {
   const out: Partial<Record<FinalFilmKind, FinalFilmQaResult>> = {};
   for (const film of ["long", "short"] as const) {
-    const { factual, visual } = record[film];
+    const { factual, visual } = record[film] ?? {};
     if (factual && visual) out[film] = combineFinalFilmQa(factual, visual);
   }
   return out;

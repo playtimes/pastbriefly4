@@ -83,7 +83,8 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
   const { story, videos, activeJob, failedJob } = detail;
   const busy = activeJob && activeJob.state !== "done" && activeJob.state !== "failed";
   const needsYou = !!activeJob && ["text", "visuals", "final"].includes(productionFace(activeJob));
-  const hasFilms = videos.length >= 2;
+  // A finished production: a pair, or a Long-first job's Long once it reached LONG COMPLETE.
+  const hasFilms = videos.length >= 2 || videos.some((v) => detail.longCompleteJobIds?.includes(v.jobId));
   const paragraphs = story.summary.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
 
   return (
@@ -182,7 +183,7 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
                   className="mt-4 flex h-[54px] w-full items-center justify-center gap-[9px] rounded-full bg-accent text-[15px] font-semibold text-white shadow-[0_8px_24px_rgba(229,9,20,0.3)] transition hover:bg-accent-hover hover:shadow-[0_10px_30px_rgba(229,9,20,0.42)]"
                 >
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z" /></svg>
-                  Watch films
+                  {videos.length >= 2 ? "Watch films" : "Watch film"}
                 </button>
                 <button onClick={() => setShowCost(true)} className="mt-[14px] block mx-auto text-[13px] text-dim transition hover:text-accent">
                   Generate again
@@ -194,9 +195,9 @@ export function Story({ slug }: { slug: string }): React.ReactElement {
                   onClick={() => setShowCost(true)}
                   className="mt-4 h-[54px] w-full rounded-full bg-accent text-[15px] font-semibold text-white shadow-[0_8px_24px_rgba(229,9,20,0.3)] transition hover:bg-accent-hover hover:shadow-[0_10px_30px_rgba(229,9,20,0.42)]"
                 >
-                  Generate films
+                  Generate film
                 </button>
-                <p className="mt-[14px] text-[12.5px] leading-[1.5] text-dim">A long documentary and a Short. PB4 asks only if it needs you.</p>
+                <p className="mt-[14px] text-[12.5px] leading-[1.5] text-dim">A long documentary. PB4 asks only if it needs you.</p>
               </>
             )}
           </div>

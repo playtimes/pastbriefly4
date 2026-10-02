@@ -67,7 +67,8 @@ export function ReviewView(props: VisualReviewProps & { films: Record<Film, Film
           <span aria-hidden="true">←</span> {back}
         </button>
         <div className="inline-flex p-1 rounded-full bg-[#15100e] border border-[rgba(245,235,222,0.09)]">
-          {(["long", "short"] as const).map((k) => (
+          {/* A Long-first job's preview has no Short: no empty Short tab. */}
+          {(["long", "short"] as const).filter((k) => k === "long" || films.short.frames.length > 0).map((k) => (
             <button
               key={k}
               data-film-tab={k}

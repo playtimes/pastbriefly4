@@ -397,7 +397,8 @@ therefore evaluate BOTH quality and economics.
 ### Next
 
 16A. **Long-first production reset** - DESIGN COMPLETE; Slice 1 COMPLETE;
-    Slice 2 NEXT. See `docs/STAGE-16A-LONG-FIRST-DESIGN.md`.
+    Slice 2 COMPLETE. NEXT: Film #6, the first real production proof of the
+    Long-first system (not started). See `docs/STAGE-16A-LONG-FIRST-DESIGN.md`.
     - The Long-first contract stands: ONE job, serial Long → durable LONG
       COMPLETE → Short derivation.
     - Before LONG COMPLETE the Short does not exist.
@@ -409,20 +410,27 @@ therefore evaluate BOTH quality and economics.
        Director review; `f5548f3`). Acquired, screened archive and its
        provenance survive, story-scoped, even when the edit does not select
        it. Small and boring: no asset platform.
-    2. **Slice 2 - one honest Long-first vertical path: NEXT** (not started)
-       for new jobs: Long
+    2. **Slice 2 - one honest Long-first vertical path: COMPLETE**
+       (implementation finished, final review passed). Every new production
+       job is Long-first; jobs without the flow marker (Project Azorian
+       included) stay pair-first. For new jobs: Long
        script → Long Text QA → Long narration → Long visuals → Long render →
        Long Final-film QC → durable LONG COMPLETE → independent Long
-       registration, with zero Short work or spend before LONG COMPLETE.
-    3. Then 16C, only after Slice 2 has produced a successful finished Long.
+       registration, with zero Short work or spend before LONG COMPLETE:
+       before LONG COMPLETE, the Short does not exist.
+    3. **Film #6: NEXT** - the first real production proof of the Long-first
+       system. Film #6 has NOT started. The engineering is complete; no real
+       Long has been produced through it yet.
+    4. Then 16C, which stays BLOCKED until the Long-first system has produced
+       and passed a real finished Long through Film #6.
 
     Rejected: a finish-only "Long-first" flow that stays pair-first upstream
     and only registers the Long earlier. It breaks the contract and leaves
     transitional semantics to remove later.
 
-16C. **Long → Short derivation** - after the first working Long-first
-    production path has produced a finished Long. Only once the Long-first
-    approach works:
+16C. **Long → Short derivation** - BLOCKED until the Long-first system has
+    produced and passed a real finished Long through Film #6. Only once the
+    Long-first approach works:
 
     ```
     finished Long

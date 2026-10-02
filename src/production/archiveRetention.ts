@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { retainedArchiveDir } from "./paths.ts";
 import type { ArchiveResult } from "./wikimedia.ts";
@@ -14,7 +14,9 @@ import type { ArchiveResult } from "./wikimedia.ts";
 // screening (image MIME, licence policy, query anchors / story relevance,
 // duplicate check, a successful download). It is NOT production-approved, NOT
 // judged factually right for any shot, and NOT passed by Pixel Asset QA for any
-// future use. Nothing reads this folder into a film.
+// future use. Nothing reads this folder into a film: a Long-first job's Coverage
+// call is only told the candidates exist (retainedArchiveInventory), and any
+// archive it then plans is searched and screened again by the normal path.
 //
 // Retention is durability support, never a production gate: both functions log
 // a warning and return on any failure.
@@ -108,6 +110,47 @@ export function retainArchiveCandidate(slug: string, got: ArchiveResult, acquisi
   } catch (e: any) {
     console.warn(`[archive] retention failed for ${got.title || got.localPath} (production continues): ${e?.message || e}`);
   }
+}
+
+// What a Long-first Coverage call is told about one retained candidate (Stage
+// 16A Slice 2): only prompt metadata, never a path, hash or the bytes. It is a
+// SCREENED candidate, not approved and not known to suit any slot.
+export interface RetainedArchiveCandidate {
+  title: string;
+  license: string;
+  credit: string;
+  queries: string[]; // the archive searches that found it
+  rejections: string[]; // why a slot rejected it before (that slot only)
+}
+
+// This story's screened archive candidates, most recently acquired first, at
+// most `max`. A malformed or unreadable sidecar is skipped; no folder (a story
+// with no retained archive yet) is simply none. Read only: nothing is copied,
+// and nothing here ever puts a file in a film.
+export function retainedArchiveInventory(slug: string, max = 20): RetainedArchiveCandidate[] {
+  let names: string[] = [];
+  try {
+    names = readdirSync(retainedArchiveDir(slug)).filter((n) => /^[0-9a-f]{64}\.json$/.test(n));
+  } catch {
+    return [];
+  }
+  const found: { at: string; c: RetainedArchiveCandidate }[] = [];
+  for (const name of names) {
+    try {
+      const r = readRecord(path.join(retainedArchiveDir(slug), name));
+      if (r?.status !== "screened archive candidate" || typeof r.title !== "string" || !r.title || !Array.isArray(r.acquisitions) || !Array.isArray(r.reviews)) continue;
+      const at = r.acquisitions.map((a) => String(a.at ?? "")).sort().at(-1) ?? "";
+      const queries = [...new Set(r.acquisitions.map((a) => a.query).filter((q): q is string => typeof q === "string" && !!q))];
+      const rejections = r.reviews.filter((v) => v.decision === "rejected" && typeof v.reason === "string").map((v) => v.reason);
+      found.push({ at, c: { title: r.title, license: String(r.license ?? ""), credit: String(r.credit ?? ""), queries, rejections } });
+    } catch {
+      // malformed: skipped
+    }
+  }
+  return found
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, max)
+    .map((f) => f.c);
 }
 
 // Note a review outcome on an already-retained candidate, by its SHA-256. The

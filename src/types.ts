@@ -93,9 +93,14 @@ export interface Job {
   directorQa?: DirectorQaRuns; // Run Director QA per film at the visual preview: its phase, then the latest result (persisted)
   visualAutopilot?: VisualAutopilotState; // the Visual Autopilot chain around the visual gate (server memory, never persisted)
   finalQa?: FinalQaState; // the finished-film concerns, only while awaiting_final
+  // "long-first" for a Long-first job (Stage 16A): it makes and finishes only the
+  // Long. Absent for a pair-first job (every job created before Long-first).
+  flow?: JobFlow;
   createdAt: string;
   updatedAt: string;
 }
+
+export type JobFlow = "long-first";
 
 // ---- Final-film QC (the finished-film gate) ----
 // Only the concrete publishing concern reaches the browser: which film, fact or
@@ -118,6 +123,8 @@ export interface FinalQaState {
 // Story Review with the reason.
 export type TextQaSection = "story" | "hook" | "spine" | "facts" | "long" | "short";
 export const TEXT_QA_SECTIONS: TextQaSection[] = ["story", "hook", "spine", "facts", "long", "short"];
+// A Long-first draft has no Short, so its Text QA can never name one.
+export const LONG_TEXT_QA_SECTIONS: TextQaSection[] = ["story", "hook", "spine", "facts", "long"];
 export interface TextQaIssue {
   section: TextQaSection;
   reason: string;
@@ -188,7 +195,7 @@ export interface StoryReview {
   moments: StoryMoment[];
   sources: Source[];
   longScript: string;
-  shortScript: string;
+  shortScript?: string; // absent for a Long-first job: it has no Short
 }
 
 // Director feedback for a text-gate revision: checked the same way by the review

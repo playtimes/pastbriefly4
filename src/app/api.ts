@@ -3,6 +3,9 @@ import type { Story, Job, Video, CostEstimate, Category, NichesResponse, Sequenc
 export interface StoryDetail {
   story: Story;
   videos: Video[];
+  // Jobs that reached LONG COMPLETE (Long-first): their lone Long is a complete
+  // production. Any other job is complete only with its Long + Short pair.
+  longCompleteJobIds?: string[];
   estimate: CostEstimate;
   activeJob: Job | null;
   failedJob: Job | null;

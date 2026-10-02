@@ -1,6 +1,6 @@
 import { config } from "../server/config.ts";
 import { respondJson } from "../providers/openai.ts";
-import { TEXT_QA_SECTIONS, directorFeedbackError, type Fact, type Story, type StoryMoment, type TextQaIssue, type TextQaReview, type TextQaSection, type TextQaVerify } from "../types.ts";
+import { TEXT_QA_SECTIONS, LONG_TEXT_QA_SECTIONS, directorFeedbackError, type Fact, type Story, type StoryMoment, type TextQaIssue, type TextQaReview, type TextQaSection, type TextQaVerify } from "../types.ts";
 import type { ResearchPackage } from "./pipelineTypes.ts";
 import { paulBunyanScripts } from "./fixtures/paulBunyan.ts";
 import { plainDashes } from "./text.ts";
@@ -10,12 +10,19 @@ export interface Scripts {
   short: string;
 }
 
+// A Long-first job's draft (Stage 16A): the Long is the only film before LONG
+// COMPLETE, so there is no Short field at all.
+export interface LongDraft {
+  long: string;
+}
+
 // One format's narration. Long and Short are separate paid writes so a resume
 // never repeats a format that already succeeded. Every script leaves here with
-// plain hyphens, so storage, narration and subtitles all see the same text.
+// plain hyphens, so storage, narration and subtitles all see the same text. The
+// mock builds only the requested format.
 export async function writeScript(story: Story, research: ResearchPackage, kind: "long" | "short"): Promise<string> {
   if (story.slug === "paul-bunyan") return plainDashes(paulBunyanScripts[kind]);
-  if (config.mode !== "live") return plainDashes(mockScripts(story, research)[kind]);
+  if (config.mode !== "live") return plainDashes(kind === "long" ? mockLong(story, research) : mockShort(story, research));
 
   const instructions = kind === "long" ? LONG_INSTRUCTIONS : SHORT_INSTRUCTIONS;
   const r = await respondJson<{ script: string }>({ instructions, input: input(story, research), schemaName: "script", schema: SCRIPT_SCHEMA });
@@ -46,6 +53,20 @@ export async function auditScripts(story: Story, research: ResearchPackage, draf
   return { long: plainDashes(r.long.trim()), short: plainDashes(r.short.trim()) };
 }
 
+// A Long-first job's fidelity audit: the same evidence, chronology, attribution
+// and plain-English rules as auditScripts, over the Long alone. No Short is sent
+// or returned, and there is no cross-film consistency check. Callers gate it on
+// live mode themselves, as for the pair audit.
+export async function auditLongScript(story: Story, research: ResearchPackage, long: string): Promise<string> {
+  const r = await respondJson<LongDraft>({
+    instructions: LONG_SCRIPT_AUDIT_INSTRUCTIONS,
+    input: auditInput(story, research, { long }),
+    schemaName: "long_script_audit",
+    schema: LONG_AUDIT_SCHEMA,
+  });
+  return plainDashes(r.long.trim());
+}
+
 // The text a Director revision may change: exactly the editable parts of the
 // Story Review. Sources are never in here - the existing pack is the boundary.
 export interface RevisedText {
@@ -56,6 +77,9 @@ export interface RevisedText {
   long: string;
   short: string;
 }
+
+// A Long-first job's revision: the same editable parts, with no Short.
+export type RevisedLongText = Omit<RevisedText, "short">;
 
 // Every source the current draft may cite, numbered for the revision: the
 // research sources plus any fact source not already among them. A revised fact
@@ -87,14 +111,7 @@ export async function reviseStoryText(story: Story, research: ResearchPackage, d
     schemaName: "story_revision",
     schema: REVISION_SCHEMA,
   });
-  const facts = r.facts.map((f) => {
-    const s = sources[f.source - 1];
-    if (!s) {
-      const valid = sources.length ? `valid source numbers are 1-${sources.length}` : "the source pack is empty";
-      throw new Error(`Revision referenced source ${f.source}, but ${valid}. The current story is unchanged.`);
-    }
-    return { fact: plainDashes(f.fact.trim()), sourceTitle: s.title, sourceUrl: s.url };
-  });
+  const facts = revisedFacts(r.facts, sources);
   const text = (s: string) => plainDashes(s.trim());
   if (!text(r.title) || !text(r.long) || !text(r.short)) throw new Error("The revision came back without a title or script. The current story is unchanged.");
   return {
@@ -105,6 +122,39 @@ export async function reviseStoryText(story: Story, research: ResearchPackage, d
     long: text(r.long),
     short: text(r.short),
   };
+}
+
+// A Long-first job's revision at the text gate: the same bounded repair as
+// reviseStoryText over the Long alone. The Long-only prompt and schema have no
+// Short, so none can come back. Mock and the fixture return the draft unchanged.
+export async function reviseLongText(story: Story, research: ResearchPackage, draft: LongDraft, feedback: string): Promise<RevisedLongText> {
+  const current: RevisedLongText = { title: story.title, hook: story.hook, moments: research.moments, facts: research.facts ?? [], long: draft.long };
+  if (story.slug === "paul-bunyan" || config.mode !== "live") return current;
+
+  const sources = revisionSources(research);
+  const r = await respondJson<Omit<RevisedLongText, "facts"> & { facts: { fact: string; source: number }[] }>({
+    instructions: LONG_REVISION_INSTRUCTIONS,
+    input: revisionInput(story, research, draft, sources, feedback),
+    schemaName: "long_story_revision",
+    schema: LONG_REVISION_SCHEMA,
+  });
+  const facts = revisedFacts(r.facts, sources);
+  const text = (s: string) => plainDashes(s.trim());
+  if (!text(r.title) || !text(r.long)) throw new Error("The revision came back without a title or script. The current story is unchanged.");
+  return { title: text(r.title), hook: text(r.hook), moments: r.moments.map((m) => ({ title: text(m.title), detail: text(m.detail) })), facts, long: text(r.long) };
+}
+
+// A revision's facts, each citing a source of the pack by number. Throws (the
+// story unchanged) on a number outside the pack.
+function revisedFacts(facts: { fact: string; source: number }[], sources: { title: string; url: string }[]): Fact[] {
+  return facts.map((f) => {
+    const s = sources[f.source - 1];
+    if (!s) {
+      const valid = sources.length ? `valid source numbers are 1-${sources.length}` : "the source pack is empty";
+      throw new Error(`Revision referenced source ${f.source}, but ${valid}. The current story is unchanged.`);
+    }
+    return { fact: plainDashes(f.fact.trim()), sourceTitle: s.title, sourceUrl: s.url };
+  });
 }
 
 // Automatic Director Text QA calls a provider only where the revision and the
@@ -130,12 +180,28 @@ export async function verifyStoryDraft(story: Story, research: ResearchPackage, 
   return readTextVerify(raw);
 }
 
-function readIssues(raw: unknown, reject: (reason: string) => never): TextQaIssue[] {
+// A Long-first job's Director text review: the same review over the Long alone.
+// Its input has no Short, its prompt no Short checks, and an issue can only name
+// a Long-first section (never "short"). Mock and the fixture pass.
+export async function reviewLongDraft(story: Story, research: ResearchPackage, draft: LongDraft): Promise<TextQaReview> {
+  if (!textQaCallsProvider(story)) return { decision: "PASS", summary: "No Director text review model was called (mock mode or fixture).", repairFeedback: null, humanReview: [] };
+  const raw = await respondJson<unknown>({ instructions: LONG_TEXT_QA_INSTRUCTIONS, input: textQaInput(story, research, draft), schemaName: "long_text_qa", schema: LONG_TEXT_QA_SCHEMA });
+  return readTextQa(raw, LONG_TEXT_QA_SECTIONS);
+}
+
+// A Long-first job's final verification after its one automatic repair.
+export async function verifyLongDraft(story: Story, research: ResearchPackage, draft: LongDraft, repair: string): Promise<TextQaVerify> {
+  if (!textQaCallsProvider(story)) return { decision: "PASS", summary: "No Director text verification model was called (mock mode or fixture).", humanReview: [] };
+  const raw = await respondJson<unknown>({ instructions: LONG_TEXT_VERIFY_INSTRUCTIONS, input: textQaInput(story, research, draft, repair), schemaName: "long_text_verify", schema: LONG_TEXT_VERIFY_SCHEMA });
+  return readTextVerify(raw, LONG_TEXT_QA_SECTIONS);
+}
+
+function readIssues(raw: unknown, reject: (reason: string) => never, sections: TextQaSection[]): TextQaIssue[] {
   if (!Array.isArray(raw)) return reject("humanReview is not a list");
   return raw.map((x) => {
     const i = (x && typeof x === "object" ? x : {}) as { section?: unknown; reason?: unknown };
     const reason = typeof i.reason === "string" ? plainDashes(i.reason.trim()) : "";
-    if (!TEXT_QA_SECTIONS.includes(i.section as TextQaSection)) return reject(`issue section ${JSON.stringify(i.section)} is unknown`);
+    if (!sections.includes(i.section as TextQaSection)) return reject(`issue section ${JSON.stringify(i.section)} is unknown`);
     if (!reason) return reject("an issue has no reason");
     return { section: i.section as TextQaSection, reason };
   });
@@ -144,7 +210,7 @@ function readIssues(raw: unknown, reject: (reason: string) => never): TextQaIssu
 // Read one review answer; a malformed answer is rejected whole. Any human-review
 // issue makes the decision HUMAN_REVIEW (the conservative choice): a REPAIR or a
 // PASS that also lists issues never repairs or advances automatically.
-export function readTextQa(raw: unknown): TextQaReview {
+export function readTextQa(raw: unknown, sections: TextQaSection[] = TEXT_QA_SECTIONS): TextQaReview {
   const reject = (reason: string): never => {
     throw new Error(`Invalid Director text review: ${reason}.`);
   };
@@ -152,7 +218,7 @@ export function readTextQa(raw: unknown): TextQaReview {
   if (a.decision !== "PASS" && a.decision !== "REPAIR" && a.decision !== "HUMAN_REVIEW") return reject(`decision ${JSON.stringify(a.decision)} is unknown`);
   if (typeof a.summary !== "string") return reject("summary is missing");
   const summary = plainDashes(a.summary.trim());
-  const humanReview = readIssues(a.humanReview, reject);
+  const humanReview = readIssues(a.humanReview, reject, sections);
   if (humanReview.length || a.decision === "HUMAN_REVIEW") return { decision: "HUMAN_REVIEW", summary, repairFeedback: null, humanReview };
   if (a.decision === "PASS") return { decision: "PASS", summary, repairFeedback: null, humanReview: [] };
   const feedback = typeof a.repairFeedback === "string" ? plainDashes(a.repairFeedback.trim()) : "";
@@ -163,39 +229,42 @@ export function readTextQa(raw: unknown): TextQaReview {
 
 // Read one final verification answer; a malformed answer is rejected whole, and
 // a PASS that lists issues is HUMAN_REVIEW.
-export function readTextVerify(raw: unknown): TextQaVerify {
+export function readTextVerify(raw: unknown, sections: TextQaSection[] = TEXT_QA_SECTIONS): TextQaVerify {
   const reject = (reason: string): never => {
     throw new Error(`Invalid Director text verification: ${reason}.`);
   };
   const a = (raw && typeof raw === "object" ? raw : {}) as { decision?: unknown; summary?: unknown; humanReview?: unknown };
   if (a.decision !== "PASS" && a.decision !== "HUMAN_REVIEW") return reject(`decision ${JSON.stringify(a.decision)} is unknown`);
   if (typeof a.summary !== "string") return reject("summary is missing");
-  const humanReview = readIssues(a.humanReview, reject);
+  const humanReview = readIssues(a.humanReview, reject, sections);
   return { decision: humanReview.length ? "HUMAN_REVIEW" : a.decision, summary: plainDashes(a.summary.trim()), humanReview };
 }
 
 // The Director's view of the saved Story Review, built fresh on every call: the
 // story, the spine, every fact with its numbered source, what each source
-// supports, and both complete scripts. The verification also gets the repair
-// that was applied, so it can check the issue is gone.
-export function textQaInput(story: Story, r: ResearchPackage, drafts: Scripts, repair?: string): string {
+// supports, and both complete scripts (a Long-first draft: the Long alone, with
+// no Short section at all). The verification also gets the repair that was
+// applied, so it can check the issue is gone.
+export function textQaInput(story: Story, r: ResearchPackage, drafts: Scripts | LongDraft, repair?: string): string {
   const sources = revisionSources(r);
   const note = (s: { title: string; url: string }) => r.sources.find((x) => x.title === s.title && x.url === s.url)?.note?.trim();
   const pack = sources.map((s, i) => [`${i + 1}. ${s.title}${s.url ? ` <${s.url}>` : ""}`, note(s) && `   Supports: ${note(s)}`].filter(Boolean).join("\n")).join("\n");
   const idx = (f: Fact) => sources.findIndex((s) => s.title === f.sourceTitle && s.url === f.sourceUrl) + 1;
   const facts = (r.facts ?? []).map((f, i) => `${i + 1}. ${f.fact} [source ${idx(f)}: ${f.sourceTitle}]`).join("\n") || "(none)";
   const spine = r.moments.map((m, i) => `${i + 1}. ${m.title} - ${m.detail}`).join("\n") || "(none)";
-  const out = `STORY\nTITLE: ${story.title}\nPREMISE / HOOK: ${story.hook}\nYEAR: ${story.year}\nPLACE: ${story.place}\nSUMMARY:\n${r.summary}\n\nSTORY SPINE:\n${spine}\n\nSOURCE PACK (the evidence boundary):\n${pack || "(none)"}\n\nFACTS & SOURCES:\n${facts}\n\nLONG SCRIPT:\n${drafts.long}\n\nSHORT SCRIPT:\n${drafts.short}`;
+  const short = "short" in drafts ? `\n\nSHORT SCRIPT:\n${drafts.short}` : "";
+  const out = `STORY\nTITLE: ${story.title}\nPREMISE / HOOK: ${story.hook}\nYEAR: ${story.year}\nPLACE: ${story.place}\nSUMMARY:\n${r.summary}\n\nSTORY SPINE:\n${spine}\n\nSOURCE PACK (the evidence boundary):\n${pack || "(none)"}\n\nFACTS & SOURCES:\n${facts}\n\nLONG SCRIPT:\n${drafts.long}${short}`;
   return repair === undefined ? out : `${out}\n\nREPAIR THAT WAS APPLIED:\n${repair}`;
 }
 
-function revisionInput(story: Story, r: ResearchPackage, drafts: Scripts, sources: { title: string; url: string }[], feedback: string): string {
+function revisionInput(story: Story, r: ResearchPackage, drafts: Scripts | LongDraft, sources: { title: string; url: string }[], feedback: string): string {
   const moments = r.moments.map((m, i) => `${i + 1}. ${m.title} - ${m.detail}`).join("\n");
   const pack = sources.map((s, i) => `${i + 1}. ${s.title}${s.url ? ` <${s.url}>` : ""}`).join("\n");
   const idx = (f: Fact) => sources.findIndex((s) => s.title === f.sourceTitle && s.url === f.sourceUrl) + 1;
   const facts = (r.facts ?? []).map((f, i) => `${i + 1}. ${f.fact} [source ${idx(f)}]`).join("\n") || "(none)";
   const notes = r.sources.map((s) => `- ${s.title}: ${s.note}`).join("\n");
-  return `CURRENT TITLE: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nCURRENT HOOK / PREMISE: ${story.hook}\n\nSUMMARY:\n${r.summary}\n\nSOURCE PACK (the evidence boundary - cite by number):\n${pack || "(none)"}\n\nWHAT EACH SOURCE SUPPORTS:\n${notes || "(none)"}\n\nCURRENT FACTS & SOURCES:\n${facts}\n\nCURRENT STORY SPINE:\n${moments}\n\nCURRENT LONG SCRIPT:\n${drafts.long}\n\nCURRENT SHORT SCRIPT:\n${drafts.short}\n\nDIRECTOR FEEDBACK:\n${feedback}`;
+  const short = "short" in drafts ? `\n\nCURRENT SHORT SCRIPT:\n${drafts.short}` : "";
+  return `CURRENT TITLE: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nCURRENT HOOK / PREMISE: ${story.hook}\n\nSUMMARY:\n${r.summary}\n\nSOURCE PACK (the evidence boundary - cite by number):\n${pack || "(none)"}\n\nWHAT EACH SOURCE SUPPORTS:\n${notes || "(none)"}\n\nCURRENT FACTS & SOURCES:\n${facts}\n\nCURRENT STORY SPINE:\n${moments}\n\nCURRENT LONG SCRIPT:\n${drafts.long}${short}\n\nDIRECTOR FEEDBACK:\n${feedback}`;
 }
 
 // The fact sheet is the factual spine handed to every write and to the audit:
@@ -212,25 +281,28 @@ function input(story: Story, r: ResearchPackage): string {
   return `TITLE: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nHOOK: ${story.hook}\n\nSUMMARY:\n${r.summary}\n\n${factSheet(r)}\n\nMOMENTS:\n${moments}\n\nEVIDENCE:\n${sources}`;
 }
 
-function auditInput(story: Story, r: ResearchPackage, drafts: Scripts): string {
+function auditInput(story: Story, r: ResearchPackage, drafts: Scripts | LongDraft): string {
   const moments = r.moments.map((m, i) => `${i + 1}. ${m.title} - ${m.detail}`).join("\n");
   const sources = r.sources.map((s) => `- ${s.title}: ${s.note}`).join("\n");
-  return `TITLE: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nHOOK: ${story.hook}\n\nFINAL VERIFIED RESEARCH\n\nSUMMARY:\n${r.summary}\n\n${factSheet(r)}\n\nMOMENTS:\n${moments}\n\nEVIDENCE:\n${sources}\n\nDRAFT LONG SCRIPT:\n${drafts.long}\n\nDRAFT SHORT SCRIPT:\n${drafts.short}`;
+  const short = "short" in drafts ? `\n\nDRAFT SHORT SCRIPT:\n${drafts.short}` : "";
+  return `TITLE: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nHOOK: ${story.hook}\n\nFINAL VERIFIED RESEARCH\n\nSUMMARY:\n${r.summary}\n\n${factSheet(r)}\n\nMOMENTS:\n${moments}\n\nEVIDENCE:\n${sources}\n\nDRAFT LONG SCRIPT:\n${drafts.long}${short}`;
 }
 
-// Deterministic offline script from the research, for mock runs of any story.
-function mockScripts(story: Story, r: ResearchPackage): Scripts {
-  const long = [
+// Deterministic offline scripts from the research, for mock runs of any story,
+// one format at a time.
+function mockLong(story: Story, r: ResearchPackage): string {
+  return [
     story.hook,
     r.summary,
     ...r.moments.map((m) => m.detail),
     `It really happened, in ${story.year}, in ${story.place}.`,
   ].join("\n\n");
+}
 
+function mockShort(story: Story, r: ResearchPackage): string {
   const first = r.moments[0]?.detail ?? r.summary;
   const last = r.moments.at(-1)?.detail ?? "";
-  const short = `${story.hook} ${first} ${last} It really happened, in ${story.year}, in ${story.place}.`;
-  return { long, short };
+  return `${story.hook} ${first} ${last} It really happened, in ${story.year}, in ${story.place}.`;
 }
 
 // General fidelity rules shared by the Long and Short writers and the final audit.
@@ -464,3 +536,154 @@ const TEXT_VERIFY_SCHEMA = {
 
 const SCRIPT_SCHEMA = { type: "object", additionalProperties: false, required: ["script"], properties: { script: { type: "string" } } };
 const SCRIPTS_AUDIT_SCHEMA = { type: "object", additionalProperties: false, required: ["long", "short"], properties: { long: { type: "string" }, short: { type: "string" } } };
+
+// ---------------------------------------------------------------------------
+// Long-first (Stage 16A): the Long-only audit, revision and Text QA. Each keeps
+// the pair version's rules for the Long, with no Short in its input, prompt or
+// schema. The pair prompts above are unchanged.
+// ---------------------------------------------------------------------------
+
+export const LONG_SCRIPT_AUDIT_INSTRUCTIONS = `You are the FINAL SCRIPT FIDELITY AUDIT for PastBriefly. You are given a story's title, hook, year and place, the FINAL verified research package, and one finished draft script: the Long documentary narration. Return the corrected Long script in the SAME shape: { "long": string }.
+
+This is NOT another creative rewrite, and it is NOT an editor's pass. You are a fact checker, not an editor. Its ONLY job is to CORRECT OR REMOVE UNSUPPORTED FACTS. Keep the plain-English storytelling, the causal flow, the title clarity and the Long format. Do not turn the script back into academic prose, and do not restyle sentences that are already accurate.
+
+THE RULE: every factual statement in the script must be explicitly supported by the FINAL verified research package. The package includes a FACT SHEET - its factual spine - and any date, actor, sequence, attribution or certainty stated there is fixed. If a detail is not in the final research, it does not belong in the script. Conversely, if a sentence IS factually supported, leave it alone - make a tiny wording change only where one is needed for factual fidelity, and otherwise do not touch it.
+
+Correct or remove: invented actions, invented sensory details, invented emotions, invented motives, invented military behavior, invented dialogue, invented physical condition, inferred actors, altered dates, altered sequence, and any certainty stronger than the research supports.
+
+ACTORS, DATES, SEQUENCE: never change who performed an action, when it happened, or the order of events away from the research. If the research says "Swedish tugs refloated the submarine", the script may NOT say "Soviet tugs refloated the submarine". Keep separate events separate - do not merge different dates or actions.
+
+${INTEGRITY_RULES}
+
+SILENT CHECKLIST: before returning, silently check the script for each of these and correct what fails, while preserving the story voice:
+- every factual statement is supported by the final research
+- terminology attribution: no label, name or classification is credited to an actor who is not shown to have used it
+- dates and chronology: explicitly compare every date and the order of every dated event against the fact sheet
+- sequence words: every "then", "later", "after", "a few days later" and similar agrees with the fact sheet's dates, and any deliberate time jump is made explicit
+- actor/action matching: each action is credited to the actor the research names
+- legal/control-status wording is no stronger than the research supports
+- technical/scientific precision: the object measured, the location and the certainty are unchanged
+- uncertainty and attribution: suspicions and assessments stay attributed
+- no unsupported causal statement
+- no contradiction between the opening and the ending
+
+NO INVENTED COLOR: if the research does not mention it, the script may not add it. If the research does not mention radio silence, the script may not say "the vessel tried to signal radio silence". Do not add "harmless color" just because it sounds cinematic - if a detail is not in the final research package, remove it.
+
+PRESERVE SUPPORTED DETAIL AND STRUCTURE (critical): removing unsupported material will naturally shorten a script, but trimming SUPPORTED material to make the script shorter or tighter is NOT your job. You must preserve all supported factual detail, all causal explanation, all useful context, all supported transitions, and the draft's overall structure and approximate length. Do NOT summarize or condense the script, do NOT rewrite it shorter merely for elegance, do NOT remove supported detail just because it is non-essential, and do NOT turn the Long into a condensed overview. The Long must stay a full ~900-1100 word film.
+
+Preserve everything that is already supported: plain-English storytelling, causal flow, title clarity, and the Long format (a ~900-1100 word film). Only change what fidelity requires.
+
+Return only the corrected script as strict JSON { "long": string }.`;
+
+const LONG_AUDIT_SCHEMA = { type: "object", additionalProperties: false, required: ["long"], properties: { long: { type: "string" } } };
+
+export const LONG_REVISION_INSTRUCTIONS = `You are revising an existing PastBriefly story at its human text gate. PastBriefly makes "true historical stories that sound made up".
+
+You are given the CURRENT draft - title, hook / premise, story spine, facts with their numbered sources, and the Long script - plus the DIRECTOR FEEDBACK. Revise the CURRENT draft. Do not discover another story and do not start again from a blank page.
+
+- Apply the Director feedback precisely.
+- Preserve good material that the Director did not ask to change. Leave untouched sections exactly as they are.
+- Preserve the story identity and central premise unless the feedback explicitly asks otherwise.
+- The SOURCE PACK is the evidence boundary. Every fact you return cites one source by its number in the pack. Do not cite anything outside it.
+- Do not invent unsupported facts. Do not silently replace a sourced claim with a new unsourced claim.
+- If the feedback says a claim is unsupported, ambiguous or should go, prefer removing it, softening it or rewriting around the supported evidence rather than inventing a replacement.
+- Keep the Long script consistent with the returned facts and story spine.
+- Keep the format: the Long is spoken narration for a roughly 7-9 minute film (about 900-1100 words when the evidence supports it, never padded to reach it). The script is spoken narration only - no headings, stage directions or citations.
+- Plain hyphens only - never em or en dashes.
+- Do not plan media, write visual prompts or advance production. The result goes back to the human text gate for another review.
+
+${INTEGRITY_RULES}
+
+Return strict JSON with the same Story Review shape: { "title", "hook", "moments": [{ "title", "detail" }], "facts": [{ "fact", "source" }], "long" }, where "source" is the 1-based number of a source in the SOURCE PACK.`;
+
+const LONG_REVISION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "hook", "moments", "facts", "long"],
+  properties: {
+    title: { type: "string" },
+    hook: { type: "string" },
+    moments: REVISION_SCHEMA.properties.moments,
+    facts: REVISION_SCHEMA.properties.facts,
+    long: { type: "string" },
+  },
+};
+
+export const LONG_TEXT_QA_INSTRUCTIONS = `You are the Director of PastBriefly, reviewing a finished story draft at its text gate before any media is made. PastBriefly makes "true historical stories that sound made up". The story is the product, and the Long is the main product.
+
+You are given the CURRENT saved draft: the story (title, premise / hook, year, place, summary), the story spine, the facts with their numbered sources, what each source supports, and the complete Long script. ${TEXT_QA_EVIDENCE}
+
+Review it on these points.
+
+A. PREMISE
+- Is the strange historical premise immediately understandable?
+- Is the hook accurate, rather than a cleaner but false version of events?
+- Does it make the viewer want the next sentence?
+
+B. STORY STRUCTURE
+- Does the Long tell a causal story that moves through action, consequence, escalation and payoff?
+- Or is it merely listing facts?
+- Is important information repeated unnecessarily?
+- Is anything padded merely to reach a runtime?
+
+C. FACTUAL LANGUAGE
+- Does the script stay inside the supplied evidence?
+- Does it overstate what a source proves?
+- Does it collapse different dates or events into one?
+- Does it turn an advisory result into something legally stronger?
+- Does it imply causation, motive or opinion the evidence does not support?
+- Does it rely on weak claims that should be removed or softened?
+
+D. SPECIFICITY AND WRITING QUALITY
+- Is generic documentary fog used where the source pack supports a concrete detail?
+- Is grandiose filler (such as "a historic milestone") used where the event itself is stronger?
+- Never ask for a longer script merely to sound more substantial.
+
+E. LONG VIABILITY
+- Is there enough genuine story for the Long without artificial padding? A naturally shorter Long is acceptable.
+
+DECISION - exactly one of:
+
+PASS - the draft is safe to advance to production. Minor taste preferences are not a reason to repair.
+
+REPAIR - every problem is specific and can be corrected with the EXISTING source pack by one bounded revision of this draft. Write the complete, exact correction in "repairFeedback": what to change, where (hook, spine, facts, Long) and why, as instructions a writer can apply without seeing your reasoning. Ask for unsupported or overstated claims to be removed or softened, never replaced by new unsourced claims. Preserve everything that is already good. Only one automatic revision will happen, so include every needed correction.
+
+HUMAN_REVIEW - the evidence is genuinely insufficient; fixing the problem needs new research outside the source pack; the story identity or premise would need a substantial editorial decision; you are uncertain about an important factual or editorial decision; or one bounded revision cannot safely decide it. List each issue in "humanReview" with the section it concerns.
+
+Never combine REPAIR and HUMAN_REVIEW: if any issue needs a human, the decision is HUMAN_REVIEW. If the source pack cannot support a claim or story beat the story depends on, that is HUMAN_REVIEW, not a repair.
+
+Plain hyphens only - never em or en dashes.
+
+Return strict JSON { "decision", "summary", "repairFeedback", "humanReview": [{ "section", "reason" }] }. "summary" is one or two plain sentences. "repairFeedback" is a string for REPAIR and null otherwise. "humanReview" is empty unless the decision is HUMAN_REVIEW. A section is one of: story, hook, spine, facts, long.`;
+
+export const LONG_TEXT_VERIFY_INSTRUCTIONS = `You are the Director of PastBriefly, making the FINAL read-only verification of a story draft at its text gate, after one automatic text repair. You may NOT repair, rewrite or ask for another revision: there will be no second revision. You only decide whether this CURRENT saved draft is safe to advance to production.
+
+You are given the CURRENT saved draft (the story, the spine, the facts with their numbered sources, what each source supports, and the complete Long script) and the REPAIR THAT WAS APPLIED, which is the Director's correction from the earlier review. ${TEXT_QA_EVIDENCE}
+
+Verify that:
+- the issue the repair addressed is actually gone;
+- the hook / premise is still accurate;
+- the Long is still a causal, coherent story;
+- no new unsupported factual claim was introduced;
+- the Long is consistent with the facts;
+- no obvious repetition or padding was introduced;
+- the cited sources still support the factual claims.
+
+Hold the same factual standard as the review: stay inside the supplied evidence, do not overstate what a source proves, keep different dates and events separate, do not turn an advisory result into something legally stronger, and do not imply causation, motive or opinion the evidence does not support.
+
+DECISION - exactly one of:
+
+PASS - the draft is safe to advance.
+
+HUMAN_REVIEW - any remaining or newly introduced problem. List each issue in "humanReview" with the section it concerns.
+
+Plain hyphens only - never em or en dashes.
+
+Return strict JSON { "decision", "summary", "humanReview": [{ "section", "reason" }] }. "summary" is one or two plain sentences. "humanReview" is empty unless the decision is HUMAN_REVIEW. A section is one of: story, hook, spine, facts, long.`;
+
+const LONG_TEXT_QA_ISSUES = {
+  type: "array",
+  items: { type: "object", additionalProperties: false, required: ["section", "reason"], properties: { section: { type: "string", enum: LONG_TEXT_QA_SECTIONS }, reason: { type: "string" } } },
+};
+const LONG_TEXT_QA_SCHEMA = { ...TEXT_QA_SCHEMA, properties: { ...TEXT_QA_SCHEMA.properties, humanReview: LONG_TEXT_QA_ISSUES } };
+const LONG_TEXT_VERIFY_SCHEMA = { ...TEXT_VERIFY_SCHEMA, properties: { ...TEXT_VERIFY_SCHEMA.properties, humanReview: LONG_TEXT_QA_ISSUES } };

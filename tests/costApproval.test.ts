@@ -20,7 +20,7 @@ const Fastify = (await import("fastify")).default;
 const { registerRoutes } = await import("../src/server/routes.ts");
 const { ensureSeed } = await import("../src/production/seed.ts");
 const { getStoryBySlug, getJob } = await import("../src/server/store.ts");
-const { estimateJob } = await import("../src/production/estimate.ts");
+const { estimateJob, estimateLongFirst } = await import("../src/production/estimate.ts");
 const { PRICING, AUTOPILOT_QUALITY_RESERVE_USD, round } = await import("../src/server/pricing.ts");
 const { config } = await import("../src/server/config.ts");
 const { costNote } = await import("../src/app/screens/Story.tsx");
@@ -73,21 +73,24 @@ describe("estimateJob", () => {
   });
 });
 
+// Since Stage 16A Slice 2 every new job is Long-first, so Generate approves the
+// Long-first estimate (estimateLongFirst); the same approval rules apply to it.
 describe("Generate accepts the new estimate as the approved maximum", () => {
   test("approvedMax exactly equal to the estimate is accepted, with nothing spent yet", async () => {
     const story = getStoryBySlug("pig-war")!;
-    const total = estimateJob(story).total;
+    const total = estimateLongFirst(story).total;
     const res = await generate(story.id, total);
     expect(res.statusCode).toBe(200);
     const job = getJob(res.json().job.id)!;
     expect(job.approvedMax).toBe(total);
     expect(job.estimatedCost).toBe(total);
     expect(job.spent).toBe(0);
+    expect(job.scratch).toEqual({ flow: "long-first" }); // marked by the insert that created it
   });
 
   test("approvedMax below the new estimate is rejected", async () => {
     const story = getStoryBySlug("vasa")!;
-    const total = estimateJob(story).total;
+    const total = estimateLongFirst(story).total;
     const res = await generate(story.id, round(total - 0.01));
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/below the estimate/);
