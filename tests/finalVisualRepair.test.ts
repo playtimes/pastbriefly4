@@ -85,8 +85,10 @@ vi.mock("../src/production/wikimedia.ts", async (orig) => ({
     const asset = (kind === "long" ? s.longShots : s.shortShots)[Number(m[2])].assetId;
     h.commons.push({ query, asset: `${kind}:${asset}` });
     if (!h.found.has(`${kind}:${asset}`)) return null;
-    writeFileSync(dest, `archive bytes ${kind}:${asset}`);
-    return { sourcePage: "https://commons.wikimedia.org/wiki/File:X.jpg", assetUrl: "https://upload.wikimedia.org/x.jpg", credit: `US Navy · Public domain (${asset})`, license: "Public domain", localPath: dest, sha256: `sha-${kind}-${asset}` };
+    const bytes = `archive bytes ${kind}:${asset}`;
+    writeFileSync(dest, bytes);
+    const { createHash } = await import("node:crypto");
+    return { sourcePage: "https://commons.wikimedia.org/wiki/File:X.jpg", assetUrl: "https://upload.wikimedia.org/x.jpg", credit: `US Navy · Public domain (${asset})`, license: "Public domain", localPath: dest, sha256: createHash("sha256").update(bytes).digest("hex"), title: "File:X.jpg", mime: "image/jpeg" };
   }),
 }));
 
@@ -154,7 +156,8 @@ const { PRICING, assetReviewUsd, round } = await import("../src/server/pricing.t
 const { cellTimes } = await import("../src/render/contactSheet.ts");
 const { issueAssets, cellSlots } = await import("../src/production/finalFilmQa.ts");
 const v = await import("../src/production/visuals.ts");
-const { inStory } = await import("../src/production/paths.ts");
+const { inStory, retainedArchiveDir } = await import("../src/production/paths.ts");
+const { createHash } = await import("node:crypto");
 const { paulBunyanStory } = await import("../src/production/fixtures/paulBunyan.ts");
 const Fastify = (await import("fastify")).default;
 const { registerRoutes } = await import("../src/server/routes.ts");
@@ -387,6 +390,26 @@ describe("final visual archive repair: the one attempt", () => {
     expect(archiveLabels()).toEqual(["long-factual", "long-visual", "short-factual", "short-visual", "asset-qa"]);
     expect(getJob(id)!.state).toBe("awaiting_final");
     expect(getJob(id)!.spent).toBe(round(FOUR + assetReviewUsd(1) + seqSpend()));
+  });
+
+  test("the Film #5 class: a recovery rejected for its slot survives in the retained archive with the reason; the reconstruction stays bound", async () => {
+    h.answers = { "long-visual": ["HUMAN_REVIEW"] };
+    const id = await produce((jid) => {
+      planned("long", 1)(jid);
+      h.found.add(`long:${h.targets.long[0]}`);
+      h.pixel[h.targets.long[0]] = "HUMAN_REVIEW";
+    });
+    const [asset] = h.targets.long;
+    const owner = shotsOf(id, "long").find((s) => s.assetId === asset && s.edit === "new")!;
+    expect(owner).toMatchObject({ truth: "reconstruction", path: expect.stringMatching(/^images\//) });
+    expect(existsSync(inStory(story.slug, `archive/long-${String(owner.index).padStart(2, "0")}.jpg`))).toBe(false); // the working copy, as before
+    const bytes = `archive bytes long:${asset}`;
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    expect(readFileSync(path.join(retainedArchiveDir(story.slug), `${hash}.jpg`), "utf8")).toBe(bytes);
+    const r = JSON.parse(readFileSync(path.join(retainedArchiveDir(story.slug), `${hash}.json`), "utf8"));
+    expect(r.acquisitions.at(-1)).toMatchObject({ film: "long", owner: `long:${asset}`, jobId: id });
+    expect(r.reviews.at(-1)).toMatchObject({ film: "long", assetId: asset, decision: "rejected", reason: "The photo shows a different ship.", by: "final visual repair", jobId: id });
+    expect(repairOf(id).rejected).toEqual([{ film: "long", assetId: asset, reason: "The photo shows a different ship." }]);
   });
 
   test("H, J, K. recovered and passed: bound as archive everywhere, only that film re-rendered and re-audited once, then Ready", async () => {

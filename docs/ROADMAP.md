@@ -88,19 +88,30 @@ decided by real performance (step 16D), not in advance.
 PB4 should increasingly behave like an **automated documentary editor**, not an
 image / video generator.
 
-Preferred visual hierarchy:
+Locked visual hierarchy / editorial policy (confirmed by the 16B proofs):
 
-1. **Real historical / documentary media first** - archives, museums,
-   government / institutional collections, public-domain / properly licensed
-   photography and footage.
-2. **Deterministic visuals** - Blender 2.5D historical scenes, maps, diagrams,
-   document treatments, controlled camera movement, lighting / atmosphere,
-   reusable environments.
-3. **Generated stills** only where useful / necessary.
-4. **Generative video** selectively, for exceptional hero moments, not as the
-   default motion backend.
+A. **Real historical / documentary material** - archive photography and
+   footage, documents and artifacts, when they genuinely tell the story and are
+   reliable and properly licensed. Real evidence anchors truth.
+B. **Deterministic explanation** - maps, diagrams, document treatments and,
+   optionally, Blender spatial coverage, where they explain geography,
+   mechanism, structure or spatial relationships better than a flat image.
+C. **OpenAI reconstruction** - generated stills for moments with no useful
+   surviving image: undocumented historical action, atmosphere / environments,
+   interiors, human scenes, visual bridges and cinematic coverage archive
+   cannot provide. Generated reconstructions remain an important source of
+   PastBriefly visual identity.
+D. **Generative video** - Runway / generative motion selectively, for rare
+   hero moments where motion materially adds value. Not the default motion
+   backend.
 
-Remotion may remain the assembly / render layer.
+The target is real evidence anchoring truth, generated reconstruction
+supplying cinematic storytelling, and deterministic visuals explaining space
+and mechanism. It is NOT an archive-only documentary and NOT an AI-only
+illustrated documentary. The hierarchy guides choices per moment; it is not a
+quota.
+
+Remotion remains the assembly / render layer.
 
 ## Current backend decision
 
@@ -337,43 +348,78 @@ therefore evaluate BOTH quality and economics.
     inventory by human decision; that is not a production-system acceptance
     claim.
 
+16B. **Blender 2.5D visual proof** - COMPLETED. Isolated R&D under
+    `data/proofs/16b-azorian-glomar/` (gitignored); nothing integrated, $0
+    provider spend, Film #5 untouched.
+
+    What it proved:
+    - **Isolated Blender spatial proof: PASS.** One reusable Glomar Explorer
+      scene produced three genuinely different camera setups with real
+      parallax. Extra cameras are cheap once the scene exists, and an RTX 4060
+      Ti 8 GB has ample headroom. A single quality pass improved it but did not
+      make Blender a premium standalone look: next to real photographs it still
+      reads as stylized CG / a model.
+    - **Mixed-media proof: PASS.** A 71.57-second section of the existing
+      Azorian Long, re-cut with its unchanged narration from real archive (CIA
+      documents, real ship photographs, artifacts, an approved CIA painting)
+      plus two Blender shots, read clearly more like an edited documentary than
+      Film #5 over the same narration: 11 distinct sources in 12 shots, no
+      repeated generated image family, a healthier Long rhythm.
+    - **The biggest gain came from real archive, not Blender.** PB4 had already
+      found some of this material during Film #5 and discarded it because the
+      edit did not select it. That is a demonstrated production weakness.
+    - **Blender earned 9 of 71.57 seconds** as supporting coverage: structure
+      and spatial orientation, and a moment with no archive. It looked weakest
+      directly beside real views of the same ship.
+    - The existing Runway clips and generated Glomar stills showed a ship
+      configuration the sources do not support, so no new Runway spend was
+      made for the proof.
+
+    Conclusions:
+    - Archive-first mixed documentary editing is validated.
+    - Blender is approved as **optional deterministic supporting coverage**
+      where spatial understanding adds value. It is NOT the primary visual
+      backend.
+    - OpenAI reconstruction remains part of the hierarchy for genuine visual
+      gaps; generative video remains selective (see Visual direction).
+    - No further isolated Blender R&D until a real Long demonstrates a need.
+    - **Archive retention:** useful, verified archive discoveries (with their
+      provenance) should not be discarded merely because the current edit does
+      not select them. Keep this KISS: no asset-management platform.
+    - Low-resolution archive still needs a sensible editorial presentation;
+      handle it when a real Long needs it.
+    - Breadcrumb only, not a fix and not a new QA layer: Film #5's narration
+      says construction started in November 1972, while the recovered launch
+      photograph is dated 1 November 1972.
+
+    Film #6 has NOT started.
+
 ### Next
 
-16A. **Long-first production reset** - NEXT (design). Document / design the
-    smallest changes required for PB4 to produce the Long first and derive
-    Shorts only after the Long is finished. Design only; no implementation yet.
+16A. **Long-first production reset** - DESIGN COMPLETE, ready for
+    implementation review. See `docs/STAGE-16A-LONG-FIRST-DESIGN.md`.
+    - The Long-first contract stands: ONE job, serial Long → durable LONG
+      COMPLETE → Short derivation.
+    - Before LONG COMPLETE the Short does not exist.
+    - Independent Long video registration needs no `videos` schema migration.
+    - Existing jobs, including Project Azorian, keep pair-first semantics.
 
-16B. **Blender 2.5D visual proof** - NEXT (the next real build / proof). Film #6
-    must NOT happen before this proof.
+    Implementation order (design section J; nothing started):
+    1. **Slice 1 - archive retention.** Acquired, screened archive and its
+       provenance survive, story-scoped, even when the edit does not select
+       it. Small and boring: no asset platform.
+    2. **Slice 2 - one honest Long-first vertical path** for new jobs: Long
+       script → Long Text QA → Long narration → Long visuals → Long render →
+       Long Final-film QC → durable LONG COMPLETE → independent Long
+       registration, with zero Short work or spend before LONG COMPLETE.
+    3. Then 16C.
 
-    Use a PastBriefly historical scene, preferably Project Azorian / Glomar
-    Explorer, because its visual weaknesses are already known. Create a
-    controlled side-by-side proof of roughly 15-20 seconds:
-    - current PB4 still treatment
-    - current Runway motion treatment
-    - Blender 2.5D treatment
+    Rejected: a finish-only "Long-first" flow that stays pair-first upstream
+    and only registers the Long earlier. It breaks the contract and leaves
+    transitional semantics to remove later.
 
-    The Blender treatment should test:
-    - depth-separated foreground / midground / background
-    - deterministic camera movement
-    - lighting
-    - atmosphere
-    - simple geometry where useful
-    - several distinct compositions from one underlying scene
-    - 16:9 Long-first composition
-    - vertical-safe / reusable framing potential for later Shorts
-
-    Judge:
-    - visual quality
-    - distinctiveness / channel identity
-    - production time
-    - repeatability
-    - cost (see Cost principle)
-    - whether one scene can yield several genuinely different shots
-
-    No Blender integration decision until the side-by-side proof is reviewed.
-
-16C. **Long → Short derivation** - after 16B. Only once the Long-first visual
+16C. **Long → Short derivation** - after the first working Long-first
+    production path has produced a finished Long. Only once the Long-first
     approach works:
 
     ```
@@ -386,10 +432,10 @@ therefore evaluate BOTH quality and economics.
 
     Do not build this before the Long-first proof is working.
 
-16D. **Editorial lane test** - after the Long-first production and the Blender
-    approach are working. Before narrowing the channel around one subcategory,
-    produce and compare at least three strong Longs from different
-    high-interest lanes (see Editorial hunting ground):
+16D. **Editorial lane test** - after the Long-first production path and the
+    archive-led visual approach are working. Before narrowing the channel
+    around one subcategory, produce and compare at least three strong Longs
+    from different high-interest lanes (see Editorial hunting ground):
     1. espionage / covert operation
     2. business / scam / collapse
     3. engineering disaster / impossible project

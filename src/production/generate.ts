@@ -36,6 +36,7 @@ import { buildFilm } from "../app/visualReview/model.ts";
 import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type CleanupPattern } from "../app/visualReview/board.ts";
 import { now } from "../server/db.ts";
 import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
+import { recordArchiveReview } from "./archiveRetention.ts";
 import { researchStory } from "./research.ts";
 import { writeScript, auditScripts, reviseStoryText, reviewStoryDraft, verifyStoryDraft, textQaCallsProvider } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
@@ -302,7 +303,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
           // Preflight the possible reconstruction fallback so a failed archive
           // search can never push spend past the cap; charge only if it generated.
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master, ledger);
+          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -315,7 +316,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
         // Only the owning ("new") slot acquires an asset; its reuses share that still below.
         if (shot.edit === "new" && !shot.path) {
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master, ledger);
+          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -682,25 +683,28 @@ async function repairFinalVisuals(job: JobRecord, story: Story, scratch: Scratch
 // The archive stage. Each implicated asset gets ONE more archive search (archive
 // only: nothing is generated and no motion is made). A found file must pass the
 // existing Pixel Asset QA review (read only: an archive can only PASS or go to a
-// person) before it replaces anything; otherwise it is deleted and the
-// reconstruction stays. The accepted assets are bound on a copy of the film's
+// person) before it replaces anything; otherwise its working copy is deleted
+// (the retained copy stays, with the reason) and the reconstruction stays. The accepted assets are bound on a copy of the film's
 // edit, which must pass the usual reuse, Film Grammar and strict edit checks;
 // then the edit, that film's invalidated visual audit and its pending render are
 // saved together. Returns the films it changed.
 async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratch, plan: FinalVisualRepairPlan, repair: FinalVisualRepair, reviewer: AssetReviewer = openAiAssetReview): Promise<FinalFilmKind[]> {
   const qa = scratch.finalFilmQa!;
   const ledger = seedArchiveLedger(story, films(scratch));
-  const found: { film: FinalFilmKind; assetId: string; path: string; credit: string }[] = [];
+  const found: { film: FinalFilmKind; assetId: string; path: string; credit: string; sha256: string }[] = [];
   for (const { film, assets } of plan.films) {
     for (const assetId of assets) {
       const owner = filmShots(scratch, film).find((s) => s.assetId === assetId && s.edit === "new")!;
       repair.tried.push({ film, assetId });
-      const got = await recoverArchiveStill(story, film, owner, ledger);
+      const got = await recoverArchiveStill(story, film, owner, ledger, job.id);
       if (got) found.push({ film, assetId, ...got });
     }
   }
+  // Rejected for THIS slot only: the working copy goes, but the search already
+  // retained the screened candidate, which keeps the reason in its provenance.
   const reject = (f: (typeof found)[number], reason: string) => {
     repair.rejected.push({ film: f.film, assetId: f.assetId, reason });
+    recordArchiveReview(story.slug, f.sha256, { film: f.film, assetId: f.assetId, decision: "rejected", reason, by: "final visual repair", jobId: job.id });
     rmSync(inStory(story.slug, f.path), { force: true }); // only the file this search wrote
   };
 

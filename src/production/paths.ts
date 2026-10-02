@@ -1,11 +1,18 @@
 import path from "node:path";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
-import { MEDIA_DIR } from "../server/config.ts";
+import { DATA_DIR, MEDIA_DIR } from "../server/config.ts";
 
 // A story's asset folder is the Remotion publicDir for its films, so render
 // plans reference assets by paths relative to it (e.g. "images/hero.png").
 export function storyDir(slug: string): string {
   return path.join(MEDIA_DIR, "stories", slug);
+}
+
+// A story's retained archive (archiveRetention.ts). Deliberately under DATA_DIR,
+// outside storyDir: it is never bundled with a render, and no working-visual
+// cleanup (clearWorkingVisuals, a visual rebuild) can reach it.
+export function retainedArchiveDir(slug: string): string {
+  return path.join(DATA_DIR, "archive-retained", slug);
 }
 
 export function ensureStoryDirs(slug: string): void {

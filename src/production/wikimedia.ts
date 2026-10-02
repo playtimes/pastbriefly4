@@ -13,6 +13,13 @@ export interface ArchiveResult {
   license: string;
   localPath: string;
   sha256: string;
+  // Kept for archive retention's provenance only (archiveRetention.ts): the
+  // Commons file title, the MIME type Commons declared, and the raw Artist /
+  // Credit fields exactly as supplied (absent when Commons gives none).
+  title: string;
+  mime: string;
+  artist?: string;
+  rawCredit?: string;
 }
 
 // Per-shot acquisition rules on top of the story-level relevance terms.
@@ -162,7 +169,18 @@ export async function fetchArchive(query: string, outPath: string, relevance: st
     await writeFile(outPath, bytes);
     const credit = commonsCredit(meta.Artist?.value || meta.Credit?.value || "Wikimedia Commons");
     console.log(`[archive] accepted: ${page.title}${matched ? ` (matched "${matched}", query "${query}")` : ` (query "${query}")`}`);
-    return { sourcePage: info.descriptionurl || "", assetUrl, credit: `${credit} · ${license}`, license, localPath: outPath, sha256 };
+    return {
+      sourcePage: info.descriptionurl || "",
+      assetUrl,
+      credit: `${credit} · ${license}`,
+      license,
+      localPath: outPath,
+      sha256,
+      title: String(page.title || ""),
+      mime: String(info.mime),
+      artist: meta.Artist?.value ? String(meta.Artist.value) : undefined,
+      rawCredit: meta.Credit?.value ? String(meta.Credit.value) : undefined,
+    };
   }
   console.log(`[archive] "${query}": ${pages.length} results, none usable (mime ${badMime}, license ${badLicense}, off-shot ${offShot}, unrelated ${irrelevant}, duplicate ${duplicate})`);
   return null;

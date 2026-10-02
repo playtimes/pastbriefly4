@@ -16,6 +16,7 @@ import { copyFileSync } from "node:fs";
 import { generateImageFile, respondJson } from "../providers/openai.ts";
 import { generateMotion } from "../providers/runway.ts";
 import { fetchArchive } from "./wikimedia.ts";
+import { retainArchiveCandidate } from "./archiveRetention.ts";
 
 export const FPS = 30;
 
@@ -2634,8 +2635,10 @@ Preserve everything the correction does not affect. Do not treat this note as pe
 // broad, stopping at the first file fetchArchive accepts (which writes it to
 // archive/<film>-<owner slot>.jpg). Every candidate, whichever query found it,
 // must also match this shot's own anchors and must not be bytes another asset
-// already owns. Nothing is generated and the shot is not changed.
-async function searchArchive(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger): Promise<{ path: string; credit: string } | null> {
+// already owns. Nothing is generated and the shot is not changed. Live, the
+// accepted file is also retained with its provenance (archiveRetention.ts); that
+// never changes the result, and `sha256` is its retained identity.
+async function searchArchive(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string): Promise<{ path: string; credit: string; sha256: string } | null> {
   if (!shot.archiveQuery) return null;
   const archiveRel = `archive/${kind}-${String(shot.index).padStart(2, "0")}.jpg`;
   const dest = inStory(story.slug, archiveRel);
@@ -2652,7 +2655,8 @@ async function searchArchive(story: Story, kind: "long" | "short", shot: Planned
     });
     if (got) {
       if (got.sha256) ledger.set(got.sha256, owner);
-      return { path: archiveRel, credit: got.credit };
+      if (config.mode === "live") retainArchiveCandidate(story.slug, got, { query: q, film: kind, owner, jobId });
+      return { path: archiveRel, credit: got.credit, sha256: got.sha256 };
     }
   }
   return null;
@@ -2662,9 +2666,9 @@ async function searchArchive(story: Story, kind: "long" | "short", shot: Planned
 // was planned as archive and fell back to a reconstruction (archiveQuery kept).
 // Live only. It never generates or changes anything but the archive file it
 // writes: the caller reviews that file and decides whether to bind it.
-export async function recoverArchiveStill(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger): Promise<{ path: string; credit: string } | null> {
+export async function recoverArchiveStill(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string): Promise<{ path: string; credit: string; sha256: string } | null> {
   if (config.mode !== "live" || shot.edit !== "new") return null;
-  return searchArchive(story, kind, shot, ledger);
+  return searchArchive(story, kind, shot, ledger, jobId);
 }
 
 // A first acquisition names the still after the owner slot. A regeneration passes
@@ -2679,6 +2683,7 @@ export async function acquireStill(
   ledger: ArchiveLedger = new Map(),
   directorNote?: string,
   stillPath?: string,
+  jobId?: string, // recorded with any retained archive (provenance only)
 ): Promise<StillResult> {
   // A reuse shows its asset owner's still (resolveReuse); it never acquires media.
   if (shot.edit === "reuse") throw new Error(`${kind} slot ${shot.index} reuses asset ${shot.assetId} and never acquires its own still.`);
@@ -2688,7 +2693,7 @@ export async function acquireStill(
 
   if (shot.truth === "archive") {
     if (config.mode === "live" && shot.archiveQuery) {
-      const got = await searchArchive(story, kind, shot, ledger);
+      const got = await searchArchive(story, kind, shot, ledger, jobId);
       if (got) {
         shot.path = got.path;
         shot.mediaType = "image";
