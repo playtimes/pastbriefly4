@@ -8,6 +8,7 @@ import type { ResearchPackage, StoryWorld } from "./pipelineTypes.ts";
 import { paulBunyanResearch } from "./fixtures/paulBunyan.ts";
 import { ensureStoryDirs, inStory, mediaRel } from "./paths.ts";
 import { writePlaceholderStill } from "./mockAssets.ts";
+import { plainDashes } from "./text.ts";
 import { existsSync } from "node:fs";
 
 // ---- Find stories (Stories screen discovery) ----
@@ -232,10 +233,13 @@ function lockedBaseline(current: ResearchPackage): string {
 // have fewer facts, sources or moments, and must add at least one of them. Exact
 // matches only: a correction to a verified fact is a separate human decision,
 // never a side effect of an enrichment. Returns the reason to reject, or null.
+// Fact text alone is compared through sameFactText: a typographic dash or a
+// whitespace run is orthography, not a different fact (the first real retry was
+// rejected over one). Nothing else is loosened, and nothing saved is changed.
 export function researchExpansionError(current: ResearchPackage, refreshed: ResearchPackage): string | null {
-  const facts = new Set(refreshed.facts.map((f) => `${f.fact.trim()}\n${f.sourceUrl.trim()}`));
+  const facts = new Set(refreshed.facts.map((f) => `${sameFactText(f.fact)}\n${f.sourceUrl.trim()}`));
   for (const f of current.facts) {
-    if (!facts.has(`${f.fact.trim()}\n${f.sourceUrl.trim()}`)) return `Research more rejected: existing verified fact was lost: "${f.fact.trim()}"`;
+    if (!facts.has(`${sameFactText(f.fact)}\n${f.sourceUrl.trim()}`)) return `Research more rejected: existing verified fact was lost: "${f.fact.trim()}"`;
   }
   const urls = new Set(refreshed.sources.map((s) => s.url.trim()));
   for (const s of current.sources) {
@@ -246,6 +250,11 @@ export function researchExpansionError(current: ResearchPackage, refreshed: Rese
   }
   const grew = (["facts", "sources", "moments"] as const).some((key) => refreshed[key].length > current[key].length);
   return grew ? null : "Research more rejected: no new verified evidence was added.";
+}
+
+// Comparison only: every typographic dash as "-", every whitespace run as one space.
+function sameFactText(text: string): string {
+  return plainDashes(text).replace(/\s+/g, " ").trim();
 }
 
 function worldFromStory(s: Story): StoryWorld {

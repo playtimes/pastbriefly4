@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Fastify from "fastify";
@@ -308,6 +308,7 @@ async function rejectedRefresh(out: Record<string, (input: string) => unknown>, 
   expect(logged.mock.calls[0][0]).toBe(`Research more failed job=${jobId} feedbackLength=${FEEDBACK.length} error=${message}`);
   logged.mockRestore();
   await a.close();
+  return { jobId, storyId: story.id };
 }
 
 describe("Research more: an enrichment never makes the verified package poorer", () => {
@@ -374,6 +375,133 @@ describe("Research more: an enrichment never makes the verified package poorer",
   test("9. a legacy pair-first job is rejected the same way, with no Long or Short write", async () => {
     const v = pkg("VERIFIED-3");
     await rejectedRefresh({ research_verify: () => ({ ...v, sources: without(v.sources, 4) }) }, `Research more rejected: existing verified source was lost: ${URL(5)}`, false);
+  });
+});
+
+// The first real retry was rejected over a locked fact the model most likely
+// returned with a non-breaking hyphen. Fact TEXT is compared modulo the shared
+// typographic dash family (plainDashes) and whitespace runs; everything else stays
+// exact, and the saved package is never normalized.
+const VAN_MIERT = "Under Lieutenant-Commander A. van Miert, the crew disguised the ship with foliage and paint to resemble a small island, hiding motionless by day and sailing only at night among islets.";
+const AWM = "https://www.awm.gov.au/visit/exhibitions/alliesinadversity/australia/crijnssen";
+const withFact = <P extends { facts: { fact: string; sourceTitle: string; sourceUrl: string }[] }>(p: P, fact: string, sourceUrl = AWM): P => ({ ...p, facts: p.facts.map((f, i) => (i === 1 ? { ...f, fact, sourceUrl } : f)) });
+const CURRENT = withFact(structuredClone(OLD), VAN_MIERT);
+const lostVanMiert = `Research more rejected: existing verified fact was lost: "${VAN_MIERT}"`;
+const DIAG = path.join(process.env.PB4_DATA_DIR!, "diagnostics", "research-more-rejections");
+const diagnosticsFor = (jobId: string) => {
+  try {
+    return readdirSync(DIAG).filter((f) => f.startsWith(jobId));
+  } catch {
+    return [];
+  }
+};
+
+describe("Research more: fact text is compared modulo typographic dashes and whitespace only", () => {
+  test("A. a non-breaking hyphen in a locked fact is the same fact", () => {
+    const refreshed = withFact(pkg("VERIFIED-3"), VAN_MIERT.replace("Lieutenant-Commander", "Lieutenant‑Commander"));
+    expect(researchExpansionError(CURRENT, refreshed)).toBeNull();
+  });
+
+  test("B. every dash plainDashes covers compares equal to a plain hyphen, either way round", () => {
+    for (const dash of ["‐", "‑", "‒", "–", "—", "―", "−"]) {
+      const typographic = VAN_MIERT.replace("Lieutenant-Commander", `Lieutenant${dash}Commander`);
+      expect(researchExpansionError(CURRENT, withFact(pkg("VERIFIED-3"), typographic))).toBeNull();
+      expect(researchExpansionError(withFact(structuredClone(OLD), typographic), withFact(pkg("VERIFIED-3"), VAN_MIERT))).toBeNull();
+    }
+  });
+
+  test("C. formatting-only whitespace (repeated spaces, tabs, line breaks, NBSP, outer space) is the same fact", () => {
+    const spaced = `  ${VAN_MIERT.replace("the crew disguised", "the crew  disguised").replace("disguised the ship", "disguised\tthe ship").replace("with foliage", "with\nfoliage").replace("and paint", "and paint")}\n`;
+    expect(researchExpansionError(CURRENT, withFact(pkg("VERIFIED-3"), spaced))).toBeNull();
+  });
+
+  test("D. a real wording change still fails: another word, another date, an added or removed word", () => {
+    for (const changed of [
+      VAN_MIERT.replace("the crew disguised", "the sailors disguised"),
+      VAN_MIERT.replace("by day", "by daylight"),
+      VAN_MIERT.replace("a small island", "a small rocky island"),
+      VAN_MIERT.replace("only at night", "at night"),
+    ]) {
+      expect(researchExpansionError(CURRENT, withFact(pkg("VERIFIED-3"), changed))).toBe(lostVanMiert);
+    }
+    const v = pkg("VERIFIED-3");
+    const dated = { ...v, facts: v.facts.map((f, i) => (i === 0 ? { ...f, fact: "Locked fact 1: verified on 2 March." } : f)) };
+    expect(researchExpansionError(OLD, dated)).toBe('Research more rejected: existing verified fact was lost: "Locked fact 1: verified on 1 March."');
+  });
+
+  test("E. ordinary punctuation and case are not stripped", () => {
+    for (const changed of [
+      VAN_MIERT.replace("van Miert,", "van Miert"),
+      VAN_MIERT.replace("A. van", "A van"),
+      VAN_MIERT.replace("islets.", "islets"),
+      VAN_MIERT.replace("Under", "under"),
+      VAN_MIERT.replace("Lieutenant-Commander", "Lieutenant Commander"),
+    ]) {
+      expect(researchExpansionError(CURRENT, withFact(pkg("VERIFIED-3"), changed))).toBe(lostVanMiert);
+    }
+  });
+
+  test("F. the same fact text with another sourceUrl still fails; URLs are never dash- or space-normalized", () => {
+    expect(researchExpansionError(CURRENT, withFact(pkg("VERIFIED-3"), VAN_MIERT, "https://en.wikipedia.org/wiki/HNLMS_Abraham_Crijnssen"))).toBe(lostVanMiert);
+    const dashedUrl = "https://seapower.navy.gov.au/history/units/hmas-abraham-crijnssen";
+    const current = withFact(structuredClone(OLD), VAN_MIERT, dashedUrl);
+    expect(researchExpansionError(current, withFact(pkg("VERIFIED-3"), VAN_MIERT, dashedUrl.replace("hmas-", "hmas‑")))).toBe(lostVanMiert);
+    expect(researchExpansionError(current, withFact(pkg("VERIFIED-3"), VAN_MIERT, dashedUrl.replace("units/", "units/ ")))).toBe(lostVanMiert);
+    // A source URL is compared after its outer trim only.
+    const sources = [{ ...BASE_SOURCES[0], url: dashedUrl }, ...BASE_SOURCES.slice(1)];
+    const v = pkg("VERIFIED-3");
+    expect(researchExpansionError({ ...OLD, sources }, { ...v, sources: [{ ...v.sources[0], url: dashedUrl.replace("hmas-", "hmas–") }, ...v.sources.slice(1)] })).toBe(
+      `Research more rejected: existing verified source was lost: ${dashedUrl}`,
+    );
+    expect(researchExpansionError({ ...OLD, sources }, { ...v, sources: [{ ...v.sources[0], url: ` ${dashedUrl} ` }, ...v.sources.slice(1)] })).toBeNull();
+  });
+});
+
+describe("Research more: a rejected package is kept as a local diagnostic", () => {
+  test("G. the paid final package that lost a locked fact is written once under DATA_DIR/diagnostics, beside its baseline; nothing else changes", async () => {
+    const v = pkg("VERIFIED-3");
+    const rejected = { ...v, facts: without(v.facts, 2) };
+    const reason = 'Research more rejected: existing verified fact was lost: "Locked fact 3: verified on 3 March."';
+    const { jobId, storyId } = await rejectedRefresh({ research_verify: () => rejected }, reason);
+    const files = diagnosticsFor(jobId);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(new RegExp(`^${jobId}-\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z\\.json$`));
+    const d = JSON.parse(readFileSync(path.join(DIAG, files[0]), "utf8"));
+    expect(Object.keys(d)).toEqual(["jobId", "storyId", "createdAt", "reason", "current", "rejected"]);
+    expect(d).toEqual({ jobId, storyId, createdAt: expect.any(String), reason, current: OLD, rejected });
+    expect(JSON.stringify(d)).not.toContain(FEEDBACK); // the Director's request is not stored
+    expect(JSON.stringify(d)).not.toContain("test-key");
+  });
+
+  test("H. an accepted refresh writes no diagnostic, and its package is saved exactly as returned (never normalized)", async () => {
+    const { jobId } = await atTextGate(true);
+    const a = await app();
+    const v = pkg("VERIFIED-3");
+    const spaced = { ...v, facts: v.facts.map((f, i) => (i === 0 ? { ...f, fact: "Locked  fact 1: verified on 1 March." } : f)) };
+    h.out = { research_verify: () => spaced };
+    expect((await researchMore(a, jobId)).statusCode).toBe(200);
+    await settled(jobId);
+    expect(scratchOf(jobId).research).toEqual(spaced);
+    expect(scratchOf(jobId).research.facts[0].fact).toBe("Locked  fact 1: verified on 1 March.");
+    expect(diagnosticsFor(jobId)).toEqual([]);
+    await a.close();
+  });
+
+  test("I. a diagnostic that cannot be written only warns: the same rejection, content, spend and Text QA result", async () => {
+    const moved = `${DIAG}.moved`;
+    renameSync(DIAG, moved); // earlier rejections created it
+    writeFileSync(DIAG, "a file where the directory should be");
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const v = pkg("VERIFIED-3");
+      const { jobId } = await rejectedRefresh({ research_verify: () => ({ ...v, sources: without(v.sources, 1) }) }, `Research more rejected: existing verified source was lost: ${URL(2)}`);
+      expect(warned).toHaveBeenCalledOnce();
+      expect(warned.mock.calls[0][0]).toMatch(new RegExp(`^Research more rejection diagnostic not saved job=${jobId} error=`));
+    } finally {
+      warned.mockRestore();
+      rmSync(DIAG);
+      renameSync(moved, DIAG);
+    }
   });
 });
 

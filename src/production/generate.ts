@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
-import { existsSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { config } from "../server/config.ts";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { config, DATA_DIR } from "../server/config.ts";
 import { PRICING, assetReviewUsd, round, ttsUsd } from "../server/pricing.ts";
 import { getJob, getStory, upsertStory, updateJob, addVideo, addVideos, setScripts, approvePreview, type JobRecord } from "../server/store.ts";
 import type { JobFlow, AssetQaIssue, AssetQaPhase, AssetQaStage, AssetQaState, DirectorQaRun, DirectorQaRuns, FinalQaState, VisualAutopilotState, CoordinatedRepairReport, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent, DirectorVerifyReport, JobStep, SequenceCleanupReport, Story, TextQaPhase, TextQaReview, TextQaStage, TextQaState, TextQaVerify, Video } from "../types.ts";
@@ -1101,6 +1102,21 @@ export function isResearchingMore(jobId: string): boolean {
   return researchingMore.has(jobId);
 }
 
+// Local evidence for a rejected Research more: the paid final package next to the
+// baseline it failed, under DATA_DIR/diagnostics/research-more-rejections. Never
+// read by the pipeline, and best-effort: a failed write only warns, so the
+// rejection, the kept content and the spend are exactly as without it.
+function saveRejectedResearch(jobId: string, storyId: string, reason: string, current: ResearchPackage, rejected: ResearchPackage): void {
+  try {
+    const dir = path.join(DATA_DIR, "diagnostics", "research-more-rejections");
+    mkdirSync(dir, { recursive: true });
+    const createdAt = now();
+    writeFileSync(path.join(dir, `${jobId}-${createdAt.replace(/[:.]/g, "-")}.json`), JSON.stringify({ jobId, storyId, createdAt, reason, current, rejected }, null, 2));
+  } catch (e: any) {
+    console.warn(`Research more rejection diagnostic not saved job=${jobId} error=${e?.message ?? e}`);
+  }
+}
+
 // At the text gate, the Director's "the story is good, the evidence is too
 // thin": one targeted research refresh of the CURRENT verified package
 // (researchStoryMore: expansion, the integrity audit and the final verification,
@@ -1133,7 +1149,10 @@ export async function researchMoreForJob(jobId: string, feedback: string): Promi
     const research = await researchStoryMore(story, scratch.research, feedback);
     record(jobId, PRICING.openai.research, scratch);
     const rejected = researchExpansionError(scratch.research, research);
-    if (rejected) throw new Error(rejected);
+    if (rejected) {
+      saveRejectedResearch(jobId, story.id, rejected, scratch.research, research);
+      throw new Error(rejected);
+    }
 
     // A fresh draft from the new research: the same writes and audit as runJob's.
     const parts: { long?: string; short?: string } = {};
