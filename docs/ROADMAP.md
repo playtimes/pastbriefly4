@@ -424,7 +424,9 @@ therefore evaluate BOTH quality and economics.
        human text gate can request a **Research more** refresh when the
        verified evidence pack is too thin (an explicit Director action: a
        targeted three-pass research refresh and a new draft, still pre-media
-       and human-controlled; only Approve & continue leaves the gate).
+       and human-controlled; only Approve & continue leaves the gate). It is
+       additive enrichment: it cannot silently remove previously verified
+       facts or sources (a poorer or unchanged package is rejected).
     4. Then 16C, which stays BLOCKED until the Long-first system has produced
        and passed a real finished Long through Film #6.
 

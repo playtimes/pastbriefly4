@@ -37,7 +37,7 @@ import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type 
 import { now } from "../server/db.ts";
 import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
 import { recordArchiveReview, retainedArchiveInventory } from "./archiveRetention.ts";
-import { researchStory, researchStoryMore } from "./research.ts";
+import { researchStory, researchStoryMore, researchExpansionError } from "./research.ts";
 import { writeScript, auditScripts, auditLongScript, reviseStoryText, reviseLongText, reviewStoryDraft, reviewLongDraft, verifyStoryDraft, verifyLongDraft, textQaCallsProvider, type LongDraft, type RevisedText, type RevisedLongText } from "./scripts.ts";
 import { recordNarration, type Narration } from "./narration.ts";
 import { plainDashes } from "./text.ts";
@@ -1107,6 +1107,9 @@ export function isResearchingMore(jobId: string): boolean {
 // charged as one research package exactly like the initial research), then the
 // job's film scripts written again from the NEW research by the normal writer
 // and audited by the normal fidelity audit (a Long-first job: the Long alone).
+// The refresh is additive: a package that lost a current fact or source, shrank,
+// or added nothing is rejected before any script work (its research cost stays
+// charged; the provider calls were made).
 // Paid calls are preflighted and charged as usual, but the text itself is
 // replaced all at once, only when every step succeeded: research, scripts and
 // draft parts in the job, the story's editorial fields (its title and hook are
@@ -1129,6 +1132,8 @@ export async function researchMoreForJob(jobId: string, feedback: string): Promi
     budget(job, PRICING.openai.research, scratch);
     const research = await researchStoryMore(story, scratch.research, feedback);
     record(jobId, PRICING.openai.research, scratch);
+    const rejected = researchExpansionError(scratch.research, research);
+    if (rejected) throw new Error(rejected);
 
     // A fresh draft from the new research: the same writes and audit as runJob's.
     const parts: { long?: string; short?: string } = {};

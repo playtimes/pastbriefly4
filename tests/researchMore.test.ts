@@ -23,28 +23,45 @@ const h = vi.hoisted(() => ({
   calls: [] as { schemaName: string; input: string; instructions: string; webSearch?: boolean }[],
   failOn: "" as string,
   hold: null as Promise<void> | null,
+  out: {} as Record<string, (input: string) => unknown>, // per-test replacement research packages
   narration: 0,
   images: 0,
 }));
 
+// The current verified package has the real Film #6 shape: 7 facts, 8 moments,
+// 5 sources. A refresh may only enrich it.
+const WORLD = { period: "1942", place: "Java", palette: "p", visualDirection: "v", recurringPeople: [], recurringLocations: [], referenceImages: [] };
+const URL = (i: number) => `https://institution-${i}.example/page`;
+const BASE_SOURCES = [1, 2, 3, 4, 5].map((i) => ({ title: `Institution ${i}`, url: URL(i), note: `Institution ${i} supports the route` }));
+const BASE_FACTS = [1, 2, 3, 4, 5, 6, 7].map((i) => ({ fact: `Locked fact ${i}: verified on ${i} March.`, sourceTitle: `Institution ${((i - 1) % 5) + 1}`, sourceUrl: URL(((i - 1) % 5) + 1) }));
+const BASE_MOMENTS = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => ({ title: `Locked moment ${i}`, detail: `Locked detail ${i}` }));
+const OLD = { summary: "OLD-0 summary of the escape.", moments: BASE_MOMENTS, sources: BASE_SOURCES, facts: BASE_FACTS, productionNote: "OLD-0 production note", world: WORLD };
+// A valid enrichment: the whole baseline (source notes may improve) plus two new
+// facts, sources and moments (7/8/5 -> 9/10/7).
 const pkg = (tag: string) => ({
   summary: `${tag} summary of the escape.`,
-  moments: [
-    { title: `${tag} moment one`, detail: `${tag} detail one` },
-    { title: `${tag} moment two`, detail: `${tag} detail two` },
+  moments: [...BASE_MOMENTS, { title: `${tag} moment one`, detail: `${tag} detail one` }, { title: `${tag} moment two`, detail: `${tag} detail two` }],
+  sources: [
+    ...BASE_SOURCES.map((x) => ({ ...x, note: `${x.note} (${tag})` })),
+    { title: `${tag} institutional source`, url: `https://example.org/${tag}`, note: `${tag} supports the route` },
+    { title: `${tag} archive`, url: `https://archive.example.org/${tag}`, note: `${tag} supports the crew` },
   ],
-  sources: [{ title: `${tag} institutional source`, url: `https://example.org/${tag}`, note: `${tag} supports the route` }],
-  facts: [{ fact: `${tag} fact: the ship left on 6 March.`, sourceTitle: `${tag} institutional source`, sourceUrl: `https://example.org/${tag}` }],
+  facts: [
+    ...BASE_FACTS,
+    { fact: `${tag} fact: the ship left on 6 March.`, sourceTitle: `${tag} institutional source`, sourceUrl: `https://example.org/${tag}` },
+    { fact: `${tag} fact: the crew rebuilt the foliage.`, sourceTitle: `${tag} archive`, sourceUrl: `https://archive.example.org/${tag}` },
+  ],
   productionNote: `${tag} production note`,
-  world: { period: "1942", place: "Java", palette: "p", visualDirection: "v", recurringPeople: [], recurringLocations: [], referenceImages: [] },
+  world: WORLD,
 });
-const OLD = pkg("OLD-0");
+const without = <T>(xs: T[], i: number) => xs.filter((_, j) => j !== i);
 
 vi.mock("../src/providers/openai.ts", () => ({
   respondJson: vi.fn(async (o: { schemaName: string; input: string; instructions: string; webSearch?: boolean }) => {
     h.calls.push(o);
     if (o.schemaName === "research_more" && h.hold) await h.hold;
     if (h.failOn === o.schemaName) throw new Error(`OpenAI responses 500: ${o.schemaName} boom`);
+    if (h.out[o.schemaName]) return h.out[o.schemaName](o.input);
     switch (o.schemaName) {
       case "research_more":
         return pkg("EXPANDED-1");
@@ -78,7 +95,7 @@ const { createJob, getJob, updateJob, upsertStory, getStory, getScripts, setScri
 const { registerRoutes } = await import("../src/server/routes.ts");
 const { enqueueJob } = await import("../src/server/worker.ts");
 const { PRICING, round } = await import("../src/server/pricing.ts");
-const { researchStoryMore } = await import("../src/production/research.ts");
+const { researchStoryMore, researchExpansionError } = await import("../src/production/research.ts");
 
 const FEEDBACK = "Expand the escape chronology: the evacuation order, the other minesweepers' failed escapes, crew composition and the route, from institutional sources.";
 const OLD_LONG = "Old long OL-1 about the island disguise.";
@@ -132,6 +149,7 @@ beforeEach(() => {
   h.calls.length = 0;
   h.failOn = "";
   h.hold = null;
+  h.out = {};
   h.narration = h.images = 0;
   vi.mocked(enqueueJob).mockClear();
 });
@@ -194,11 +212,20 @@ describe("Research more: a Long-first job", () => {
     expect([first.schemaName, audit.schemaName, verify.schemaName]).toEqual(["research_more", "research_audit", "research_verify"]);
     expect(h.calls.every((c) => c.webSearch === true)).toBe(true);
     expect(first.input).toContain("CURRENT VERIFIED RESEARCH PACKAGE:");
-    for (const s of ["OLD-0 summary of the escape.", "OLD-0 moment one", "OLD-0 fact: the ship left on 6 March.", "https://example.org/OLD-0", "OLD-0 production note"]) expect(first.input).toContain(s);
+    for (const s of ["OLD-0 summary of the escape.", "Locked moment 1", "Locked fact 1: verified on 1 March.", URL(1), "OLD-0 production note"]) expect(first.input).toContain(s);
     expect(first.input).toContain(`DIRECTOR RESEARCH REQUEST (a research question and priority - NOT evidence):\n${FEEDBACK}`);
     expect(first.input).toContain("STORY: The Warship That Disguised Itself as an Island");
     expect(first.instructions).toContain("expanding an existing VERIFIED PastBriefly research package");
     expect(first.instructions).toContain("never evidence");
+    expect(first.instructions).toContain("EXISTING VERIFIED FACTS ARE LOCKED");
+    // The audit and the verification are told which facts and sources must survive.
+    for (const pass of [audit, verify]) {
+      expect(pass.input).toContain("THESE EXISTING VERIFIED FACTS AND SOURCE URLS MUST SURVIVE THIS ENRICHMENT.");
+      for (const f of BASE_FACTS) expect(pass.input).toContain(`- "${f.fact}" (sourceUrl: ${f.sourceUrl})`);
+      for (const x of BASE_SOURCES) expect(pass.input).toContain(`- ${x.url}`);
+      expect(pass.input).toContain("keep at least 8 moments");
+    }
+    expect(first.input).not.toContain("LOCKED BASELINE");
     // researchStoryMore saves nothing: the caller decides.
     expect(getStory(story.id)!.summary).toBe(OLD.summary);
   });
@@ -248,6 +275,105 @@ describe("Research more: failures leave the current draft authoritative", () => 
     expect(h.narration + h.images).toBe(0);
     vi.mocked(console.error).mockRestore();
     await a.close();
+  });
+});
+
+// The real Film #6 regression: a refresh that "succeeded" but lost verified facts
+// and institutional sources, shrank the moments and added nothing asked for. The
+// three research calls were made, so the package is charged; the result is then
+// rejected before any script work and the current research, draft and Text QA
+// result stay exactly as they were.
+async function rejectedRefresh(out: Record<string, (input: string) => unknown>, message: string, flow = true) {
+  const { story, jobId, base } = await atTextGate(flow);
+  const scripts = flow ? { long: OLD_LONG } : { long: OLD_LONG, short: OLD_SHORT };
+  const a = await app();
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  h.out = out;
+  const res = await researchMore(a, jobId);
+  expect(res.statusCode).toBe(400);
+  expect(res.json().error).toBe(message);
+  await settled(jobId);
+  expect(names()).toEqual(["research_more", "research_audit", "research_verify"]); // no script write, no script audit, no Text QA
+  const s = scratchOf(jobId);
+  expect(s.research).toEqual(OLD);
+  expect(s.scripts).toEqual(scripts);
+  expect(s.scriptParts).toEqual(scripts);
+  expect(getScripts(story.id)).toEqual(scripts);
+  expect(getStory(story.id)).toMatchObject({ summary: OLD.summary, moments: OLD.moments, sources: OLD.sources, productionNote: OLD.productionNote });
+  expect(await publicJob(a, jobId)).toMatchObject({ state: "awaiting_text", textQa: { status: "passed" }, review: { longScript: OLD_LONG } });
+  expect(s.textApproved).toBeUndefined();
+  expect(getJob(jobId)!.spent).toBe(round(base + PRICING.openai.research)); // the completed research package stays charged
+  expect(enqueueJob).not.toHaveBeenCalled();
+  expect(h.narration + h.images).toBe(0);
+  expect(logged.mock.calls[0][0]).toBe(`Research more failed job=${jobId} feedbackLength=${FEEDBACK.length} error=${message}`);
+  logged.mockRestore();
+  await a.close();
+}
+
+describe("Research more: an enrichment never makes the verified package poorer", () => {
+  test("1. a lost verified fact rejects the refresh: research charged, no script work, the old research, draft, story and Text QA result stay", async () => {
+    const v = pkg("VERIFIED-3");
+    await rejectedRefresh({ research_verify: () => ({ ...v, facts: without(v.facts, 2) }) }, 'Research more rejected: existing verified fact was lost: "Locked fact 3: verified on 3 March."');
+  });
+
+  test("1b. a verified fact kept with a different sourceUrl, or reworded, counts as lost", async () => {
+    const v = pkg("VERIFIED-3");
+    const repointed = { ...v, facts: v.facts.map((f, i) => (i === 0 ? { ...f, sourceUrl: "https://example.org/VERIFIED-3" } : f)) };
+    expect(researchExpansionError(OLD, repointed)).toBe('Research more rejected: existing verified fact was lost: "Locked fact 1: verified on 1 March."');
+    const reworded = { ...v, facts: v.facts.map((f, i) => (i === 0 ? { ...f, fact: "Locked fact 1: verified in early March." } : f)) };
+    expect(researchExpansionError(OLD, reworded)).toBe('Research more rejected: existing verified fact was lost: "Locked fact 1: verified on 1 March."');
+  });
+
+  test("2. a dropped institutional source rejects the refresh, even when another source replaces it", async () => {
+    const v = pkg("VERIFIED-3");
+    await rejectedRefresh(
+      { research_verify: () => ({ ...v, sources: [...without(v.sources, 0), { title: "Encyclopedia", url: "https://encyclopedia.example/ship", note: "n" }] }) },
+      `Research more rejected: existing verified source was lost: ${URL(1)}`,
+    );
+  });
+
+  test("3. moments shrinking from 8 to 6 rejects the refresh, though facts and sources grew", async () => {
+    const v = pkg("VERIFIED-3");
+    await rejectedRefresh({ research_verify: () => ({ ...v, moments: v.moments.slice(0, 6) }) }, "Research more rejected: moments shrank from 8 to 6.");
+  });
+
+  test("4. each count is a floor of its own", () => {
+    const v = pkg("VERIFIED-3");
+    // Every distinct fact and source survives, but a current duplicate does not.
+    expect(researchExpansionError({ ...OLD, facts: [...BASE_FACTS, BASE_FACTS[0]] }, { ...v, facts: BASE_FACTS })).toBe("Research more rejected: facts shrank from 8 to 7.");
+    expect(researchExpansionError({ ...OLD, sources: [...BASE_SOURCES, BASE_SOURCES[0]] }, { ...v, sources: BASE_SOURCES })).toBe("Research more rejected: sources shrank from 6 to 5.");
+    expect(researchExpansionError(OLD, { ...v, moments: v.moments.slice(0, 7) })).toBe("Research more rejected: moments shrank from 8 to 7.");
+  });
+
+  test("5. a refresh that keeps everything but adds no fact, source or moment is rejected; a new summary is not evidence", async () => {
+    await rejectedRefresh(
+      { research_verify: () => ({ ...structuredClone(OLD), summary: "A richer-sounding summary.", productionNote: "A new note." }) },
+      "Research more rejected: no new verified evidence was added.",
+    );
+  });
+
+  test("6. a valid additive expansion (7/8/5 -> 9/10/7) passes, and growth in any one count is enough", () => {
+    const v = pkg("VERIFIED-3");
+    expect([v.facts.length, v.moments.length, v.sources.length]).toEqual([9, 10, 7]);
+    expect(researchExpansionError(OLD, v)).toBeNull();
+    expect(researchExpansionError(OLD, { ...structuredClone(OLD), moments: v.moments })).toBeNull();
+    expect(researchExpansionError(OLD, { ...structuredClone(OLD), facts: v.facts, sources: v.sources })).toBeNull();
+  });
+
+  test("7. the audit cannot erase the baseline: a fact it drops is caught after the verification, before any script work", async () => {
+    const a2 = pkg("AUDITED-2");
+    await rejectedRefresh(
+      {
+        research_audit: () => ({ ...a2, facts: without(a2.facts, 6) }),
+        research_verify: (input) => JSON.parse(input.split("AUDITED RESEARCH TO VERIFY:\n")[1]), // passes the audit through
+      },
+      'Research more rejected: existing verified fact was lost: "Locked fact 7: verified on 7 March."',
+    );
+  });
+
+  test("9. a legacy pair-first job is rejected the same way, with no Long or Short write", async () => {
+    const v = pkg("VERIFIED-3");
+    await rejectedRefresh({ research_verify: () => ({ ...v, sources: without(v.sources, 4) }) }, `Research more rejected: existing verified source was lost: ${URL(5)}`, false);
   });
 });
 

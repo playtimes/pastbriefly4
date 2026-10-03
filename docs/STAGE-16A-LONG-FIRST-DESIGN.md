@@ -368,6 +368,12 @@ pack was too thin: one targeted three-pass research refresh of the current
 package from the Director's request, then a new draft by the normal writer and
 fidelity audit, saved only if all of it succeeds) both re-run Text QA on the new
 draft. The job stays at awaiting_text, pre-media, until Approve & continue.
+Research more is additive enrichment: it cannot silently remove previously
+verified facts or sources. A refreshed package that loses a current fact (its
+exact text and sourceUrl) or source URL, has fewer facts, sources or moments, or
+adds none is rejected before any script work; its research cost stays charged
+and the current research, draft and Text QA result stay. Correcting a verified
+fact is a separate human decision, never a side effect of Research more.
 
 **No empty Short state.** Absence means absence: a Long-first job never
 persists a placeholder such as `short: ""`, `short: {}`, `shortShots: []`,

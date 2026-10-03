@@ -186,9 +186,13 @@ export async function researchStory(story: Story): Promise<ResearchPackage> {
 // audit and the same final fact verification. Returns the verified package and
 // saves nothing: the caller replaces the job's research only once everything
 // after it has also succeeded. Mock and the fixture return the package as it is.
+// The current verified facts and source URLs are a locked baseline: the audit and
+// the verification see it too, so they do not prune it away; the caller still
+// checks the result with researchExpansionError.
 export async function researchStoryMore(story: Story, current: ResearchPackage, feedback: string): Promise<ResearchPackage> {
   if (story.slug === "paul-bunyan" || config.mode !== "live") return current;
   const head = `STORY: ${story.title}\nYEAR: ${story.year}\nPLACE: ${story.place}\nHOOK: ${story.hook}`;
+  const locked = lockedBaseline(current);
 
   const expanded = await respondJson<ResearchPackage>({
     instructions: RESEARCH_MORE_INSTRUCTIONS,
@@ -200,7 +204,7 @@ export async function researchStoryMore(story: Story, current: ResearchPackage, 
 
   const audited = await respondJson<ResearchPackage>({
     instructions: RESEARCH_AUDIT_INSTRUCTIONS,
-    input: `${head}\n\nDRAFT RESEARCH TO AUDIT:\n${JSON.stringify(expanded, null, 2)}`,
+    input: `${head}\n\n${locked}\n\nDRAFT RESEARCH TO AUDIT:\n${JSON.stringify(expanded, null, 2)}`,
     schemaName: "research_audit",
     schema: RESEARCH_SCHEMA,
     webSearch: true,
@@ -208,11 +212,40 @@ export async function researchStoryMore(story: Story, current: ResearchPackage, 
 
   return respondJson<ResearchPackage>({
     instructions: RESEARCH_VERIFY_INSTRUCTIONS,
-    input: `${head}\n\nAUDITED RESEARCH TO VERIFY:\n${JSON.stringify(audited, null, 2)}`,
+    input: `${head}\n\n${locked}\n\nAUDITED RESEARCH TO VERIFY:\n${JSON.stringify(audited, null, 2)}`,
     schemaName: "research_verify",
     schema: RESEARCH_SCHEMA,
     webSearch: true,
   });
+}
+
+// The enrichment's baseline, stated to the audit and the verification of a
+// Research more (never to the initial research).
+function lockedBaseline(current: ResearchPackage): string {
+  const facts = current.facts.map((f) => `- ${JSON.stringify(f.fact)} (sourceUrl: ${f.sourceUrl})`).join("\n");
+  const sources = current.sources.map((s) => `- ${s.url}`).join("\n");
+  return `LOCKED BASELINE: this package ENRICHES an earlier verified package. THESE EXISTING VERIFIED FACTS AND SOURCE URLS MUST SURVIVE THIS ENRICHMENT. Return every fact below in "facts" verbatim with the same sourceUrl, keep every source URL below in "sources" (its note may improve), and keep at least ${current.moments.length} moments. If new evidence conflicts with a locked fact, keep the locked fact and add the conflicting evidence as its own attributed fact, noting the disagreement in the productionNote.\nLOCKED FACTS:\n${facts || "- (none)"}\nLOCKED SOURCE URLS:\n${sources || "- (none)"}`;
+}
+
+// Research more is additive. The refreshed package must keep every current fact
+// (the same text with the same sourceUrl) and every current source URL, must not
+// have fewer facts, sources or moments, and must add at least one of them. Exact
+// matches only: a correction to a verified fact is a separate human decision,
+// never a side effect of an enrichment. Returns the reason to reject, or null.
+export function researchExpansionError(current: ResearchPackage, refreshed: ResearchPackage): string | null {
+  const facts = new Set(refreshed.facts.map((f) => `${f.fact.trim()}\n${f.sourceUrl.trim()}`));
+  for (const f of current.facts) {
+    if (!facts.has(`${f.fact.trim()}\n${f.sourceUrl.trim()}`)) return `Research more rejected: existing verified fact was lost: "${f.fact.trim()}"`;
+  }
+  const urls = new Set(refreshed.sources.map((s) => s.url.trim()));
+  for (const s of current.sources) {
+    if (!urls.has(s.url.trim())) return `Research more rejected: existing verified source was lost: ${s.url.trim()}`;
+  }
+  for (const key of ["facts", "sources", "moments"] as const) {
+    if (refreshed[key].length < current[key].length) return `Research more rejected: ${key} shrank from ${current[key].length} to ${refreshed[key].length}.`;
+  }
+  const grew = (["facts", "sources", "moments"] as const).some((key) => refreshed[key].length > current[key].length);
+  return grew ? null : "Research more rejected: no new verified evidence was added.";
 }
 
 function worldFromStory(s: Story): StoryWorld {
@@ -284,9 +317,11 @@ You are given the story, its CURRENT verified research package (summary, moments
 
 Use fresh web search, aimed specifically at the evidence the Director asked for. Prefer (1) official documents, government records and archives; (2) museums and national historical institutions; (3) universities and academic material; (4) strong reputable secondary sources. Never let a weaker source override a stronger one.
 
-EXPAND, DO NOT REWRITE: keep the strange central premise and the causal story. Preserve every already-verified fact unless a stronger source corrects it. Add concrete, useful events - real people, actions, places and dates - rather than filler. When strong sources establish a distinct event, add it as its own moment, in chronological order. Add a concrete fact (with its strongest source) for every new date, actor, location, action or sequence step. Resolve contradictions with the strongest source, or keep the disagreement attributed. Do not weaken strong existing sourcing, do not pad toward a runtime, and do not invent: if the evidence for something the Director asked about cannot be found, leave it out.
+THIS IS ADDITIVE RESEARCH. EXISTING VERIFIED FACTS ARE LOCKED: copy every existing entry of "facts" forward verbatim, with the same sourceUrl. Retain every existing source URL. Do not reduce the number of moments. Add new evidence; never rewrite the package smaller. If new evidence conflicts with an existing verified fact, keep the locked fact unchanged and add the conflicting evidence as its own clearly attributed fact (and note the disagreement in the productionNote); never silently replace or remove the locked fact.
 
-SOURCES: every source URL must come from a page you actually found or consulted in THIS research. Never invent or reconstruct a URL. Keep the existing sources that still support the package. Each source note must describe what that source actually supports.
+EXPAND, DO NOT REWRITE: keep the strange central premise and the causal story. Add concrete, useful events - real people, actions, places and dates - rather than filler. When strong sources establish a distinct event, add it as its own moment, in chronological order (you may improve the wording of existing moments). Add a concrete fact (with its strongest source) for every new date, actor, location, action or sequence step. Do not weaken strong existing sourcing, do not pad toward a runtime, and do not invent: if the evidence for something the Director asked about cannot be found, leave it out.
+
+SOURCES: every NEW source URL must come from a page you actually found or consulted in THIS research. Never invent or reconstruct a URL. Keep every existing source; its note may improve. Each source note must describe what that source actually supports.
 
 ${SUMMARY_RULE}
 
