@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -164,7 +164,9 @@ const { createJob, getJob, updateJob, upsertStory, videosForStory, resumableJobI
 const { db } = await import("../src/server/db.ts");
 const { config, DATA_DIR } = await import("../src/server/config.ts");
 const { PRICING, assetReviewUsd, ttsUsd, round } = await import("../src/server/pricing.ts");
-const { storyDir, inStory, retainedArchiveDir } = await import("../src/production/paths.ts");
+const { storyDir, inStory, retainedArchiveDir, isProductionMedia, clearWorkingVisuals, ensureProductionDirs } = await import("../src/production/paths.ts");
+const { productionMediaPrefix, productionRel } = await import("../src/types.ts");
+const { recordNarration } = await import("../src/production/narration.ts");
 const { causalClaims, issueAssets } = await import("../src/production/finalFilmQa.ts");
 const { cellTimes } = await import("../src/render/contactSheet.ts");
 const { paulBunyanStory, paulBunyanResearch, paulBunyanScripts } = await import("../src/production/fixtures/paulBunyan.ts");
@@ -463,7 +465,7 @@ describe("1, 3. the whole Long-first path in mock mode", () => {
     expect(scratchOf(job.id).longComplete).toEqual({ videoId: `${job.id}-long`, at: expect.any(String) });
     expect(scratchOf(job.id).finalFilmQa).toEqual({ outputsValidated: true, long: {} });
     expect(longCompleteJobIds(story.id)).toEqual([job.id]);
-    expect(files(story.slug)).toContain("audio/long.wav");
+    expect(files(story.slug)).toContain(`jobs/${job.id}/audio/long.wav`); // the job's own media workspace
     expectNoShort(job.id, story.slug);
     expect(h.calls).toEqual([]); // mock: no model call at all
   });
@@ -678,7 +680,7 @@ describe("6. the Long's finished-film review", () => {
       if (opts.schemaName === "final_film_visual_audit" && !h.reviewCells) {
         const shots = scratchOf(job.id).longShots;
         const owner = shots.find((s: any) => s.archiveQuery && s.edit === "new")!;
-        const plan = h.plans[inStory(story.slug, "renders/long.mp4")];
+        const plan = h.plans[inStory(story.slug, `jobs/${job.id}/renders/long.mp4`)];
         const duration = plan.durationInFrames / plan.fps + 0.03;
         const times = cellTimes(duration, "long");
         // The cells the product's own mapping puts on that asset (an issue names two or more).
@@ -699,7 +701,11 @@ describe("6. the Long's finished-film review", () => {
     expect(h.renders).toEqual([["long.mp4"], ["long.mp4"]]); // the Long, then the Long again
     expect(labels().filter((l) => /factual|visual/.test(l))).toEqual(["long-factual", "long-visual", "long-visual"]);
     const owner = s.longShots.find((x: any) => x.archiveQuery && x.edit === "new");
-    expect(owner).toMatchObject({ truth: "archive", path: expect.stringMatching(/^archive\/long-\d\d\.jpg$/) });
+    expect(owner).toMatchObject({ truth: "archive", path: expect.stringMatching(new RegExp(`^jobs/${job.id}/archive/long-\\d\\d\\.jpg$`)) });
+    // The recovered archive was found, reviewed and rendered from the job's own
+    // workspace: the scoped path is still an archive file to the ledger and repair.
+    expect(isProductionMedia(owner.path, "archive")).toBe(true);
+    expect(getJob(job.id)!.state).toBe("done");
     expect(videosForStory(story.id).map((x) => x.kind)).toEqual(["long"]);
     expect(getJob(job.id)!.spent).toBe(expectedSpend());
     expectNoShort(job.id, story.slug);
@@ -744,10 +750,10 @@ describe("8. this story's retained archive reaches the Long Coverage call as scr
     expect(cov.input).not.toContain("archive-retained");
     expect(cov.instructions).toContain("SCREENED ARCHIVE CANDIDATES");
 
-    // The planned archive is acquired by the normal search into the working folder.
+    // The planned archive is acquired by the normal search into the job's own working folder.
     expect(h.provider.some((p) => /^archive:long-\d\d\.jpg$/.test(p))).toBe(true);
     const owner = scratchOf(job.id).longShots.find((x: any) => x.archiveQuery && x.edit === "new");
-    expect(owner.path).toMatch(/^archive\/long-\d\d\.jpg$/);
+    expect(owner.path).toMatch(new RegExp(`^jobs/${job.id}/archive/long-\\d\\d\\.jpg$`));
     const plans = JSON.stringify(Object.values(h.plans));
     expect(plans).not.toContain(DATA_DIR);
     expect(plans).not.toContain("archive-retained");
@@ -943,5 +949,232 @@ describe("a manual revision invalidates the last Text QA result (Long-first)", (
     expect(store.getScripts(story.id)).toEqual({ long: REVISED });
     expect(h.provider).toEqual([]); // no narration or media
     expectNoShort(job.id, story.slug);
+  });
+});
+
+describe("12. a Long-first job's media live in its own jobs/<jobId>/ workspace; a legacy job keeps the story root", () => {
+  // An earlier production of the same story, at the story root as a legacy job
+  // left it (the old Crijnssen shape): every stage of a new Long-first job must
+  // leave these bytes exactly as they were.
+  const OLD_FILES = [
+    "audio/long.mp3",
+    "audio/short.mp3",
+    "images/hero.png",
+    ...Array.from({ length: 40 }, (_, i) => `images/long-${String(i).padStart(2, "0")}.png`),
+    "images/short-00.png",
+    "archive/long-01.jpg",
+    "archive/short-02.jpg",
+    "motion/long-02.mp4",
+    "motion/long-02.mp4.req.json",
+    "renders/long.mp4",
+    "renders/short.mp4",
+  ];
+  function seedOldProduction(slug: string): Map<string, string> {
+    const before = new Map<string, string>();
+    for (const rel of OLD_FILES) {
+      const abs = inStory(slug, rel);
+      mkdirSync(path.dirname(abs), { recursive: true });
+      writeFileSync(abs, `OLD PRODUCTION ${rel}`);
+      before.set(rel, sha(readFileSync(abs)));
+    }
+    return before;
+  }
+  function expectOldUntouched(slug: string, before: Map<string, string>): void {
+    for (const [rel, hash] of before) {
+      expect(existsSync(inStory(slug, rel)), rel).toBe(true);
+      expect(sha(readFileSync(inStory(slug, rel))), rel).toBe(hash);
+    }
+  }
+  const stillShot = (index: number, extra: Record<string, unknown> = {}) =>
+    ({ index, edit: "new", truth: "reconstruction", prompt: `A scene ${index}.`, assetId: `L${index}`, presentation: "base", motion: "hold", ...extra }) as any;
+
+  test("the prefix: jobs/<jobId> for a Long-first job, empty for a legacy job; a job id that could escape the folder is refused", () => {
+    expect(productionMediaPrefix("abc", true)).toBe("jobs/abc");
+    expect(productionMediaPrefix("abc", false)).toBe("");
+    expect(productionRel("jobs/abc", "images/hero.png")).toBe("jobs/abc/images/hero.png");
+    expect(productionRel("", "images/hero.png")).toBe("images/hero.png");
+    for (const bad of ["../x", "a/b", "", "a b"]) expect(() => productionMediaPrefix(bad, true)).toThrow(/cannot name a media folder/);
+  });
+
+  test("1, 2. every writer puts a Long-first job's file under jobs/<jobId>/ and a legacy job's at the story root, exactly as before", async () => {
+    config.mode = "live";
+    for (const [prefix, at] of [["jobs/abc", "jobs/abc/"], ["", ""]] as const) {
+      const story = newStory();
+      ensureProductionDirs(story.slug, prefix);
+      const nar = await recordNarration(story.slug, "long", "One short line.", prefix);
+      expect(nar.audioRel).toBe(`${at}audio/long.mp3`);
+      expect(nar.audioMediaRel).toBe(`stories/${story.slug}/${at}audio/long.mp3`);
+      expect(await v.ensureMaster(story, paulBunyanResearch.world, prefix)).toBe(`${at}images/hero.png`);
+      const still = stillShot(0);
+      expect(await v.acquireStill(story, "long", still, null, new Map(), undefined, undefined, "job", prefix)).toBe("generated");
+      expect(still.path).toBe(`${at}images/long-00.png`);
+      const archive = stillShot(1, { truth: "archive", archiveQuery: "Hughes Glomar Explorer 1974" });
+      expect(await v.acquireStill(story, "long", archive, null, new Map(), undefined, undefined, "job", prefix)).toBe("archive");
+      expect(archive.path).toBe(`${at}archive/long-01.jpg`);
+      await v.acquireMotion(story, "long", still, prefix);
+      expect(still.motionPath).toBe(`${at}motion/long-00.mp4`);
+      for (const rel of [nar.audioRel, `${at}images/hero.png`, still.path, archive.path, still.motionPath]) expect(existsSync(inStory(story.slug, rel)), rel).toBe(true);
+    }
+  });
+
+  test("3. clearing a Long-first job's working visuals touches its own workspace only; the legacy clear keeps its old story-root semantics", () => {
+    const story = newStory();
+    const before = seedOldProduction(story.slug);
+    const mine = "jobs/new-job";
+    ensureProductionDirs(story.slug, mine);
+    for (const rel of ["images/hero.png", "images/long-00.png", "images/short-03.webp", "archive/long-01.jpg", "motion/long-00.mp4", "audio/long.mp3", "renders/long.mp4"]) writeFileSync(inStory(story.slug, `${mine}/${rel}`), "new");
+    clearWorkingVisuals(story.slug, mine);
+    expectOldUntouched(story.slug, before);
+    const left = files(story.slug).filter((f) => f.startsWith(`${mine}/`)).sort();
+    expect(left).toEqual([`${mine}/audio/long.mp3`, `${mine}/images/hero.png`, `${mine}/renders/long.mp4`]);
+    for (const sub of ["archive", "images", "motion", "audio", "renders"]) expect(existsSync(inStory(story.slug, `${mine}/${sub}`))).toBe(true);
+
+    // The legacy clear is what it always was: story-root shot stills, archive and
+    // motion go; hero, audio and renders stay; a job workspace is not its business.
+    clearWorkingVisuals(story.slug);
+    const root = files(story.slug).filter((f) => !f.startsWith("jobs/")).sort();
+    expect(root).toEqual(["audio/long.mp3", "audio/short.mp3", "images/hero.png", "renders/long.mp4", "renders/short.mp4"]);
+    expect(files(story.slug).filter((f) => f.startsWith(`${mine}/`)).sort()).toEqual(left);
+  });
+
+  test("4. an old story-root still is never taken as a Long-first job's own (a legacy job still reuses it, as before)", async () => {
+    const story = newStory();
+    const before = seedOldProduction(story.slug);
+    config.mode = "mock";
+    const scoped = stillShot(0);
+    expect(await v.acquireStill(story, "long", scoped, null, new Map(), undefined, undefined, "abc", "jobs/abc")).toBe("mock");
+    expect(scoped.path).toBe("jobs/abc/images/long-00.png");
+    config.mode = "live";
+    const live = stillShot(1);
+    expect(await v.acquireStill(story, "long", live, null, new Map(), undefined, undefined, "abc", "jobs/abc")).toBe("generated");
+    expect(live.path).toBe("jobs/abc/images/long-01.png");
+    expectOldUntouched(story.slug, before);
+    const legacy = stillShot(2);
+    expect(await v.acquireStill(story, "long", legacy, null, new Map(), undefined, undefined, "legacy")).toBe("existing");
+    expect(legacy.path).toBe("images/long-02.png");
+  });
+
+  test("1, 5, 6, 10. a whole live Long-first run next to an earlier production: every file in jobs/<jobId>/, the preview and the registered Video there too, the old bytes untouched, no Short", async () => {
+    config.mode = "live";
+    const story = newStory();
+    const before = seedOldProduction(story.slug);
+    const job = longFirstJob(story);
+    const at = `jobs/${job.id}/`;
+    expect(await runJob(job.id)).toBe("text_gate");
+    await autoTextQaForJob(job.id);
+    approveTextForJob(job.id);
+    expect(await runJob(job.id)).toBe("preview_gate");
+    // The preview the person reviews serves the job's own stills.
+    const preview = JSON.stringify(getJob(job.id)!.preview);
+    expect(preview).toContain(`stories/${story.slug}/${at}images/`);
+    expect(preview).not.toMatch(new RegExp(`stories/${story.slug}/(images|archive|motion)/`));
+    await drive(job.id);
+    expect(getJob(job.id)!.state).toBe("done");
+
+    const s = scratchOf(job.id);
+    expect(s.narration.long.audioRel).toBe(`${at}audio/long.mp3`);
+    expect(s.narration.long.audioMediaRel).toBe(`stories/${story.slug}/${at}audio/long.mp3`);
+    expect(s.masterRef).toBe(`${at}images/hero.png`);
+    for (const shot of s.longShots) {
+      expect(shot.path.startsWith(at), shot.path).toBe(true);
+      if (shot.motionPath) expect(shot.motionPath).toMatch(new RegExp(`^${at}motion/long-\\d\\d\\.mp4$`));
+    }
+    expect(s.longShots.some((x: any) => isProductionMedia(x.path, "archive"))).toBe(true);
+    // The render: the job's file, from a plan whose every asset is the job's.
+    const out = inStory(story.slug, `${at}renders/long.mp4`);
+    expect(Object.keys(h.plans)).toContain(out);
+    expect(Object.keys(h.plans).filter((k) => k.startsWith(storyDir(story.slug)))).toEqual([out]);
+    const plan = h.plans[out];
+    expect(plan.audio).toBe(`${at}audio/long.mp3`);
+    expect(JSON.stringify(plan)).not.toMatch(/"(images|archive|motion|audio)\//);
+    expect(videosForStory(story.id).map((x) => x.path)).toEqual([`stories/${story.slug}/${at}renders/long.mp4`]);
+
+    // Everything this job wrote is in its workspace; the earlier production is untouched.
+    const written = files(story.slug).filter((f) => !before.has(f));
+    expect(written.length).toBeGreaterThan(0);
+    expect(written.filter((f) => !f.startsWith(at))).toEqual([]);
+    for (const rel of ["audio/long.mp3", "images/hero.png"]) expect(written).toContain(`${at}${rel}`);
+    expect(written.some((f) => new RegExp(`^${at}images/long-\\d\\d\\.png$`).test(f))).toBe(true);
+    expect(written.some((f) => new RegExp(`^${at}archive/long-\\d\\d\\.jpg$`).test(f))).toBe(true);
+    expect(written.some((f) => new RegExp(`^${at}motion/long-\\d\\d\\.mp4$`).test(f))).toBe(true);
+    expect(written.filter((f) => /short/i.test(f))).toEqual([]);
+    expectOldUntouched(story.slug, before);
+    expect(getJob(job.id)!.spent).toBe(expectedSpend());
+    expect(h.scans.flat()).toEqual([]);
+  });
+
+  test("7. a crash mid-stills resumes from the job's saved paths; no story-root file is ever adopted as the job's work", async () => {
+    config.mode = "live";
+    const story = newStory();
+    const before = seedOldProduction(story.slug);
+    const job = longFirstJob(story);
+    h.crash = { label: "image", nth: 4 };
+    await drive(job.id);
+    expect(getJob(job.id)!.state).toBe("failed");
+    const saved = (h.snapshot.scratch.longShots as any[]).filter((x) => x.path).map((x) => x.path);
+    expect(saved.length).toBeGreaterThan(0);
+    expect(saved.every((p: string) => p.startsWith(`jobs/${job.id}/`))).toBe(true);
+    updateJob(job.id, { ...h.snapshot });
+    await drive(job.id);
+    expect(getJob(job.id)!.state).toBe("done");
+    const shots = scratchOf(job.id).longShots as any[];
+    expect(shots.every((x) => x.path.startsWith(`jobs/${job.id}/`))).toBe(true);
+    for (const p of saved) expect(shots.some((x) => x.path === p)).toBe(true); // the saved stills, kept
+    const images = h.provider.filter((p) => p.startsWith("image:"));
+    expect(new Set(images).size).toBe(images.length); // none made twice
+    expectOldUntouched(story.slug, before);
+  });
+
+  test("8, 9. a scoped generated still is regenerable, regenerates in place, and a scoped archive seeds the ledger", async () => {
+    config.mode = "live";
+    const story = newStory();
+    const before = seedOldProduction(story.slug);
+    const job = longFirstJob(story);
+    await runJob(job.id);
+    approveTextForJob(job.id);
+    expect(await runJob(job.id)).toBe("preview_gate");
+    const shots = scratchOf(job.id).longShots as any[];
+    const targets = aq.assetQaTargets("long", shots);
+    const gen = targets.find((t) => t.truth === "reconstruction")!;
+    expect(gen.path.startsWith(`jobs/${job.id}/images/`)).toBe(true);
+    expect(gen.regenerable).toBe(true);
+    const arc = targets.find((t) => t.truth === "archive")!;
+    expect(arc.path.startsWith(`jobs/${job.id}/archive/`)).toBe(true);
+    expect(arc.regenerable).toBe(false);
+
+    writeFileSync(inStory(story.slug, gen.path), "before regeneration");
+    await g.regenerateStill(job.id, "long", gen.owner, "Calmer sea.");
+    const after = (scratchOf(job.id).longShots as any[]).find((x) => x.index === gen.owner);
+    expect(after.path).toBe(gen.path); // replaced in place, inside the workspace
+    expect(readFileSync(inStory(story.slug, gen.path), "utf8")).toBe(`still ${path.basename(gen.path)}`);
+
+    const ledger = v.seedArchiveLedger(story, [["long", shots]]);
+    expect([...ledger.values()]).toEqual([v.archiveOwner("long", shots.find((x) => x.path === arc.path))]);
+    expect(isProductionMedia(`jobs/${job.id}/images/long-00.png`, "images")).toBe(true);
+    expect(isProductionMedia("images/long-00.png", "images")).toBe(true);
+    expect(isProductionMedia(`jobs/${job.id}/archive/long-01.jpg`, "archive")).toBe(true);
+    for (const no of ["xjobs/a/images/x.png", "jobs/a/b/images/x.png", "jobs/../images/x.png", "jobs/a/images/sub/x.png", "notimages/x.png", "archive/long-01.jpg"]) expect(isProductionMedia(no, "images"), no).toBe(false);
+    expectOldUntouched(story.slug, before);
+  });
+
+  test("2. a legacy pair-first job keeps every story-root path: narration, master, stills, renders and its Video rows", async () => {
+    const story = newStory();
+    const job = createJob({ id: newJobId(), storyId: story.id, mock: false, estimatedCost: 5, approvedMax: 50 });
+    h.jobId = job.id;
+    h.liveAfterRender = true; // mock until the render, then the live finish, as the pair suites run it
+    await runJob(job.id);
+    approveTextForJob(job.id);
+    await runJob(job.id);
+    approveVisualsForJob(job.id);
+    await runJob(job.id);
+    expect(getJob(job.id)!.state).toBe("done");
+    const s = scratchOf(job.id);
+    expect(s.flow).toBeUndefined();
+    expect([s.narration.long.audioRel, s.narration.short.audioRel]).toEqual(["audio/long.wav", "audio/short.wav"]);
+    expect(s.masterRef).toBe("images/hero.png");
+    for (const shot of [...s.longShots, ...s.shortShots]) expect(shot.path).toMatch(/^images\/(long|short)-\d\d\.png$/);
+    expect(Object.keys(h.plans).filter((k) => k.startsWith(storyDir(story.slug))).sort()).toEqual([inStory(story.slug, "renders/long.mp4"), inStory(story.slug, "renders/short.mp4")].sort());
+    expect(videosForStory(story.id).map((x) => x.path).sort()).toEqual([`stories/${story.slug}/renders/long.mp4`, `stories/${story.slug}/renders/short.mp4`]);
+    expect(files(story.slug).filter((f) => f.startsWith("jobs/"))).toEqual([]);
   });
 });

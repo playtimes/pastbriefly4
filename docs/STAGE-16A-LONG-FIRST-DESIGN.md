@@ -375,6 +375,13 @@ adds none is rejected before any script work; its research cost stays charged
 and the current research, draft and Text QA result stay. Correcting a verified
 fact is a separate human decision, never a side effect of Research more.
 
+**Job-scoped media.** New Long-first productions use a job-scoped media
+workspace, `jobs/<jobId>/` inside the story folder (narration, master and shot
+stills, archive working copies, motion and the render; the Long's Video row
+points there), so producing a story again can never overwrite or delete an
+earlier production's media. Legacy pair-first jobs keep their existing
+story-root paths. The retained archive stays story-scoped under DATA_DIR.
+
 **No empty Short state.** Absence means absence: a Long-first job never
 persists a placeholder such as `short: ""`, `short: {}`, `shortShots: []`,
 `retainedPresentations.short` or `finalFilmQa.short`. Where a shared helper

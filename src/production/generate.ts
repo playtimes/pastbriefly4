@@ -36,7 +36,8 @@ interface QaRunContext {
 import { buildFilm } from "../app/visualReview/model.ts";
 import { sequenceAttentionFlags, sequenceCleanup, OPENING_SEC, ENDING_SEC, type CleanupPattern } from "../app/visualReview/board.ts";
 import { now } from "../server/db.ts";
-import { clearWorkingVisuals, ensureStoryDirs, inStory, mediaRel, storyDir } from "./paths.ts";
+import { clearWorkingVisuals, ensureProductionDirs, inStory, isProductionMedia, mediaRel, storyDir } from "./paths.ts";
+import { productionMediaPrefix, productionRel } from "../types.ts";
 import { recordArchiveReview, retainedArchiveInventory } from "./archiveRetention.ts";
 import { researchStory, researchStoryMore, researchExpansionError } from "./research.ts";
 import { writeScript, auditScripts, auditLongScript, reviseStoryText, reviseLongText, reviewStoryDraft, reviewLongDraft, verifyStoryDraft, verifyLongDraft, textQaCallsProvider, type LongDraft, type RevisedText, type RevisedLongText } from "./scripts.ts";
@@ -208,7 +209,10 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
   if (!story) return;
 
   const scratch: Scratch = { ...(job.scratch as Scratch) };
-  ensureStoryDirs(story.slug);
+  // Every file this run writes goes inside the job's media prefix: a Long-first
+  // job's own jobs/<jobId>/ workspace, or a legacy job's story root.
+  const media = mediaPrefix(jobId, scratch);
+  ensureProductionDirs(story.slug, media);
   const accent = accentFor(story.category);
   const drafted = !scratch.scripts;
 
@@ -268,7 +272,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
         if (nar[kind]) continue;
         const text = scriptOf(scratch, kind)!;
         budget(job, ttsUsd(text.length), scratch);
-        nar[kind] = await recordNarration(story.slug, kind, text);
+        nar[kind] = await recordNarration(story.slug, kind, text, media);
         record(jobId, ttsUsd(text.length), scratch);
       }
     }
@@ -314,15 +318,17 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     // on resume/Continue: keyed off scratch, not hero.png existing (which may be a
     // discovery placeholder). Labelled as still work so a failure here reads as
     // image generation rather than the preceding narration step.
-    // No masterRef yet means this job has not started visual assets. Shot files
-    // are story-scoped, so clear an older job's shot stills, archive stills and
-    // motion first; otherwise acquireStill would find and reuse them. Once
-    // masterRef exists (resume, rebuild-visuals) this never runs again.
+    // No masterRef yet means this job has not started visual assets. A legacy
+    // job's shot files are story-scoped, so clear an older job's shot stills,
+    // archive stills and motion first; otherwise acquireStill would find and reuse
+    // them. A Long-first job clears only its own workspace: another production's
+    // files are never touched. Once masterRef exists (resume, rebuild-visuals)
+    // this never runs again.
     if (!scratch.masterRef) {
-      clearWorkingVisuals(story.slug);
+      clearWorkingVisuals(story.slug, media);
       step(jobId, "stills", "Creating the reference image", scratch);
       budget(job, PRICING.openai.image, scratch);
-      scratch.masterRef = await ensureMaster(story, research.world);
+      scratch.masterRef = await ensureMaster(story, research.world, media);
       record(jobId, PRICING.openai.image, scratch);
     }
     const master = scratch.masterRef;
@@ -337,7 +343,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
           // Preflight the possible reconstruction fallback so a failed archive
           // search can never push spend past the cap; charge only if it generated.
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId);
+          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId, media);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -350,7 +356,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
         // Only the owning ("new") slot acquires an asset; its reuses share that still below.
         if (shot.edit === "new" && !shot.path) {
           if (config.mode === "live") budget(job, PRICING.openai.image, scratch);
-          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId);
+          const result = await acquireStill(story, kind, shot, master, ledger, undefined, undefined, jobId, media);
           if (result === "generated") record(jobId, PRICING.openai.image, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -390,7 +396,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
       for (const shot of shots) {
         if (shot.edit === "new" && shot.wantsMotion && !shot.motionPath) {
           if (config.mode === "live") budget(job, PRICING.runway.video5s, scratch);
-          await acquireMotion(story, kind, shot);
+          await acquireMotion(story, kind, shot, media);
           if (shot.motionPath) record(jobId, PRICING.runway.video5s, scratch);
           else updateJob(jobId, { scratch });
         }
@@ -401,7 +407,7 @@ export async function runJob(jobId: string, opts: { autoApprovePreview?: boolean
     scratch.renderPercent = 0;
     step(jobId, "rendering", isLongFirst(scratch) ? "Rendering the film" : "Rendering the films", scratch);
     const plans = renderPlans(story, scratch, narration, accent);
-    await renderFilms(storyDir(story.slug), renderJobs(story, plans, filmKinds(scratch)), (fraction) => {
+    await renderFilms(storyDir(story.slug), renderJobs(story, plans, filmKinds(scratch), media), (fraction) => {
       // Persist only whole-percent changes, so the poll sees progress without a write per frame.
       const pct = Math.min(100, Math.floor(fraction * 100));
       if (pct === scratch.renderPercent) return;
@@ -429,9 +435,22 @@ function renderPlans(story: Story, scratch: Scratch, narration: { long: Narratio
   return { long, short: buildRenderPlan("short", story, scratch.shortShots!, narration.short!, accent) };
 }
 
-// One render job per film to (re)render, each to its fixed output file.
-function renderJobs(story: Story, plans: RenderPlans, kinds: FinalFilmKind[]) {
-  return kinds.map((kind) => ({ plan: plans[kind]!, compositionId: kind === "long" ? ("LongVideo" as const) : ("ShortVideo" as const), outPath: inStory(story.slug, `renders/${kind}.mp4`) }));
+// One render job per film to (re)render, each to its fixed output file inside
+// the job's media prefix. The story folder stays the publicDir: every saved asset
+// path is relative to it, a Long-first job's included.
+function renderJobs(story: Story, plans: RenderPlans, kinds: FinalFilmKind[], media: string) {
+  return kinds.map((kind) => ({ plan: plans[kind]!, compositionId: kind === "long" ? ("LongVideo" as const) : ("ShortVideo" as const), outPath: inStory(story.slug, finalRenderRel(media, kind)) }));
+}
+
+// A film's finished render, story-folder-relative: renders/<kind>.mp4 inside the
+// job's media prefix (a Long-first job's jobs/<jobId>/renders/long.mp4).
+function finalRenderRel(media: string, kind: FinalFilmKind): string {
+  return productionRel(media, `renders/${kind}.mp4`);
+}
+
+// This job's media prefix (productionMediaPrefix), from its flow alone.
+function mediaPrefix(jobId: string, scratch: Scratch): string {
+  return productionMediaPrefix(jobId, isLongFirst(scratch));
 }
 
 const FILM_NAME: Record<FinalFilmKind, string> = { long: "Long", short: "Short" };
@@ -464,7 +483,7 @@ async function finishFilms(job: JobRecord, story: Story, scratch: Scratch, plans
     plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short?: Narration }, accentFor(story.category));
   }
   const finals = filmKinds(scratch).map((kind) => {
-    const rel = `renders/${kind}.mp4`;
+    const rel = finalRenderRel(mediaPrefix(job.id, scratch), kind);
     const file = inStory(story.slug, rel);
     let p: Probe;
     try {
@@ -611,7 +630,7 @@ function archiveFallbacksInIssues(scratch: Scratch, kind: FinalFilmKind, duratio
   return ids.flatMap((id) => {
     const owner = shots.find((s) => s.assetId === id && s.edit === "new");
     const uses = shots.filter((s) => s.assetId === id);
-    return owner?.archiveQuery && owner.truth === "reconstruction" && owner.path?.startsWith("images/") && uses.every((s) => s.presentation === "base") ? [owner] : [];
+    return owner?.archiveQuery && owner.truth === "reconstruction" && !!owner.path && isProductionMedia(owner.path, "images") && uses.every((s) => s.presentation === "base") ? [owner] : [];
   });
 }
 
@@ -745,7 +764,7 @@ async function recoverFinalArchive(job: JobRecord, story: Story, scratch: Scratc
     for (const assetId of assets) {
       const owner = filmShots(scratch, film).find((s) => s.assetId === assetId && s.edit === "new")!;
       repair.tried.push({ film, assetId });
-      const got = await recoverArchiveStill(story, film, owner, ledger, job.id);
+      const got = await recoverArchiveStill(story, film, owner, ledger, job.id, mediaPrefix(job.id, scratch));
       if (got) found.push({ film, assetId, ...got });
     }
   }
@@ -903,7 +922,7 @@ async function diversifyFinalSequence(
 async function renderRepaired(job: JobRecord, story: Story, scratch: Scratch, kinds: FinalFilmKind[]): Promise<void> {
   step(job.id, "finishing", "Rendering the repaired film", scratch);
   const plans = renderPlans(story, scratch, scratch.narration as { long: Narration; short?: Narration }, accentFor(story.category));
-  await renderFilms(storyDir(story.slug), renderJobs(story, plans, kinds));
+  await renderFilms(storyDir(story.slug), renderJobs(story, plans, kinds, mediaPrefix(job.id, scratch)));
   delete scratch.finalFilmQa!.visualRepair!.rerender;
   updateJob(job.id, { scratch });
 }
@@ -922,7 +941,7 @@ export function resumeFinalVisualRepairForJob(jobId: string, approvedMax?: numbe
   const scratch = job.scratch as Scratch;
   if (job.state !== "awaiting_final" || !scratch.finalFilmQa) throw new Error("Only finished films waiting for review can be repaired.");
   // Only the job's own files: a Long-first job has no Short file to probe.
-  const durations = Object.fromEntries(filmKinds(scratch).map((k) => [k, probeVideo(inStory(story.slug, `renders/${k}.mp4`)).durationSec]));
+  const durations = Object.fromEntries(filmKinds(scratch).map((k) => [k, probeVideo(inStory(story.slug, finalRenderRel(mediaPrefix(jobId, scratch), k))).durationSec]));
   const plan = finalVisualRepairPlan(scratch, durations, kind);
   if (!plan) throw new Error(kind ? `The finished ${FILM_NAME[kind]} has no automatic visual repair available.` : "These finished films have no automatic archive repair available.");
   const max = approvedMax === undefined ? job.approvedMax : round(approvedMax);
@@ -1755,7 +1774,7 @@ export async function regenerateStill(jobId: string, kind: "long" | "short", ind
   if (!shots || !shot) throw new Error(`No ${kind} slot ${index}.`);
   if (shot.edit !== "new") throw new Error(`${kind} slot ${index} reuses asset ${shot.assetId}; regenerate its owner slot ${shot.assetShot} instead.`);
   if (shot.truth !== "reconstruction" && shot.truth !== "graphic") throw new Error(`${kind} slot ${index} is an archive still and is never regenerated.`);
-  if (!shot.path || !shot.path.startsWith("images/")) throw new Error(`${kind} slot ${index} has no generated still.`);
+  if (!shot.path || !isProductionMedia(shot.path, "images")) throw new Error(`${kind} slot ${index} has no generated still.`);
   if (regenerating.has(jobId)) throw new Error("A still is already being regenerated for this job.");
 
   regenerating.add(jobId);

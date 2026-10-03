@@ -5,7 +5,7 @@ import { More, moreItem } from "../More.tsx";
 import { DISPLAY_STAGES, stageIndex, stageLabel, stageProgress, type CompletePair, type DisplayStage } from "../productionStage.ts";
 import type { VisualIssue } from "../visualReview/visualIssues.ts";
 import { Still } from "../visualReview/Still.tsx";
-import type { FinalQaIssue, Job, TextQaSection, TextQaState, Video, VideoKind } from "../../types.ts";
+import { productionRel, type FinalQaIssue, type Job, type TextQaSection, type TextQaState, type Video, type VideoKind } from "../../types.ts";
 import type { ReviewTab } from "./Creating.tsx";
 
 // The plain faces of the Production screen (/story/:slug/creating): Running,
@@ -237,8 +237,9 @@ const AREA_HEADLINE: Record<FinalQaIssue["area"], string> = {
 };
 
 // The finished render at the final gate. It is not a Video row until the films
-// are accepted, so it is addressed by its fixed place in the story's media.
-export const finalRenderUrl = (slug: string, film: VideoKind): string => mediaUrl(`stories/${slug}/renders/${film}.mp4`);
+// are accepted, so it is addressed by its fixed place in the story's media,
+// inside the job's media prefix (a Long-first job's jobs/<jobId>/).
+export const finalRenderUrl = (slug: string, film: VideoKind, media = ""): string => mediaUrl(`stories/${slug}/${productionRel(media, `renders/${film}.mp4`)}`);
 
 const concerns = (n: number): string => (n === 1 ? "1 concern" : `${n} concerns`);
 const quiet = "btn btn-ghost min-h-11";
@@ -310,6 +311,7 @@ export function FinalException(props: { storyTitle: string; issues: FinalQaIssue
 // switching and going back change nothing on the server.
 export function FinalFilmReview(props: {
   slug: string;
+  media?: string; // the job's media prefix (productionMediaPrefix)
   film: VideoKind;
   issues: FinalQaIssue[];
   onFilm: (film: VideoKind) => void;
@@ -339,7 +341,7 @@ export function FinalFilmReview(props: {
           )}
         </div>
       </div>
-      <FilmPlayer key={film} kind={film} src={finalRenderUrl(props.slug, film)} />
+      <FilmPlayer key={film} kind={film} src={finalRenderUrl(props.slug, film, props.media)} />
       {mine.length > 0 && (
         <section className="flex flex-col max-w-[760px]">
           <p className={kicker}>PB4 noticed</p>

@@ -1,22 +1,24 @@
 import { config } from "../server/config.ts";
 import { narrate as elevenNarrate, type WordTiming } from "../providers/elevenlabs.ts";
 import { inStory, mediaRel } from "./paths.ts";
+import { productionRel } from "../types.ts";
 import { writeSilentWav } from "./mockAssets.ts";
 import { plainDashes, words as splitWords } from "./text.ts";
 
 export interface Narration {
-  audioRel: string; // story-folder-relative (for staticFile)
+  audioRel: string; // story-folder-relative (for staticFile), inside the job's media prefix
   audioMediaRel: string; // media-relative (for HTTP)
   durationSec: number;
   words: WordTiming[];
 }
 
 // The text is dash-normalised again here so a script stored before that rule
-// (a resumed job) still reaches the voice with plain hyphens only.
-export async function recordNarration(slug: string, kind: "long" | "short", script: string): Promise<Narration> {
+// (a resumed job) still reaches the voice with plain hyphens only. `prefix` is
+// the job's media prefix (productionMediaPrefix): "" keeps a legacy job's audio/.
+export async function recordNarration(slug: string, kind: "long" | "short", script: string, prefix = ""): Promise<Narration> {
   const text = plainDashes(script);
   if (config.mode === "live") {
-    const rel = `audio/${kind}.mp3`;
+    const rel = productionRel(prefix, `audio/${kind}.mp3`);
     const timings = await elevenNarrate(text, inStory(slug, rel));
     const durationSec = (timings.at(-1)?.end ?? 0) + 0.4;
     return { audioRel: rel, audioMediaRel: mediaRel(slug, rel), durationSec, words: timings };
@@ -25,7 +27,7 @@ export async function recordNarration(slug: string, kind: "long" | "short", scri
   // Mock: deterministic word timings + a silent track of the matching length.
   const timings = mockTimings(text);
   const durationSec = (timings.at(-1)?.end ?? 1) + 0.6;
-  const rel = `audio/${kind}.wav`;
+  const rel = productionRel(prefix, `audio/${kind}.wav`);
   writeSilentWav(inStory(slug, rel), durationSec);
   return { audioRel: rel, audioMediaRel: mediaRel(slug, rel), durationSec, words: timings };
 }

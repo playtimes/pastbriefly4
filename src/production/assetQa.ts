@@ -1,6 +1,7 @@
 import { respondJson, type InputImage } from "../providers/openai.ts";
 import { stillFeedbackError, type AssetQaDecision, type Story } from "../types.ts";
 import { plainDashes } from "./text.ts";
+import { isProductionMedia } from "./paths.ts";
 import type { PlannedShot } from "./visuals.ts";
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ export function assetQaTargets(kind: "long" | "short", shots: PlannedShot[]): As
         owner: owner.index,
         truth: owner.truth,
         path: owner.path!,
-        regenerable: (owner.truth === "reconstruction" || owner.truth === "graphic") && owner.path!.startsWith("images/"),
+        regenerable: (owner.truth === "reconstruction" || owner.truth === "graphic") && isProductionMedia(owner.path!, "images"),
         intent: {
           purpose: base.purpose,
           prompt: base.prompt,

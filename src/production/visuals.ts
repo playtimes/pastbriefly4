@@ -3,14 +3,14 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { config, ROOT } from "../server/config.ts";
 import type { Story, Category, VisualPreview, PreviewFrame, DirectorQaFinding, DirectorQaReport, DirectorRepairIntent } from "../types.ts";
-import { NO_LEGAL_ALTERNATIVE } from "../types.ts";
+import { NO_LEGAL_ALTERNATIVE, productionRel } from "../types.ts";
 import type { RenderPlan, Shot, Truth, Motion, Caption, Framing, Clarity } from "../render/types.ts";
 import type { StoryWorld, ResearchPackage } from "./pipelineTypes.ts";
 import type { Narration } from "./narration.ts";
 import { PRICING, MOTION_CLIP_SECONDS, round } from "../server/pricing.ts";
 import { breakStrength, words } from "./text.ts";
 import { buildCues } from "./subtitles.ts";
-import { inStory, mediaRel } from "./paths.ts";
+import { inStory, isProductionMedia, mediaRel } from "./paths.ts";
 import { writePlaceholderStill, referenceFrame } from "./mockAssets.ts";
 import { copyFileSync } from "node:fs";
 import { generateImageFile, respondJson } from "../providers/openai.ts";
@@ -2878,7 +2878,7 @@ export function seedArchiveLedger(story: Story, films: Array<["long" | "short", 
   const ledger: ArchiveLedger = new Map();
   for (const [kind, shots] of films) {
     for (const shot of shots) {
-      if (shot.edit !== "new" || shot.truth !== "archive" || !shot.path?.startsWith("archive/")) continue;
+      if (shot.edit !== "new" || shot.truth !== "archive" || !shot.path || !isProductionMedia(shot.path, "archive")) continue;
       const abs = inStory(story.slug, shot.path);
       if (!existsSync(abs)) continue;
       const hash = createHash("sha256").update(readFileSync(abs)).digest("hex");
@@ -2912,14 +2912,14 @@ Preserve everything the correction does not affect. Do not treat this note as pe
 
 // One owner asset's archive search: every query of archiveQueries, specific to
 // broad, stopping at the first file fetchArchive accepts (which writes it to
-// archive/<film>-<owner slot>.jpg). Every candidate, whichever query found it,
+// archive/<film>-<owner slot>.jpg inside the job's media prefix). Every candidate, whichever query found it,
 // must also match this shot's own anchors and must not be bytes another asset
 // already owns. Nothing is generated and the shot is not changed. Live, the
 // accepted file is also retained with its provenance (archiveRetention.ts); that
 // never changes the result, and `sha256` is its retained identity.
-async function searchArchive(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string): Promise<{ path: string; credit: string; sha256: string } | null> {
+async function searchArchive(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string, prefix = ""): Promise<{ path: string; credit: string; sha256: string } | null> {
   if (!shot.archiveQuery) return null;
-  const archiveRel = `archive/${kind}-${String(shot.index).padStart(2, "0")}.jpg`;
+  const archiveRel = productionRel(prefix, `archive/${kind}-${String(shot.index).padStart(2, "0")}.jpg`);
   const dest = inStory(story.slug, archiveRel);
   const relevance = relevanceTerms(story);
   const owner = archiveOwner(kind, shot);
@@ -2945,15 +2945,17 @@ async function searchArchive(story: Story, kind: "long" | "short", shot: Planned
 // was planned as archive and fell back to a reconstruction (archiveQuery kept).
 // Live only. It never generates or changes anything but the archive file it
 // writes: the caller reviews that file and decides whether to bind it.
-export async function recoverArchiveStill(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string): Promise<{ path: string; credit: string; sha256: string } | null> {
+export async function recoverArchiveStill(story: Story, kind: "long" | "short", shot: PlannedShot, ledger: ArchiveLedger, jobId?: string, prefix = ""): Promise<{ path: string; credit: string; sha256: string } | null> {
   if (config.mode !== "live" || shot.edit !== "new") return null;
-  return searchArchive(story, kind, shot, ledger, jobId);
+  return searchArchive(story, kind, shot, ledger, jobId, prefix);
 }
 
 // A first acquisition names the still after the owner slot. A regeneration passes
 // `stillPath`, the asset's existing stored still: the file is the asset's
 // identity, so it is replaced in place even after a sequence revision moved
-// ownership to a slot whose own number may name another asset's file.
+// ownership to a slot whose own number may name another asset's file. A first
+// acquisition's files go inside the job's media prefix (productionMediaPrefix),
+// so a Long-first job never finds, reuses or overwrites another production's.
 export async function acquireStill(
   story: Story,
   kind: "long" | "short",
@@ -2963,16 +2965,17 @@ export async function acquireStill(
   directorNote?: string,
   stillPath?: string,
   jobId?: string, // recorded with any retained archive (provenance only)
+  prefix = "", // the job's media prefix: "" for a legacy job's story-root files
 ): Promise<StillResult> {
   // A reuse shows its asset owner's still (resolveReuse); it never acquires media.
   if (shot.edit === "reuse") throw new Error(`${kind} slot ${shot.index} reuses asset ${shot.assetId} and never acquires its own still.`);
-  const rel = stillPath ?? `images/${kind}-${String(shot.index).padStart(2, "0")}.png`;
+  const rel = stillPath ?? productionRel(prefix, `images/${kind}-${String(shot.index).padStart(2, "0")}.png`);
   const abs = inStory(story.slug, rel);
   const size = kind === "short" ? { w: 1080, h: 1920, oa: "1024x1536" } : { w: 1920, h: 1080, oa: "1536x1024" };
 
   if (shot.truth === "archive") {
     if (config.mode === "live" && shot.archiveQuery) {
-      const got = await searchArchive(story, kind, shot, ledger, jobId);
+      const got = await searchArchive(story, kind, shot, ledger, jobId, prefix);
       if (got) {
         shot.path = got.path;
         shot.mediaType = "image";
@@ -3038,9 +3041,10 @@ export function masterPrompt(story: Story, world: StoryWorld): string {
   );
 }
 
-// Generate the master/hero reconstruction used as a continuity reference (live).
-export async function ensureMaster(story: Story, world: StoryWorld): Promise<string> {
-  const rel = "images/hero.png";
+// Generate the master/hero reconstruction used as a continuity reference (live),
+// as images/hero.png inside the job's media prefix.
+export async function ensureMaster(story: Story, world: StoryWorld, prefix = ""): Promise<string> {
+  const rel = productionRel(prefix, "images/hero.png");
   const abs = inStory(story.slug, rel);
   if (config.mode === "live") {
     await generateImageFile({ prompt: masterPrompt(story, world), size: "1536x1024", outPath: abs, referencePaths: masterReferencePaths() });
@@ -3073,10 +3077,10 @@ export function motionPrompt(shot: Pick<PlannedShot, "purpose" | "motion">): str
 
 // Live only: turn a still into motion (after the visual preview is approved).
 // The local still is sent to Runway directly; no public asset URL is involved.
-export async function acquireMotion(story: Story, kind: "long" | "short", shot: PlannedShot): Promise<void> {
+export async function acquireMotion(story: Story, kind: "long" | "short", shot: PlannedShot, prefix = ""): Promise<void> {
   if (shot.edit === "reuse") throw new Error(`${kind} slot ${shot.index} reuses asset ${shot.assetId}; only the asset's owning slot gets motion.`);
   if (config.mode !== "live" || !shot.path) return; // mock keeps the transform motion
-  const rel = `motion/${kind}-${String(shot.index).padStart(2, "0")}.mp4`;
+  const rel = productionRel(prefix, `motion/${kind}-${String(shot.index).padStart(2, "0")}.mp4`);
   await generateMotion({ prompt: motionPrompt(shot), imagePath: inStory(story.slug, shot.path), kind, outPath: inStory(story.slug, rel) });
   shot.motionPath = rel;
   shot.mediaType = "video";

@@ -102,6 +102,22 @@ export interface Job {
 
 export type JobFlow = "long-first";
 
+// A Long-first job's media live in their own workspace inside the story folder,
+// jobs/<jobId>/, so producing a story again can never overwrite or delete an
+// earlier production's files. A pair-first job keeps the story-root paths it has
+// always used: an empty prefix. Decided by the flow alone, never by a path's shape.
+export function productionMediaPrefix(jobId: string, longFirst: boolean): string {
+  if (!longFirst) return "";
+  if (!/^[A-Za-z0-9_-]+$/.test(jobId)) throw new Error(`Job id ${JSON.stringify(jobId)} cannot name a media folder.`);
+  return `jobs/${jobId}`;
+}
+
+// A story-folder-relative production path ("images/hero.png") inside a job's
+// media prefix: "jobs/<jobId>/images/hero.png", or unchanged for a legacy job.
+export function productionRel(prefix: string, rel: string): string {
+  return prefix ? `${prefix}/${rel}` : rel;
+}
+
 // ---- Final-film QC (the finished-film gate) ----
 // Only the concrete publishing concern reaches the browser: which film, fact or
 // visual, why, and for a fact the short narration fragment it is about. The

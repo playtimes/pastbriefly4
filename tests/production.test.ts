@@ -815,6 +815,10 @@ describe("Films need you", () => {
     expect(html).not.toContain("long-fact");
     expect(html).not.toContain("long-visual");
     expect(finalRenderUrl("bat-bomb", "short")).toBe("/media/stories/bat-bomb/renders/short.mp4");
+    // A Long-first job's finished Long is in its own media workspace.
+    expect(finalRenderUrl("bat-bomb", "long", "jobs/abc")).toBe("/media/stories/bat-bomb/jobs/abc/renders/long.mp4");
+    const scoped = renderToStaticMarkup(React.createElement(FinalFilmReview, { slug: "bat-bomb", media: "jobs/abc", film: "long", issues: [], onFilm: () => {}, onBack: () => {}, onContinue: () => {}, continuing: false }));
+    expect(scoped).toContain('src="/media/stories/bat-bomb/jobs/abc/renders/long.mp4"');
   });
 
   test("with concerns on both films the review switches between them; with one film it does not offer a switch", () => {

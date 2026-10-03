@@ -9,7 +9,7 @@ import { visualIssues, type VisualIssue } from "../visualReview/visualIssues.ts"
 import { VisualIssuePanel } from "../visualReview/IssueView.tsx";
 import type { RegenDraft } from "../visualReview/Inspector.tsx";
 import { FinalException, FinalFilmReview, ProductionProgress, ReadyPanel, SECTION_LABEL, SECTION_TAB, TextException, TextMore, VisualException, VisualMore } from "./Production.tsx";
-import { directorFeedbackError, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection, type VideoKind } from "../../types.ts";
+import { directorFeedbackError, productionMediaPrefix, type Job, type PreviewFrame, type SequenceRevisionReport, type StoryReview, type TextQaIssue, type TextQaSection, type VideoKind } from "../../types.ts";
 
 // The Production screen for one story's current job. Its faces follow the job:
 // Running, Text needs you, Visuals need you, Films need you, Failed and Ready.
@@ -251,7 +251,7 @@ export function Creating({ slug }: { slug: string }): React.ReactElement {
   // accepts both films.
   if (face === "final") {
     const issues = job.finalQa?.issues ?? [];
-    if (finalView) return <FinalFilmReview slug={slug} film={finalView} issues={issues} onFilm={setFinalView} onBack={() => setFinalView(null)} onContinue={acceptFinal} continuing={acceptingFinal} />;
+    if (finalView) return <FinalFilmReview slug={slug} media={productionMediaPrefix(job.id, job.flow === "long-first")} film={finalView} issues={issues} onFilm={setFinalView} onBack={() => setFinalView(null)} onContinue={acceptFinal} continuing={acceptingFinal} />;
     return <FinalException storyTitle={storyTitle} issues={issues} onReview={setFinalView} onContinue={acceptFinal} continuing={acceptingFinal} />;
   }
 
